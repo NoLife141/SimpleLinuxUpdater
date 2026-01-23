@@ -1,0 +1,16 @@
+# runtime data
+data/
+*.db
+*.sqlite
+*.sqlite3
+config.json
+servers.json
+
+# env
+.env
+.env.*
+
+# keys/certs
+*.key
+*.pem
+id_rsa*

@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debian Updater - Manage Servers</title>
+    <style>
+        :root {
+            --bg: #0e151b;
+            --bg-soft: #131c24;
+            --card: #16212b;
+            --card-2: #0f1820;
+            --text: #f2f5f7;
+            --muted: #b8c2cc;
+            --accent: #38bdf8;
+            --accent-2: #22d3ee;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: "Bahnschrift", "Segoe UI Variable", "Segoe UI", sans-serif;
+            color: var(--text);
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(800px 400px at 10% 0%, rgba(56, 189, 248, 0.18), transparent 60%),
+                radial-gradient(700px 500px at 90% 10%, rgba(34, 211, 238, 0.18), transparent 60%),
+                linear-gradient(160deg, #0b1116 0%, #0e151b 60%, #0b141c 100%);
+        }
+
+        .page {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 36px 20px 64px;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(34, 211, 238, 0.05));
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 28px 28px 24px;
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            margin-bottom: 28px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::after {
+            content: "";
+            position: absolute;
+            right: -120px;
+            top: -160px;
+            width: 280px;
+            height: 280px;
+            border-radius: 50%;
+            background: radial-gradient(circle at center, rgba(56, 189, 248, 0.35), transparent 70%);
+            filter: blur(1px);
+        }
+
+        h1, h2 {
+            margin: 0 0 12px;
+            letter-spacing: 0.4px;
+        }
+
+        h1 {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        h2 {
+            font-size: 20px;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .subtle {
+            color: var(--muted);
+            font-size: 14px;
+            margin: 0 0 16px;
+        }
+
+        .card {
+            background: linear-gradient(180deg, rgba(22, 33, 43, 0.95), rgba(15, 24, 32, 0.95));
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: var(--shadow);
+        }
+
+        form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .add-server-form {
+            max-width: 900px;
+            grid-template-columns: repeat(4, minmax(180px, 1fr));
+        }
+
+        .form-note {
+            grid-column: 1 / -1;
+        }
+
+        .form-actions {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(4, minmax(180px, 1fr));
+            gap: 10px;
+            margin-top: 6px;
+            align-items: center;
+        }
+
+        .form-actions .action-left {
+            grid-column: 1 / 2;
+        }
+
+        .form-actions .action-right {
+            grid-column: 4 / 5;
+        }
+
+        .form-actions button,
+        .form-actions .file-btn {
+            width: 100%;
+        }
+
+        input {
+            background: rgba(8, 13, 18, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 10px 12px;
+            border-radius: 10px;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .add-server-form input,
+        .add-server-form .file-btn,
+        .add-server-form button {
+            width: 100%;
+        }
+
+        .file-input {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            border: 0;
+        }
+
+        .file-btn {
+            background: linear-gradient(135deg, #38bdf8, #22d3ee);
+            border: none;
+            color: #051019;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .file-btn:hover { transform: translateY(-1px); }
+
+        input:focus {
+            border-color: rgba(56, 189, 248, 0.8);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+        }
+
+        button {
+            background: linear-gradient(135deg, #38bdf8, #22d3ee);
+            border: none;
+            color: #051019;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
+        }
+
+        button:hover { transform: translateY(-1px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-ghost,
+        .btn-link {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            color: var(--text);
+            box-shadow: none;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f87171, #fb7185);
+            color: #1a0a0a;
+            box-shadow: 0 12px 24px rgba(248, 113, 113, 0.25);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #34d399, #22c55e);
+            color: #061a12;
+            box-shadow: 0 12px 24px rgba(34, 197, 94, 0.25);
+        }
+
+        .nav {
+            margin-top: 14px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+        }
+
+        .key-actions {
+            margin-bottom: 18px;
+        }
+
+        .section-sep {
+            border: none;
+            border-top: 1px solid rgba(255, 255, 255, 0.12);
+            margin: 18px 0;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 12px 0;
+        }
+
+        .controls input,
+        .controls select {
+            min-width: 160px;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .table-wrap { overflow-x: auto; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 520px;
+        }
+
+        th, td {
+            padding: 12px 10px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            border-right: 1px solid rgba(255, 255, 255, 0.08);
+            vertical-align: top;
+        }
+
+        th:last-child,
+        td:last-child {
+            border-right: none;
+        }
+
+        th {
+            font-size: 13px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        th.sortable::after {
+            content: " ⇅";
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        .actions-col {
+            width: 180px;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 12px;
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text);
+            margin-right: 6px;
+        }
+
+        .pill-success {
+            color: #062016;
+            background: rgba(52, 211, 153, 0.9);
+        }
+
+        .pill-muted {
+            color: var(--muted);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .group-row td {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        tr {
+            transition: background 0.2s ease;
+        }
+
+        tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        td button { display: block; margin: 6px 0; width: 100%; }
+
+        .inline-btn {
+            width: auto;
+            display: inline-flex;
+        }
+
+        .key-section {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px dashed rgba(255, 255, 255, 0.18);
+        }
+
+        .key-section .file-btn {
+            width: 100%;
+            display: block;
+        }
+
+        #edit-modal .key-section .file-btn,
+        .key-section .file-btn.small {
+            width: auto !important;
+            display: inline-flex;
+            align-self: flex-start;
+        }
+
+        .fade-in {
+            animation: fadeIn 0.7s ease forwards;
+            opacity: 0;
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(6, 10, 14, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-backdrop.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--card);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 14px;
+            padding: 18px;
+            width: min(520px, 92vw);
+            box-shadow: var(--shadow);
+        }
+
+        .modal h3 {
+            margin: 0 0 10px;
+        }
+
+        .field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .field label {
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .modal-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+        }
+
+        .modal-grid .full-width {
+            grid-column: 1 / -1;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 12px;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; transform: translateY(0); }
+            from { opacity: 0; transform: translateY(8px); }
+        }
+
+        @media (max-width: 720px) {
+            .hero { padding: 22px; }
+            h1 { font-size: 26px; }
+            table { min-width: 460px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <header class="hero fade-in">
+            <h1>Manage Servers</h1>
+            <p class="subtle">Add, edit, and remove servers used by the updater.</p>
+            <div class="nav">
+                <a class="btn-link" href="/">View Status</a>
+            </div>
+        </header>
+
+        <section class="card fade-in">
+            <h2>Server Management</h2>
+            <p class="subtle">Upload a global SSH key to use for all servers without a per-server key.</p>
+            <div class="nav key-actions">
+                <input class="file-input" type="file" id="global-key-file" accept=".pem,.key,.rsa,.ed25519">
+                <label class="file-btn" for="global-key-file">Click to upload key</label>
+                <button class="btn-success" onclick="uploadGlobalKey()">Upload Global Key</button>
+                <button class="btn-danger" onclick="clearGlobalKey()">Clear Global Key</button>
+            </div>
+            <div id="global-key-status" class="subtle"></div>
+            <hr class="section-sep">
+            <form id="add-server-form" class="add-server-form">
+                <span class="subtle form-note">Auth is password or SSH key (key takes priority). Leave one empty.</span>
+                <input type="text" id="name" placeholder="Name" required>
+                <input type="text" id="host" placeholder="Host" required>
+                <input type="number" id="port" placeholder="SSH Port" min="1" max="65535">
+                <input type="text" id="user" placeholder="User" required>
+                <input type="password" id="pass" placeholder="Password (optional)">
+                <input type="text" id="tags" placeholder="Tags (comma separated)">
+                <div class="form-actions">
+                    <button class="btn-success action-left" type="submit">Add Server</button>
+                    <div class="action-right">
+                        <input class="file-input" type="file" id="key_file" accept=".pem,.key,.rsa,.ed25519">
+                        <label class="file-btn" for="key_file">Click to upload key</label>
+                    </div>
+                </div>
+            </form>
+
+            <div class="controls">
+                <input type="text" id="search" placeholder="Search name/host/user/tags">
+                <input type="text" id="tag-filter" placeholder="Filter tag">
+                <select id="auth-filter">
+                    <option value="">All auth</option>
+                    <option value="password">Has password</option>
+                    <option value="key">Has key</option>
+                </select>
+                <select id="group-by">
+                    <option value="">No grouping</option>
+                    <option value="tag">Group by tag</option>
+                    <option value="auth">Group by auth</option>
+                </select>
+                <select id="page-size">
+                    <option value="25">25 per page</option>
+                    <option value="50">50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
+            </div>
+
+            <div class="table-wrap">
+                <table id="manage-servers-table">
+                    <thead>
+                        <tr>
+                            <th class="sortable" data-sort-key="name">Name</th>
+                            <th class="sortable" data-sort-key="host">Host</th>
+                            <th class="sortable" data-sort-key="user">User</th>
+                            <th class="sortable" data-sort-key="tags">Tags</th>
+                            <th>Auth</th>
+                            <th class="actions-col">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="pagination">
+                <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
+                <span id="page-info" class="subtle"></span>
+                <button class="btn-ghost inline-btn" id="next-page">Next</button>
+            </div>
+        </section>
+    </div>
+
+    <div class="modal-backdrop" id="edit-modal">
+        <div class="modal">
+            <h3>Edit Server</h3>
+            <div class="modal-grid">
+                <div class="field">
+                    <label for="edit-name">Name</label>
+                    <input type="text" id="edit-name" placeholder="Name" required>
+                </div>
+                <div class="field">
+                    <label for="edit-host">Host</label>
+                    <input type="text" id="edit-host" placeholder="Host" required>
+                </div>
+                <div class="field">
+                    <label for="edit-port">SSH Port</label>
+                    <input type="number" id="edit-port" placeholder="SSH Port" min="1" max="65535">
+                </div>
+                <div class="field">
+                    <label for="edit-user">User</label>
+                    <input type="text" id="edit-user" placeholder="User" required>
+                </div>
+                <div class="field">
+                    <label for="edit-tags">Tags</label>
+                    <input type="text" id="edit-tags" placeholder="Tags (comma separated)">
+                </div>
+                <div class="field">
+                    <label for="edit-pass">Password</label>
+                    <input type="password" id="edit-pass" placeholder="New password">
+                </div>
+                <div class="field">
+                    <label>&nbsp;</label>
+                    <button class="btn-danger" id="edit-clear-password">Clear Password</button>
+                </div>
+                <div class="key-section full-width">
+                    <div class="subtle">SSH key management</div>
+                    <input class="file-input" type="file" id="edit-key" accept=".pem,.key,.rsa,.ed25519">
+                    <label class="file-btn small" for="edit-key">Click to upload key</label>
+                    <button class="btn-success" id="edit-upload-key">Upload Key</button>
+                    <button class="btn-danger" id="edit-clear-key">Clear Key</button>
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-ghost inline-btn" id="edit-cancel">Cancel</button>
+                <button class="btn-success inline-btn" id="edit-save">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let serverCache = {};
+        let sortKey = "name";
+        let sortDir = "asc";
+        let manageServers = [];
+        let page = 1;
+        let editingServerName = null;
+
+        function saveWindowScroll() {
+            return { x: window.scrollX, y: window.scrollY };
+        }
+
+        function restoreWindowScroll(pos) {
+            if (!pos) return;
+            window.scrollTo(pos.x, pos.y);
+        }
+
+        async function fetchManageServers() {
+            const pageScroll = saveWindowScroll();
+            const response = await fetch('/api/servers');
+            manageServers = await response.json();
+            const tbody = document.querySelector('#manage-servers-table tbody');
+            tbody.innerHTML = '';
+            renderTable();
+            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+        }
+
+        function sortServers(servers) {
+            const dir = sortDir === "asc" ? 1 : -1;
+            return servers.slice().sort((a, b) => {
+                const aVal = (sortKey === "tags" ? (a.tags || []).join(",") : (a[sortKey] || "")).toString().toLowerCase();
+                const bVal = (sortKey === "tags" ? (b.tags || []).join(",") : (b[sortKey] || "")).toString().toLowerCase();
+                if (aVal < bVal) return -1 * dir;
+                if (aVal > bVal) return 1 * dir;
+                return 0;
+            });
+        }
+
+        function applyFilters(servers) {
+            const search = document.getElementById('search').value.trim().toLowerCase();
+            const tagFilter = document.getElementById('tag-filter').value.trim().toLowerCase();
+            const authFilter = document.getElementById('auth-filter').value;
+            return servers.filter(server => {
+                if (authFilter === "password" && !server.has_password) return false;
+                if (authFilter === "key" && !server.has_key) return false;
+                if (tagFilter) {
+                    const tags = (server.tags || []).join(" ").toLowerCase();
+                    if (!tags.includes(tagFilter)) return false;
+                }
+                if (!search) return true;
+                const haystack = [
+                    server.name,
+                    server.host,
+                    server.user,
+                    (server.tags || []).join(" ")
+                ].join(" ").toLowerCase();
+                return haystack.includes(search);
+            });
+        }
+
+        function paginate(servers) {
+            const size = parseInt(document.getElementById('page-size').value, 10);
+            const totalPages = Math.max(1, Math.ceil(servers.length / size));
+            page = Math.min(page, totalPages);
+            const start = (page - 1) * size;
+            const end = start + size;
+            document.getElementById('page-info').textContent = `Page ${page} of ${totalPages} (${servers.length} hosts)`;
+            return servers.slice(start, end);
+        }
+
+        function groupServers(servers) {
+            const groupBy = document.getElementById('group-by').value;
+            if (!groupBy) return [{ key: "", items: servers }];
+            const groups = new Map();
+            if (groupBy === "tag") {
+                servers.forEach(server => {
+                    const tags = server.tags && server.tags.length ? server.tags : ["untagged"];
+                    tags.forEach(tag => {
+                        if (!groups.has(tag)) groups.set(tag, []);
+                        groups.get(tag).push(server);
+                    });
+                });
+            } else if (groupBy === "auth") {
+                servers.forEach(server => {
+                    const key = server.has_key ? "key" : "no key";
+                    const pw = server.has_password ? "password" : "no password";
+                    const group = `${key} / ${pw}`;
+                    if (!groups.has(group)) groups.set(group, []);
+                    groups.get(group).push(server);
+                });
+            }
+            return Array.from(groups.entries()).map(([key, items]) => ({ key, items }));
+        }
+
+        function renderTable() {
+            const tbody = document.querySelector('#manage-servers-table tbody');
+            tbody.innerHTML = '';
+            serverCache = {};
+            let servers = applyFilters(manageServers);
+            servers = sortServers(servers);
+            const paged = paginate(servers);
+            const groups = groupServers(paged);
+            groups.forEach(group => {
+                if (group.key) {
+                    const groupRow = document.createElement('tr');
+                    groupRow.className = 'group-row';
+                    groupRow.innerHTML = `<td colspan="6">${group.key}</td>`;
+                    tbody.appendChild(groupRow);
+                }
+                group.items.forEach(server => {
+                    serverCache[server.name] = server;
+                    const row = document.createElement('tr');
+                    row.dataset.name = server.name;
+                    row.innerHTML = `
+                        <td>${server.name}</td>
+                        <td>${server.host}</td>
+                        <td>${server.user}</td>
+                        <td>${renderTags(server.tags)}</td>
+                        <td>${renderAuth(server)}</td>
+                        <td>
+                            <button class="btn-ghost" onclick="editServer('${server.name}')">Edit</button>
+                            <button class="btn-danger" onclick="deleteServer('${server.name}')">Delete</button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            });
+        }
+
+        document.querySelectorAll('#manage-servers-table th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const key = th.dataset.sortKey;
+                if (sortKey === key) {
+                    sortDir = sortDir === "asc" ? "desc" : "asc";
+                } else {
+                    sortKey = key;
+                    sortDir = "asc";
+                }
+                renderTable();
+            });
+        });
+
+        document.getElementById('search').addEventListener('input', () => { page = 1; renderTable(); });
+        document.getElementById('tag-filter').addEventListener('input', () => { page = 1; renderTable(); });
+        document.getElementById('auth-filter').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('group-by').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('page-size').addEventListener('change', () => { page = 1; renderTable(); });
+
+        document.getElementById('prev-page').addEventListener('click', () => {
+            page = Math.max(1, page - 1);
+            renderTable();
+        });
+        document.getElementById('next-page').addEventListener('click', () => {
+            page += 1;
+            renderTable();
+        });
+
+        function renderAuth(server) {
+            const bits = [];
+            if (server.has_password) {
+                bits.push('<span class="pill pill-success">Password</span>');
+            } else {
+                bits.push('<span class="pill pill-muted">No Password</span>');
+            }
+            if (server.has_key) {
+                bits.push('<span class="pill pill-success">Key</span>');
+            } else {
+                bits.push('<span class="pill pill-muted">No Key</span>');
+            }
+            return bits.join(' ');
+        }
+
+        function renderTags(tags) {
+            if (!tags || tags.length === 0) {
+                return '<span class="pill pill-muted">None</span>';
+            }
+            return tags.map(tag => `<span class="pill">${tag}</span>`).join(' ');
+        }
+
+        document.getElementById('add-server-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const name = document.getElementById('name').value;
+            const host = document.getElementById('host').value;
+            const portValue = document.getElementById('port').value;
+            const port = portValue ? parseInt(portValue, 10) : 0;
+            const user = document.getElementById('user').value;
+            const pass = document.getElementById('pass').value;
+            const tagsRaw = document.getElementById('tags').value;
+            const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
+            const keyFileInput = document.getElementById('key_file');
+            await fetch('/api/servers', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, host, port, user, pass, tags })
+            });
+            if (keyFileInput && keyFileInput.files && keyFileInput.files.length > 0) {
+                const form = new FormData();
+                form.append('key', keyFileInput.files[0]);
+                const res = await fetch(`/api/servers/${name}/key`, { method: 'POST', body: form });
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    alert(data.error || 'Failed to upload key.');
+                }
+            }
+            if (keyFileInput) {
+                keyFileInput.value = '';
+                updateFileLabel(keyFileInput);
+            }
+            fetchManageServers();
+            e.target.reset();
+        });
+
+        function updateFileLabel(input) {
+            const label = document.querySelector(`label[for="${input.id}"]`);
+            if (!label) return;
+            const file = input.files && input.files[0];
+            label.textContent = file ? file.name : 'Click to upload key';
+        }
+
+        document.addEventListener('change', (e) => {
+            if (e.target && e.target.classList.contains('file-input')) {
+                updateFileLabel(e.target);
+            }
+        });
+
+        async function deleteServer(name) {
+            if (confirm('Delete server?')) {
+                await fetch(`/api/servers/${name}`, { method: 'DELETE' });
+                fetchManageServers();
+            }
+        }
+
+        function editServer(name) {
+            const current = serverCache[name] || {};
+            editingServerName = name;
+            document.getElementById('edit-name').value = current.name || name;
+            document.getElementById('edit-host').value = current.host || '';
+            document.getElementById('edit-port').value = current.port || '';
+            document.getElementById('edit-user').value = current.user || '';
+            document.getElementById('edit-tags').value = (current.tags || []).join(', ');
+            document.getElementById('edit-pass').value = '';
+            const keyInput = document.getElementById('edit-key');
+            if (keyInput) {
+                keyInput.value = '';
+                updateFileLabel(keyInput);
+            }
+            document.getElementById('edit-modal').classList.add('active');
+        }
+
+        function closeEditModal() {
+            document.getElementById('edit-modal').classList.remove('active');
+            editingServerName = null;
+        }
+
+        async function saveServerEdit() {
+            if (!editingServerName) return;
+            const newName = document.getElementById('edit-name').value.trim();
+            const newHost = document.getElementById('edit-host').value.trim();
+            const portValue = document.getElementById('edit-port').value;
+            const newPort = portValue ? parseInt(portValue, 10) : 0;
+            const newUser = document.getElementById('edit-user').value.trim();
+            const tagsRaw = document.getElementById('edit-tags').value;
+            const tags = tagsRaw.split(',').map(t => t.trim()).filter(Boolean);
+            const newPass = document.getElementById('edit-pass').value;
+            if (newName && newHost && newUser) {
+                await fetch(`/api/servers/${editingServerName}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: newName, host: newHost, port: newPort, user: newUser, pass: newPass, tags })
+                });
+                closeEditModal();
+                fetchManageServers();
+            }
+        }
+
+        async function uploadServerKey(name) {
+            const input = document.getElementById('edit-key');
+            if (!input || !input.files || input.files.length === 0) {
+                alert('Select a private key file to upload.');
+                return;
+            }
+            const form = new FormData();
+            form.append('key', input.files[0]);
+            const res = await fetch(`/api/servers/${name}/key`, { method: 'POST', body: form });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'Failed to upload key.');
+                return;
+            }
+            input.value = '';
+            updateFileLabel(input);
+            fetchManageServers();
+        }
+
+        async function clearServerKey(name) {
+            const res = await fetch(`/api/servers/${name}/key`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'Failed to clear key.');
+                return;
+            }
+            fetchManageServers();
+        }
+
+        async function clearServerPassword(name) {
+            const res = await fetch(`/api/servers/${name}/password`, { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'Failed to clear password.');
+                return;
+            }
+            fetchManageServers();
+        }
+
+        document.getElementById('edit-cancel').addEventListener('click', closeEditModal);
+        document.getElementById('edit-save').addEventListener('click', saveServerEdit);
+        document.getElementById('edit-upload-key').addEventListener('click', () => {
+            if (editingServerName) {
+                uploadServerKey(editingServerName);
+            }
+        });
+        document.getElementById('edit-clear-key').addEventListener('click', () => {
+            if (editingServerName) {
+                clearServerKey(editingServerName);
+            }
+        });
+        document.getElementById('edit-clear-password').addEventListener('click', () => {
+            if (editingServerName) {
+                clearServerPassword(editingServerName);
+            }
+        });
+
+        async function uploadGlobalKey() {
+            const input = document.getElementById('global-key-file');
+            if (!input || !input.files || input.files.length === 0) {
+                alert('Select a private key file to upload.');
+                return;
+            }
+            const form = new FormData();
+            form.append('key', input.files[0]);
+            const res = await fetch('/api/keys/global', { method: 'POST', body: form });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'Failed to upload global key.');
+                return;
+            }
+            alert('Global key saved.');
+            input.value = '';
+            updateFileLabel(input);
+            fetchGlobalKeyStatus();
+        }
+
+        async function clearGlobalKey() {
+            const res = await fetch('/api/keys/global', { method: 'DELETE' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                alert(data.error || 'Failed to clear global key.');
+                return;
+            }
+            alert('Global key cleared.');
+            fetchGlobalKeyStatus();
+        }
+
+        async function fetchGlobalKeyStatus() {
+            const status = document.getElementById('global-key-status');
+            if (!status) return;
+            const res = await fetch('/api/keys/global');
+            if (!res.ok) {
+                status.textContent = 'Global key status: unknown';
+                return;
+            }
+            const data = await res.json();
+            status.textContent = data.has_key ? 'Global key: saved' : 'Global key: not set';
+        }
+
+        fetchManageServers();
+        fetchGlobalKeyStatus();
+    </script>
+</body>
+</html>

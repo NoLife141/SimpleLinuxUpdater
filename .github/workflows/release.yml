@@ -1,0 +1,27 @@
+name: Release Gate
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Verify version strings
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Tag: $TAG"
+          grep -q "Version: $TAG" README.md
+          grep -q "Version $TAG" templates/index.html

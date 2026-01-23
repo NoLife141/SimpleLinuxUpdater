@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debian Updater Dashboard</title>
+    <style>
+        :root {
+            --bg: #0e151b;
+            --bg-soft: #131c24;
+            --card: #16212b;
+            --card-2: #0f1820;
+            --text: #f2f5f7;
+            --muted: #b8c2cc;
+            --accent: #38bdf8;
+            --accent-2: #22d3ee;
+            --success: #34d399;
+            --warning: #fbbf24;
+            --danger: #f87171;
+            --shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            font-family: "Bahnschrift", "Segoe UI Variable", "Segoe UI", sans-serif;
+            color: var(--text);
+            margin: 0;
+            min-height: 100vh;
+            background:
+                radial-gradient(800px 400px at 10% 0%, rgba(56, 189, 248, 0.18), transparent 60%),
+                radial-gradient(700px 500px at 90% 10%, rgba(34, 211, 238, 0.18), transparent 60%),
+                linear-gradient(160deg, #0b1116 0%, #0e151b 60%, #0b141c 100%);
+        }
+
+        .page {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 36px 20px 64px;
+        }
+
+        .hero {
+            background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(34, 211, 238, 0.05));
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 28px 28px 24px;
+            border-radius: 18px;
+            box-shadow: var(--shadow);
+            margin-bottom: 28px;
+            position: relative;
+            overflow: hidden;
+            padding-left: 300px;
+            min-height: 260px;
+        }
+
+        .hero::after {
+            content: "";
+            position: absolute;
+            right: -120px;
+            top: -160px;
+            width: 280px;
+            height: 280px;
+            border-radius: 50%;
+            background: radial-gradient(circle at center, rgba(56, 189, 248, 0.35), transparent 70%);
+            filter: blur(1px);
+        }
+
+        .hero-logo {
+            width: 240px;
+            height: 240px;
+            object-fit: contain;
+            position: absolute;
+            left: 18px;
+            top: 18px;
+            pointer-events: none;
+        }
+
+        .version-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--muted);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        h1, h2 {
+            margin: 0 0 12px;
+            letter-spacing: 0.4px;
+        }
+
+        h1 {
+            font-size: 32px;
+            font-weight: 700;
+        }
+
+        h2 {
+            font-size: 20px;
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .card {
+            background: linear-gradient(180deg, rgba(22, 33, 43, 0.95), rgba(15, 24, 32, 0.95));
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 20px;
+            box-shadow: var(--shadow);
+        }
+
+        .card + .card { margin-top: 20px; }
+
+        .subtle {
+            color: var(--muted);
+            font-size: 14px;
+            margin: 0 0 16px;
+        }
+
+        form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        input {
+            background: rgba(8, 13, 18, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text);
+            padding: 10px 12px;
+            border-radius: 10px;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        input:focus {
+            border-color: rgba(56, 189, 248, 0.8);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+        }
+
+        button {
+            background: linear-gradient(135deg, #38bdf8, #22d3ee);
+            border: none;
+            color: #051019;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
+        }
+
+        button:hover { transform: translateY(-1px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .btn-ghost,
+        .btn-link {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            color: var(--text);
+            box-shadow: none;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #f87171, #fb7185);
+            color: #1a0a0a;
+            box-shadow: 0 12px 24px rgba(248, 113, 113, 0.25);
+        }
+
+        .nav {
+            margin-top: 14px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .controls input,
+        .controls select {
+            min-width: 160px;
+        }
+
+        .controls .spacer {
+            flex: 1 1 auto;
+        }
+
+        .bulk-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .pagination {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
+        .group-row td {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .logs-collapsed {
+            display: none;
+        }
+
+        .table-wrap { overflow-x: auto; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 520px;
+        }
+
+        th, td {
+            padding: 12px 10px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        th {
+            font-size: 13px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        th.sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+
+        th.sortable::after {
+            content: " ⇅";
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+
+        tr {
+            transition: background 0.2s ease;
+        }
+
+        tr:hover {
+            background: rgba(255, 255, 255, 0.03);
+        }
+
+        .row-hover {
+            background: rgba(255, 255, 255, 0.03) !important;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: capitalize;
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .status-idle { color: var(--success); }
+        .status-updating { color: var(--warning); }
+        .status-upgrading { color: var(--warning); }
+        .status-pending_approval { color: var(--accent); }
+        .status-approved { color: var(--accent-2); }
+        .status-done { color: var(--accent); }
+        .status-autoremove { color: var(--warning); }
+        .status-sudoers { color: var(--accent-2); }
+        .status-error { color: var(--danger); }
+        .status-cancelled { color: var(--danger); }
+
+        .logs {
+            background: rgba(8, 12, 16, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px;
+            white-space: pre-wrap;
+            min-height: 240px;
+            max-height: 360px;
+            overflow-y: auto;
+            font-family: "Cascadia Mono", "Consolas", monospace;
+            font-size: 12px;
+            color: #d6dee6;
+        }
+
+        .logs-col { width: 60%; min-width: 520px; }
+        .actions-col { width: 140px; }
+
+        td button { display: block; margin: 6px 0; width: 100%; }
+        td .inline-btn { width: auto; display: inline-flex; }
+
+        .action-row {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(120px, 1fr));
+            gap: 6px;
+        }
+
+        .action-row button {
+            margin: 0;
+        }
+
+        .fade-in {
+            animation: fadeIn 0.7s ease forwards;
+            opacity: 0;
+        }
+
+        .modal-backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(6, 10, 14, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .modal-backdrop.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--card);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 14px;
+            padding: 18px;
+            width: min(420px, 92vw);
+            box-shadow: var(--shadow);
+        }
+
+        .modal h3 {
+            margin: 0 0 10px;
+        }
+
+        .modal-actions {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 12px;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; transform: translateY(0); }
+            from { opacity: 0; transform: translateY(8px); }
+        }
+
+        @media (max-width: 720px) {
+            .hero { padding: 22px; }
+            h1 { font-size: 26px; }
+            table { min-width: 460px; }
+            .hero { padding-left: 22px; }
+            .hero-logo { position: static; width: 220px; height: 220px; margin-bottom: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <header class="hero fade-in">
+            <img class="hero-logo" src="/static/logo.png" alt="Linux updates logo">
+            <h1>Automate Linux Server Updates</h1>
+            <div class="version-pill">Version v0.1.0</div>
+            <div class="nav">
+                <a class="btn-link" href="/manage">Manage Servers</a>
+            </div>
+        </header>
+
+        <section class="card fade-in">
+            <h2>Server Status</h2>
+            <div class="controls">
+                <input type="text" id="search" placeholder="Search name/host/user/tags">
+                <select id="status-filter">
+                    <option value="">All statuses</option>
+                    <option value="idle">Idle</option>
+                    <option value="updating">Updating</option>
+                    <option value="pending_approval">Pending approval</option>
+                    <option value="upgrading">Upgrading</option>
+                    <option value="autoremove">Autoremove</option>
+                    <option value="done">Done</option>
+                    <option value="error">Error</option>
+                </select>
+                <select id="auth-filter">
+                    <option value="">All auth</option>
+                    <option value="password">Has password</option>
+                    <option value="key">Has key</option>
+                </select>
+                <select id="group-by">
+                    <option value="">No grouping</option>
+                    <option value="status">Group by status</option>
+                    <option value="tag">Group by tag</option>
+                </select>
+                <select id="page-size">
+                    <option value="25">25 per page</option>
+                    <option value="50">50 per page</option>
+                    <option value="100">100 per page</option>
+                </select>
+                <div class="spacer"></div>
+                <button class="btn-ghost inline-btn" id="toggle-all-logs">Toggle logs</button>
+            </div>
+            <div class="bulk-actions">
+                <label><input type="checkbox" id="select-all"> Select page</label>
+                <button class="inline-btn" id="bulk-update">Bulk update</button>
+                <button class="inline-btn" id="bulk-approve">Bulk approve</button>
+                <button class="inline-btn" id="bulk-cancel">Bulk cancel</button>
+                <button class="inline-btn" id="bulk-autoremove">Bulk apt autoremove</button>
+            </div>
+            <div class="table-wrap">
+                <table id="servers-table">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th class="sortable" data-sort-key="name">Server</th>
+                            <th class="sortable" data-sort-key="status">Status</th>
+                            <th class="actions-col">Actions</th>
+                            <th class="logs-col">Logs</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="pagination">
+                <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
+                <span id="page-info" class="subtle"></span>
+                <button class="btn-ghost inline-btn" id="next-page">Next</button>
+            </div>
+        </section>
+    </div>
+
+    <div class="modal-backdrop" id="password-modal">
+        <div class="modal">
+            <h3 id="password-modal-title">Enter sudo password</h3>
+            <p class="subtle" id="password-modal-message"></p>
+            <input type="password" id="password-modal-input" placeholder="Password">
+            <div class="modal-actions">
+                <button class="btn-ghost inline-btn" id="password-modal-cancel">Cancel</button>
+                <button class="btn-success inline-btn" id="password-modal-submit">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const scrollPositions = {};
+        let sortKey = "name";
+        let sortDir = "asc";
+        let allServers = [];
+        let page = 1;
+        let expandedLogs = new Set();
+        let selectedServers = new Set();
+        let hoveredName = null;
+        let passwordResolve = null;
+        let passwordReject = null;
+
+        function saveWindowScroll() {
+            return { x: window.scrollX, y: window.scrollY };
+        }
+
+        function restoreWindowScroll(pos) {
+            if (!pos) return;
+            window.scrollTo(pos.x, pos.y);
+        }
+
+        async function fetchServers() {
+            const pageScroll = saveWindowScroll();
+            const response = await fetch('/api/servers');
+            allServers = await response.json();
+            const tbody = document.querySelector('#servers-table tbody');
+            // Save scroll positions
+            tbody.querySelectorAll('.logs').forEach(div => {
+                const name = div.dataset.name;
+                if (name) {
+                    scrollPositions[name] = div.scrollTop;
+                }
+            });
+            renderTable();
+            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+        }
+
+        function sortServers(servers) {
+            const dir = sortDir === "asc" ? 1 : -1;
+            return servers.slice().sort((a, b) => {
+                const aVal = (a[sortKey] || "").toString().toLowerCase();
+                const bVal = (b[sortKey] || "").toString().toLowerCase();
+                if (aVal < bVal) return -1 * dir;
+                if (aVal > bVal) return 1 * dir;
+                return 0;
+            });
+        }
+
+        function applyFilters(servers) {
+            const search = document.getElementById('search').value.trim().toLowerCase();
+            const statusFilter = document.getElementById('status-filter').value;
+            const authFilter = document.getElementById('auth-filter').value;
+            return servers.filter(server => {
+                if (statusFilter && server.status !== statusFilter) return false;
+                if (authFilter === "password" && !server.has_password) return false;
+                if (authFilter === "key" && !server.has_key) return false;
+                if (!search) return true;
+                const haystack = [
+                    server.name,
+                    server.host,
+                    server.port ? server.port.toString() : "",
+                    server.user,
+                    (server.tags || []).join(" ")
+                ].join(" ").toLowerCase();
+                return haystack.includes(search);
+            });
+        }
+
+        function paginate(servers) {
+            const size = parseInt(document.getElementById('page-size').value, 10);
+            const totalPages = Math.max(1, Math.ceil(servers.length / size));
+            page = Math.min(page, totalPages);
+            const start = (page - 1) * size;
+            const end = start + size;
+            document.getElementById('page-info').textContent = `Page ${page} of ${totalPages} (${servers.length} hosts)`;
+            return servers.slice(start, end);
+        }
+
+        function groupServers(servers) {
+            const groupBy = document.getElementById('group-by').value;
+            if (!groupBy) return [{ key: "", items: servers }];
+            const groups = new Map();
+            if (groupBy === "status") {
+                servers.forEach(server => {
+                    const key = server.status || "unknown";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(server);
+                });
+            } else if (groupBy === "tag") {
+                servers.forEach(server => {
+                    const tags = server.tags && server.tags.length ? server.tags : ["untagged"];
+                    tags.forEach(tag => {
+                        if (!groups.has(tag)) groups.set(tag, []);
+                        groups.get(tag).push(server);
+                    });
+                });
+            }
+            return Array.from(groups.entries()).map(([key, items]) => ({ key, items }));
+        }
+
+        function renderTable() {
+            const tbody = document.querySelector('#servers-table tbody');
+            tbody.innerHTML = '';
+            let servers = applyFilters(allServers);
+            servers = sortServers(servers);
+            const paged = paginate(servers);
+            const groups = groupServers(paged);
+            groups.forEach(group => {
+                if (group.key) {
+                    const groupRow = document.createElement('tr');
+                    groupRow.className = 'group-row';
+                    groupRow.innerHTML = `<td colspan="5">${group.key}</td>`;
+                    tbody.appendChild(groupRow);
+                }
+                group.items.forEach(server => {
+                    const row = document.createElement('tr');
+                    row.dataset.name = server.name;
+                    if (hoveredName === server.name) {
+                        row.classList.add('row-hover');
+                    }
+                    const isExpanded = expandedLogs.has(server.name);
+                    const isBusy = server.status === 'updating' || server.status === 'upgrading' || server.status === 'autoremove' || server.status === 'sudoers';
+                    const actionButtons = server.status === 'pending_approval'
+                        ? `
+                            <button onclick="approveUpgrade('${server.name}')">Approve Upgrade</button>
+                            <button onclick="cancelUpgrade('${server.name}')">Cancel</button>
+                          `
+                        : `
+                            <button onclick="updateServer('${server.name}')" ${isBusy ? 'disabled' : ''}>Update</button>
+                            <button onclick="runAutoremove('${server.name}')" ${isBusy ? 'disabled' : ''}>apt autoremove</button>
+                            <div class="action-row">
+                                <button onclick="enablePasswordlessApt('${server.name}')" ${isBusy ? 'disabled' : ''}>Enable passwordless apt</button>
+                                <button onclick="disablePasswordlessApt('${server.name}')" ${isBusy ? 'disabled' : ''}>Disable passwordless apt</button>
+                            </div>
+                          `;
+                    row.innerHTML = `
+                        <td><input type="checkbox" class="row-select" data-name="${server.name}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
+                        <td>${server.name}</td>
+                        <td><span class="status-pill status-${server.status}">${server.status}</span></td>
+                        <td class="actions-col">${actionButtons}</td>
+                        <td class="logs-col">
+                            <button class="btn-ghost inline-btn" onclick="toggleLogs('${server.name}')">${isExpanded ? "Hide" : "Show"} logs</button>
+                            <div class="logs ${isExpanded ? "" : "logs-collapsed"}" data-name="${server.name}">${server.logs}</div>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            });
+            tbody.querySelectorAll('.logs').forEach(div => {
+                const name = div.dataset.name;
+                if (name && scrollPositions[name] !== undefined) {
+                    div.scrollTop = scrollPositions[name];
+                }
+            });
+            applyHoverClass();
+            tbody.querySelectorAll('.row-select').forEach(cb => {
+                cb.addEventListener('change', (e) => {
+                    const name = e.target.dataset.name;
+                    if (e.target.checked) {
+                        selectedServers.add(name);
+                    } else {
+                        selectedServers.delete(name);
+                    }
+                });
+            });
+            document.getElementById('select-all').checked = paged.length > 0 && paged.every(s => selectedServers.has(s.name));
+        }
+
+        function toggleLogs(name) {
+            if (expandedLogs.has(name)) {
+                expandedLogs.delete(name);
+            } else {
+                expandedLogs.add(name);
+            }
+            renderTable();
+        }
+
+        function applyHoverClass() {
+            const tbody = document.querySelector('#servers-table tbody');
+            tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('row-hover'));
+            if (!hoveredName) return;
+            const row = tbody.querySelector(`tr[data-name="${CSS.escape(hoveredName)}"]`);
+            if (row) {
+                row.classList.add('row-hover');
+            }
+        }
+
+        const tbodyHover = document.querySelector('#servers-table tbody');
+        tbodyHover.addEventListener('mouseover', (e) => {
+            const row = e.target.closest('tr[data-name]');
+            if (!row) return;
+            hoveredName = row.dataset.name || null;
+            applyHoverClass();
+        });
+        tbodyHover.addEventListener('mouseleave', () => {
+            hoveredName = null;
+            applyHoverClass();
+        });
+
+        document.querySelectorAll('#servers-table th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const key = th.dataset.sortKey;
+                if (sortKey === key) {
+                    sortDir = sortDir === "asc" ? "desc" : "asc";
+                } else {
+                    sortKey = key;
+                    sortDir = "asc";
+                }
+                renderTable();
+            });
+        });
+
+        document.getElementById('search').addEventListener('input', () => { page = 1; renderTable(); });
+        document.getElementById('status-filter').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('auth-filter').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('group-by').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('page-size').addEventListener('change', () => { page = 1; renderTable(); });
+
+        document.getElementById('prev-page').addEventListener('click', () => {
+            page = Math.max(1, page - 1);
+            renderTable();
+        });
+        document.getElementById('next-page').addEventListener('click', () => {
+            page += 1;
+            renderTable();
+        });
+
+        document.getElementById('select-all').addEventListener('change', (e) => {
+            const checked = e.target.checked;
+            const filtered = sortServers(applyFilters(allServers));
+            const paged = paginate(filtered);
+            paged.forEach(server => {
+                if (checked) {
+                    selectedServers.add(server.name);
+                } else {
+                    selectedServers.delete(server.name);
+                }
+            });
+            renderTable();
+        });
+
+        document.getElementById('toggle-all-logs').addEventListener('click', () => {
+            const filtered = sortServers(applyFilters(allServers));
+            const paged = paginate(filtered);
+            const anyCollapsed = paged.some(server => !expandedLogs.has(server.name));
+            paged.forEach(server => {
+                if (anyCollapsed) {
+                    expandedLogs.add(server.name);
+                } else {
+                    expandedLogs.delete(server.name);
+                }
+            });
+            renderTable();
+        });
+
+        document.getElementById('bulk-update').addEventListener('click', async () => {
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/update/${name}`, { method: 'POST' })));
+            fetchServers();
+        });
+        document.getElementById('bulk-approve').addEventListener('click', async () => {
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/approve/${name}`, { method: 'POST' })));
+            fetchServers();
+        });
+        document.getElementById('bulk-cancel').addEventListener('click', async () => {
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/cancel/${name}`, { method: 'POST' })));
+            fetchServers();
+        });
+        document.getElementById('bulk-autoremove').addEventListener('click', async () => {
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/autoremove/${name}`, { method: 'POST' })));
+            fetchServers();
+        });
+
+        async function updateServer(name) {
+            await fetch(`/api/update/${name}`, { method: 'POST' });
+            fetchServers();
+        }
+
+        async function runAutoremove(name) {
+            await fetch(`/api/autoremove/${name}`, { method: 'POST' });
+            fetchServers();
+        }
+
+        async function enablePasswordlessApt(name) {
+            const password = await promptPassword(`Enter sudo password for ${name}`);
+            if (!password) return;
+            await fetch(`/api/sudoers/${name}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password })
+            });
+            fetchServers();
+        }
+
+        async function disablePasswordlessApt(name) {
+            const password = await promptPassword(`Enter sudo password to disable for ${name}`);
+            if (!password) return;
+            await fetch(`/api/sudoers/disable/${name}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password })
+            });
+            fetchServers();
+        }
+
+        function promptPassword(message) {
+            const backdrop = document.getElementById('password-modal');
+            const input = document.getElementById('password-modal-input');
+            const msg = document.getElementById('password-modal-message');
+            msg.textContent = message;
+            input.value = '';
+            backdrop.classList.add('active');
+            input.focus();
+            return new Promise((resolve, reject) => {
+                passwordResolve = resolve;
+                passwordReject = reject;
+            });
+        }
+
+        function closePasswordModal() {
+            const backdrop = document.getElementById('password-modal');
+            backdrop.classList.remove('active');
+        }
+
+        document.getElementById('password-modal-cancel').addEventListener('click', () => {
+            if (passwordResolve) {
+                passwordResolve('');
+            }
+            closePasswordModal();
+        });
+
+        document.getElementById('password-modal-submit').addEventListener('click', () => {
+            const input = document.getElementById('password-modal-input');
+            if (passwordResolve) {
+                passwordResolve(input.value);
+            }
+            closePasswordModal();
+        });
+
+        document.getElementById('password-modal-input').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                document.getElementById('password-modal-submit').click();
+            }
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                document.getElementById('password-modal-cancel').click();
+            }
+        });
+
+        async function approveUpgrade(name) {
+            await fetch(`/api/approve/${name}`, { method: 'POST' });
+            fetchServers();
+        }
+
+        async function cancelUpgrade(name) {
+            await fetch(`/api/cancel/${name}`, { method: 'POST' });
+            fetchServers();
+        }
+
+        setInterval(fetchServers, 2000);
+        fetchServers();
+    </script>
+</body>
+</html>
