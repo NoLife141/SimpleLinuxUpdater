@@ -1,8 +1,12 @@
-# Debian Updater
+# SimpleLinuxUpdater
 
 Version: v0.1.0
 
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](#)
+[![CI](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml/badge.svg)](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml)
 
 ![UI demo](.github/assets/ALSU.gif)
 
@@ -175,3 +179,7 @@ This tool accepts SSH private keys via the web UI, can create `/etc/sudoers.d/ap
 - Requires sudo access for apt commands on the remote hosts
 - Assumes amd64 architecture; adjust GOARCH if needed
 - On first run, the app will import `servers.json` if present, then switch to SQLite
+
+License
+
+MIT © NoLife141
