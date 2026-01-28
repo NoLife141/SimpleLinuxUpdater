@@ -41,7 +41,7 @@ type ServerStatus struct {
 	Host        string   `json:"host"`
 	Port        int      `json:"port"`
 	User        string   `json:"user"`
-	Status      string   `json:"status"` // idle, updating, pending_approval, upgrading, done, error
+	Status      string   `json:"status"` // idle, updating, pending_approval, approved, cancelled, upgrading, autoremove, sudoers, done, error
 	Logs        string   `json:"logs"`
 	Upgradable  []string `json:"upgradable"`
 	HasPassword bool     `json:"has_password"`
@@ -1178,7 +1178,7 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
+		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
 			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 			return
 		}
@@ -1202,7 +1202,7 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
+		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
 			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 			return
 		}
@@ -1237,7 +1237,7 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
+		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
 			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 			return
 		}
@@ -1272,7 +1272,7 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
+		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
 			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 			return
 		}

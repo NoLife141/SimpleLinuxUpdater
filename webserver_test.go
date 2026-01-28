@@ -24,9 +24,24 @@ func TestNormalizePort(t *testing.T) {
 }
 
 func TestParseTagsAndJoinTags(t *testing.T) {
-	parsed := parseTags(" web, db , , api,web ")
-	joined := joinTags(parsed)
-	if joined != "web, db, api" {
-		t.Fatalf("joinTags(parseTags()) = %q, want %q", joined, "web, db, api")
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"trims and de-duplicates", " web, db , , api,web ", "web, db, api"},
+		{"empty input", "", ""},
+		{"whitespace only", "   ,   ", ""},
+		{"preserves order of first-seen tags", "api,db,api,web,db", "api, db, web"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed := parseTags(tt.raw)
+			joined := joinTags(parsed)
+			if joined != tt.want {
+				t.Fatalf("joinTags(parseTags(%q)) = %q, want %q", tt.raw, joined, tt.want)
+			}
+		})
 	}
 }
