@@ -5,7 +5,7 @@ Version: v0.1.0
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?logo=go&logoColor=white)](#)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](#)
 [![CI](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml/badge.svg)](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml)
 
 ![UI demo](.github/assets/ALSU.gif)
@@ -20,7 +20,7 @@ A web-based tool written in Go to manage apt updates on Debian-based Linux syste
 
 ## Requirements
 
-- Go 1.21 or later (for building)
+- Go 1.25 or later (for building)
 - Debian-based Linux system with `apt` and `sudo` access
 
 ### Sudo (Non-interactive)
@@ -85,7 +85,7 @@ If only one of these is set, the server exits at startup with a configuration er
 
 Example (binary):
 
-```
+```bash
 DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
 DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
 ./webserver
@@ -93,7 +93,7 @@ DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
 
 Example (Docker):
 
-```
+```bash
 docker run -p 8080:8080 \
   -e DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
   -e DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \

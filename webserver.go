@@ -64,6 +64,7 @@ var globalKeyOnce sync.Once
 var globalKey string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
+var saveServersFunc = saveServers
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -306,7 +307,7 @@ func loadLegacyServers() bool {
 			continue
 		}
 		servers = legacy
-		if err := saveServers(); err != nil {
+		if err := saveServersFunc(); err != nil {
 			log.Printf("Failed to import legacy servers from %s: %v", path, err)
 			continue
 		}
@@ -362,7 +363,7 @@ func loadServers() {
 				{Name: "server4", Host: "server4.example.com", Port: 22, User: "user", Pass: "pass"},
 				{Name: "server5", Host: "server5.example.com", Port: 22, User: "user", Pass: "pass"},
 			}
-			if err := saveServers(); err != nil {
+			if err := saveServersFunc(); err != nil {
 				log.Fatalf("Failed to save default servers: %v", err)
 			}
 		}
@@ -405,6 +406,15 @@ func saveServers() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit servers: %w", err)
+	}
+	return nil
+}
+
+func saveServersOrRollbackLocked(prevServers []Server, prevStatusMap map[string]*ServerStatus) error {
+	if err := saveServersFunc(); err != nil {
+		servers = prevServers
+		statusMap = prevStatusMap
+		return err
 	}
 	return nil
 }
@@ -503,9 +513,6 @@ func readUploadedPrivateKey(file *multipart.FileHeader) (string, error) {
 }
 
 func stringsEqualConstantTime(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
@@ -1234,11 +1241,19 @@ func scanHostKey(host string, port int) (ssh.PublicKey, error) {
 	if client != nil {
 		_ = client.Close()
 	}
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		isAuthErr := strings.Contains(msg, "unable to authenticate") ||
+			strings.Contains(msg, "no auth") ||
+			strings.Contains(msg, "permission denied") ||
+			strings.Contains(msg, "authentication")
+		if scanned != nil && isAuthErr {
+			return scanned, nil
+		}
+		return nil, err
+	}
 	if scanned != nil {
 		return scanned, nil
-	}
-	if err != nil {
-		return nil, err
 	}
 	return nil, errors.New("unable to scan host key")
 }
@@ -1373,9 +1388,7 @@ func main() {
 			HasKey:      newServer.Key != "",
 			Tags:        newServer.Tags,
 		}
-		if err := saveServers(); err != nil {
-			servers = prevServers
-			statusMap = prevStatusMap
+		if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 			mu.Unlock()
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 			return
@@ -1457,9 +1470,7 @@ func main() {
 					statusMap[name].HasKey = updatedServer.Key != ""
 					statusMap[name].Tags = updatedServer.Tags
 				}
-				if err := saveServers(); err != nil {
-					servers = prevServers
-					statusMap = prevStatusMap
+				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
@@ -1482,9 +1493,7 @@ func main() {
 			if s.Name == name {
 				servers = append(servers[:i], servers[i+1:]...)
 				delete(statusMap, name)
-				if err := saveServers(); err != nil {
-					servers = prevServers
-					statusMap = prevStatusMap
+				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
@@ -1507,9 +1516,7 @@ func main() {
 		for i, s := range servers {
 			if s.Name == name {
 				servers[i].Pass = ""
-				if err := saveServers(); err != nil {
-					servers = prevServers
-					statusMap = prevStatusMap
+				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}

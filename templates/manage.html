@@ -631,35 +631,6 @@
             return parsed;
         }
 
-        function normalizeName(value) {
-            return String(value ?? "").trim().toLowerCase();
-        }
-
-        function normalizeHost(value) {
-            return String(value ?? "").trim().toLowerCase();
-        }
-
-        function hasServerName(name, excludeName = "") {
-            const target = normalizeName(name);
-            if (!target) return false;
-            const exclude = normalizeName(excludeName);
-            return Object.values(serverCache).some(server => {
-                const existingName = normalizeName(server && server.name);
-                return existingName === target && existingName !== exclude;
-            });
-        }
-
-        function hasServerHost(host, excludeName = "") {
-            const target = normalizeHost(host);
-            if (!target) return false;
-            const exclude = normalizeName(excludeName);
-            return Object.values(serverCache).some(server => {
-                const existingHost = normalizeHost(server && server.host);
-                const existingName = normalizeName(server && server.name);
-                return existingHost === target && existingName !== exclude;
-            });
-        }
-
         async function parseErrorResponse(res, fallbackMessage) {
             const data = await res.json().catch(() => ({}));
             return data.error || fallbackMessage;
@@ -893,14 +864,6 @@
             const keyFileInput = document.getElementById('key_file');
             const trustHostNow = document.getElementById('trust-host-key').checked;
             const trimmedName = name.trim();
-            if (hasServerName(trimmedName)) {
-                alert('Server name already exists.');
-                return;
-            }
-            if (hasServerHost(host)) {
-                alert('Server host already exists.');
-                return;
-            }
             const createRes = await fetch('/api/servers', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -998,14 +961,6 @@
             const currentPort = normalizePort(current.port, 22);
             const targetPort = normalizePort(newPort || currentPort, 22);
             if (newName && newHost && newUser) {
-                if (hasServerName(newName, editingServerName)) {
-                    alert('Server name already exists.');
-                    return;
-                }
-                if (hasServerHost(newHost, editingServerName)) {
-                    alert('Server host already exists.');
-                    return;
-                }
                 const res = await fetch(`/api/servers/${encodeURIComponent(editingServerName)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },

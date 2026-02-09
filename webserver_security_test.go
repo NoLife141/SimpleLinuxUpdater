@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -22,12 +23,14 @@ func preserveServerState(t *testing.T) {
 	mu.Lock()
 	origServers := cloneServers(servers)
 	origStatusMap := cloneStatusMap(statusMap)
+	origSaveServersFunc := saveServersFunc
 	mu.Unlock()
 
 	t.Cleanup(func() {
 		mu.Lock()
 		servers = origServers
 		statusMap = origStatusMap
+		saveServersFunc = origSaveServersFunc
 		mu.Unlock()
 	})
 }
@@ -94,6 +97,55 @@ func TestBasicAuthMiddleware(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("valid auth status = %d, want %d", rec.Code, http.StatusOK)
 	}
+}
+
+func TestStringsEqualConstantTime(t *testing.T) {
+	if !stringsEqualConstantTime("same-value", "same-value") {
+		t.Fatalf("stringsEqualConstantTime() = false, want true for equal values")
+	}
+	if stringsEqualConstantTime("same-value", "different-value") {
+		t.Fatalf("stringsEqualConstantTime() = true, want false for different values")
+	}
+	if stringsEqualConstantTime("short", "longer") {
+		t.Fatalf("stringsEqualConstantTime() = true, want false for different lengths")
+	}
+}
+
+func TestServerNameAndHostExistsLocked(t *testing.T) {
+	preserveServerState(t)
+
+	mu.Lock()
+	servers = []Server{
+		{Name: "Alpha", Host: "node-a.example"},
+		{Name: "Beta", Host: "NODE-B.EXAMPLE"},
+	}
+
+	if !serverNameExistsLocked("alpha", -1) {
+		mu.Unlock()
+		t.Fatalf("serverNameExistsLocked(alpha) = false, want true")
+	}
+	if serverNameExistsLocked("alpha", 0) {
+		mu.Unlock()
+		t.Fatalf("serverNameExistsLocked(alpha, skip=0) = true, want false")
+	}
+	if serverNameExistsLocked("gamma", -1) {
+		mu.Unlock()
+		t.Fatalf("serverNameExistsLocked(gamma) = true, want false")
+	}
+
+	if !serverHostExistsLocked("node-b.example", -1) {
+		mu.Unlock()
+		t.Fatalf("serverHostExistsLocked(node-b.example) = false, want true")
+	}
+	if serverHostExistsLocked("node-b.example", 1) {
+		mu.Unlock()
+		t.Fatalf("serverHostExistsLocked(node-b.example, skip=1) = true, want false")
+	}
+	if serverHostExistsLocked("node-c.example", -1) {
+		mu.Unlock()
+		t.Fatalf("serverHostExistsLocked(node-c.example) = true, want false")
+	}
+	mu.Unlock()
 }
 
 func TestReadUploadedKeyDataLimit(t *testing.T) {
@@ -279,4 +331,39 @@ func TestKnownHostsPathsDefaultUsesDataDir(t *testing.T) {
 	if paths[0] != wantFirst {
 		t.Fatalf("knownHostsPaths()[0] = %q, want %q", paths[0], wantFirst)
 	}
+}
+
+func TestSaveServersOrRollbackLockedOnFailure(t *testing.T) {
+	preserveServerState(t)
+
+	mu.Lock()
+	servers = []Server{
+		{Name: "srv-a", Host: "a.example", Port: 22, User: "user-a"},
+	}
+	statusMap = map[string]*ServerStatus{
+		"srv-a": {Name: "srv-a", Status: "idle", Upgradable: []string{}},
+	}
+	prevServers := cloneServers(servers)
+	prevStatusMap := cloneStatusMap(statusMap)
+
+	servers = append(servers, Server{Name: "srv-b", Host: "b.example", Port: 22, User: "user-b"})
+	statusMap["srv-b"] = &ServerStatus{Name: "srv-b", Status: "idle", Upgradable: []string{}}
+
+	saveServersFunc = func() error {
+		return errors.New("forced save failure")
+	}
+	err := saveServersOrRollbackLocked(prevServers, prevStatusMap)
+	if err == nil {
+		mu.Unlock()
+		t.Fatalf("saveServersOrRollbackLocked() error = nil, want non-nil")
+	}
+	if !reflect.DeepEqual(servers, prevServers) {
+		mu.Unlock()
+		t.Fatalf("servers were not rolled back on save failure")
+	}
+	if !reflect.DeepEqual(statusMap, prevStatusMap) {
+		mu.Unlock()
+		t.Fatalf("statusMap was not rolled back on save failure")
+	}
+	mu.Unlock()
 }
