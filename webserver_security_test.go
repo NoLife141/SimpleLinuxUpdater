@@ -115,37 +115,31 @@ func TestServerNameAndHostExistsLocked(t *testing.T) {
 	preserveServerState(t)
 
 	mu.Lock()
+	defer mu.Unlock()
 	servers = []Server{
 		{Name: "Alpha", Host: "node-a.example"},
 		{Name: "Beta", Host: "NODE-B.EXAMPLE"},
 	}
 
 	if !serverNameExistsLocked("alpha", -1) {
-		mu.Unlock()
 		t.Fatalf("serverNameExistsLocked(alpha) = false, want true")
 	}
 	if serverNameExistsLocked("alpha", 0) {
-		mu.Unlock()
 		t.Fatalf("serverNameExistsLocked(alpha, skip=0) = true, want false")
 	}
 	if serverNameExistsLocked("gamma", -1) {
-		mu.Unlock()
 		t.Fatalf("serverNameExistsLocked(gamma) = true, want false")
 	}
 
 	if !serverHostExistsLocked("node-b.example", -1) {
-		mu.Unlock()
 		t.Fatalf("serverHostExistsLocked(node-b.example) = false, want true")
 	}
 	if serverHostExistsLocked("node-b.example", 1) {
-		mu.Unlock()
 		t.Fatalf("serverHostExistsLocked(node-b.example, skip=1) = true, want false")
 	}
 	if serverHostExistsLocked("node-c.example", -1) {
-		mu.Unlock()
 		t.Fatalf("serverHostExistsLocked(node-c.example) = true, want false")
 	}
-	mu.Unlock()
 }
 
 func TestReadUploadedKeyDataLimit(t *testing.T) {

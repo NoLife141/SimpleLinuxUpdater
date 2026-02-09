@@ -5,7 +5,7 @@ Version: v0.1.0
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](#)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![CI](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml/badge.svg)](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml)
 
 ![UI demo](.github/assets/ALSU.gif)
