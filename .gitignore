@@ -1,5 +1,6 @@
 # runtime data
 data/
+dist/
 *.db
 *.sqlite
 *.sqlite3
@@ -9,6 +10,7 @@ servers.json
 # env
 .env
 .env.*
+!.env-template
 
 # keys/certs
 *.key

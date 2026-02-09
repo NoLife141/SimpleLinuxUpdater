@@ -74,6 +74,33 @@ docker run -p 8080:8080 -v debian-updater-data:/data debian-updater-web
 
 The web server listens on `:8080` by default.
 
+### Web UI Basic Auth (Recommended)
+
+The app supports built-in HTTP Basic Auth (use this even behind your reverse proxy):
+
+- `DEBIAN_UPDATER_BASIC_AUTH_USER`
+- `DEBIAN_UPDATER_BASIC_AUTH_PASS`
+
+If only one of these is set, the server exits at startup with a configuration error.
+
+Example (binary):
+
+```
+DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
+DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
+./webserver
+```
+
+Example (Docker):
+
+```
+docker run -p 8080:8080 \
+  -e DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
+  -e DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
+  -v debian-updater-data:/data \
+  debian-updater-web
+```
+
 ### Quickstart (Binary)
 
 ```
@@ -93,7 +120,7 @@ The web interface allows managing multiple servers:
 3. Approve or cancel upgrades from the web interface.
 4. View real-time logs and status.
 
-### Tests (Release Gate)
+### Tests and Release
 
 Local test run:
 
@@ -104,12 +131,15 @@ go test ./...
 Automated checks:
 
 - CI on pushes/PRs to main runs tests: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-- Release gate on tag `v*` runs tests and validates version strings: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+- Release workflow on tag `v*` runs tests, validates version/changelog metadata, builds release archives, and publishes a GitHub Release: [`.github/workflows/release.yml`](.github/workflows/release.yml)
 
 Release checklist (v0.1.0 and later):
 
 - [ ] CI is green on main
-- [ ] Tag pipeline passes (version strings match)
+- [ ] `README.md` `Version: vX.Y.Z` matches the release tag
+- [ ] `templates/index.html` version pill matches the release tag
+- [ ] `CHANGELOG.md` contains a `## [vX.Y.Z]` section
+- [ ] Tag pipeline passes and publishes archives/checksums
 - [ ] Dashboard loads and shows version pill
 - [ ] Add/edit server works (including SSH port)
 - [ ] Autoremove and sudoers setup work on a test host
@@ -163,13 +193,14 @@ This tool accepts SSH private keys via the web UI, can create `/etc/sudoers.d/ap
 
 - The web UI must not be exposed to the public internet.
 - Run it behind a VPN and/or a reverse proxy with authentication.
+- Enable app-level Basic Auth via `DEBIAN_UPDATER_BASIC_AUTH_USER` and `DEBIAN_UPDATER_BASIC_AUTH_PASS`.
 - Secrets (passwords and SSH keys) are stored encrypted in SQLite (`./data/servers.db` or `/data/servers.db`).
 - The encryption key is stored in `./data/config.json` (local) or `/data/config.json` (Docker volume).
 - If an attacker obtains both the SQLite database and the config file (or mounted volume), they can decrypt stored secrets.
 
 ## Threat Model / Limitations
 
-- No built-in web UI authentication yet.
+- Basic Auth is optional and disabled unless configured via env vars.
 - No TLS termination by default; use a VPN or reverse proxy for HTTPS.
 - Intended for trusted LAN/VPN environments only.
 - Designed for Debian-family hosts (e.g., Debian, Ubuntu, Linux Mint).
@@ -179,6 +210,9 @@ This tool accepts SSH private keys via the web UI, can create `/etc/sudoers.d/ap
 - Requires sudo access for apt commands on the remote hosts
 - Assumes amd64 architecture; adjust GOARCH if needed
 - On first run, the app will import `servers.json` if present, then switch to SQLite
+- Uploaded SSH key files are limited to 64KB
+- Default known_hosts path is next to the DB (Docker default: `/data/known_hosts`); override with `DEBIAN_UPDATER_KNOWN_HOSTS` (colon-separated paths)
+- In Add/Edit server forms, "Trust SSH host key now" scans the server key, shows its fingerprint, and appends it to known_hosts after confirmation
 
 License
 

@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	_ "modernc.org/sqlite"
 )
 
@@ -59,10 +62,21 @@ var keyOnce sync.Once
 var encryptionKey []byte
 var globalKeyOnce sync.Once
 var globalKey string
+var knownHostsMu sync.Mutex
+var scanHostKeyFunc = scanHostKey
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
 const globalKeySetting = "global_ssh_key"
+const basicAuthUserEnv = "DEBIAN_UPDATER_BASIC_AUTH_USER"
+const basicAuthPassEnv = "DEBIAN_UPDATER_BASIC_AUTH_PASS"
+const maxUploadedKeyBytes = 64 * 1024
+const sshConnectTimeout = 15 * time.Second
+
+var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
+var errUploadedKeyEmpty = errors.New("empty key")
+var errActionInProgress = errors.New("action already in progress")
+var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
 
 func dbPath() string {
 	if p := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_DB_PATH")); p != "" {
@@ -292,7 +306,10 @@ func loadLegacyServers() bool {
 			continue
 		}
 		servers = legacy
-		saveServers()
+		if err := saveServers(); err != nil {
+			log.Printf("Failed to import legacy servers from %s: %v", path, err)
+			continue
+		}
 		log.Printf("Imported legacy servers from %s", path)
 		return true
 	}
@@ -345,54 +362,175 @@ func loadServers() {
 				{Name: "server4", Host: "server4.example.com", Port: 22, User: "user", Pass: "pass"},
 				{Name: "server5", Host: "server5.example.com", Port: 22, User: "user", Pass: "pass"},
 			}
-			saveServers()
+			if err := saveServers(); err != nil {
+				log.Fatalf("Failed to save default servers: %v", err)
+			}
 		}
 	}
 }
 
-func saveServers() {
+func saveServers() error {
 	db := getDB()
 	tx, err := db.Begin()
 	if err != nil {
-		log.Printf("Error starting db transaction: %v", err)
-		return
+		return fmt.Errorf("start db transaction: %w", err)
 	}
 	if _, err := tx.Exec("DELETE FROM servers"); err != nil {
-		tx.Rollback()
-		log.Printf("Error clearing servers table: %v", err)
-		return
+		_ = tx.Rollback()
+		return fmt.Errorf("clear servers table: %w", err)
 	}
 	stmt, err := tx.Prepare("INSERT INTO servers (name, host, port, user, pass_enc, key_enc, tags) VALUES (?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
-		tx.Rollback()
-		log.Printf("Error preparing insert: %v", err)
-		return
+		_ = tx.Rollback()
+		return fmt.Errorf("prepare insert: %w", err)
 	}
 	defer stmt.Close()
 	for _, server := range servers {
 		enc, err := encryptSecret(server.Pass)
 		if err != nil {
-			tx.Rollback()
-			log.Printf("Error encrypting password for %s: %v", server.Name, err)
-			return
+			_ = tx.Rollback()
+			return fmt.Errorf("encrypt password for %s: %w", server.Name, err)
 		}
 		keyEnc, err := encryptSecret(server.Key)
 		if err != nil {
-			tx.Rollback()
-			log.Printf("Error encrypting SSH key for %s: %v", server.Name, err)
-			return
+			_ = tx.Rollback()
+			return fmt.Errorf("encrypt SSH key for %s: %w", server.Name, err)
 		}
 		tags := joinTags(server.Tags)
 		port := normalizePort(server.Port)
 		if _, err := stmt.Exec(server.Name, server.Host, port, server.User, enc, keyEnc, tags); err != nil {
-			tx.Rollback()
-			log.Printf("Error inserting server %s: %v", server.Name, err)
-			return
+			_ = tx.Rollback()
+			return fmt.Errorf("insert server %s: %w", server.Name, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		log.Printf("Error committing servers: %v", err)
+		return fmt.Errorf("commit servers: %w", err)
 	}
+	return nil
+}
+
+func cloneServers(src []Server) []Server {
+	if src == nil {
+		return nil
+	}
+	dst := make([]Server, len(src))
+	for i, server := range src {
+		server.Tags = append([]string(nil), server.Tags...)
+		dst[i] = server
+	}
+	return dst
+}
+
+func cloneStatusMap(src map[string]*ServerStatus) map[string]*ServerStatus {
+	dst := make(map[string]*ServerStatus, len(src))
+	for name, status := range src {
+		if status == nil {
+			dst[name] = nil
+			continue
+		}
+		copyStatus := *status
+		copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+		copyStatus.Tags = append([]string(nil), status.Tags...)
+		dst[name] = &copyStatus
+	}
+	return dst
+}
+
+func statusInProgress(status string) bool {
+	return status == "updating" ||
+		status == "pending_approval" ||
+		status == "approved" ||
+		status == "upgrading" ||
+		status == "autoremove" ||
+		status == "sudoers"
+}
+
+func findServerByNameLocked(name string) (Server, bool) {
+	for _, s := range servers {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return Server{}, false
+}
+
+func beginServerAction(name, newStatus string) (Server, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return Server{}, sql.ErrNoRows
+	}
+	if statusInProgress(status.Status) {
+		return Server{}, errActionInProgress
+	}
+	server, found := findServerByNameLocked(name)
+	if !found {
+		return Server{}, sql.ErrNoRows
+	}
+	status.Status = newStatus
+	if strings.TrimSpace(status.Logs) == "" {
+		status.Logs = "Starting Linux Updater..."
+	}
+	return server, nil
+}
+
+func readUploadedKeyData(r io.Reader) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, maxUploadedKeyBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > maxUploadedKeyBytes {
+		return "", errUploadedKeyTooLarge
+	}
+	key := strings.TrimSpace(string(data))
+	if key == "" {
+		return "", errUploadedKeyEmpty
+	}
+	return key, nil
+}
+
+func readUploadedPrivateKey(file *multipart.FileHeader) (string, error) {
+	if file.Size > maxUploadedKeyBytes {
+		return "", errUploadedKeyTooLarge
+	}
+	src, err := file.Open()
+	if err != nil {
+		return "", err
+	}
+	defer src.Close()
+	return readUploadedKeyData(src)
+}
+
+func stringsEqualConstantTime(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func basicAuthMiddleware(username, password string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		user, pass, ok := c.Request.BasicAuth()
+		if !ok || !stringsEqualConstantTime(user, username) || !stringsEqualConstantTime(pass, password) {
+			c.Header("WWW-Authenticate", `Basic realm="SimpleLinuxUpdater"`)
+			c.AbortWithStatus(http.StatusUnauthorized)
+			return
+		}
+		c.Next()
+	}
+}
+
+func basicAuthFromEnv() (string, string, bool, error) {
+	username := strings.TrimSpace(os.Getenv(basicAuthUserEnv))
+	password := os.Getenv(basicAuthPassEnv)
+	if username == "" && password == "" {
+		return "", "", false, nil
+	}
+	if username == "" || password == "" {
+		return "", "", false, fmt.Errorf("%s and %s must both be set", basicAuthUserEnv, basicAuthPassEnv)
+	}
+	return username, password, true, nil
 }
 
 func init() {
@@ -416,6 +554,10 @@ func init() {
 func runUpdate(server Server) {
 	mu.Lock()
 	status := statusMap[server.Name]
+	if status == nil {
+		mu.Unlock()
+		return
+	}
 	status.Status = "updating"
 	status.Logs = "Starting Linux Updater...\nRunning apt update..."
 	mu.Unlock()
@@ -428,10 +570,19 @@ func runUpdate(server Server) {
 		mu.Unlock()
 		return
 	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		mu.Lock()
+		status.Status = "error"
+		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
+		mu.Unlock()
+		return
+	}
 	config := &ssh.ClientConfig{
 		User:            server.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
 	}
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
@@ -530,7 +681,10 @@ func runUpdate(server Server) {
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 	err = session.Run("sudo apt upgrade -y")
-	logs = status.Logs + "\n" + stdout.String() + stderr.String()
+	mu.Lock()
+	currentLogs := status.Logs
+	mu.Unlock()
+	logs = currentLogs + "\n" + stdout.String() + stderr.String()
 	if err != nil {
 		logs += fmt.Sprintf("\nError: %v", err)
 		mu.Lock()
@@ -549,6 +703,10 @@ func runUpdate(server Server) {
 func runSudoersBootstrap(server Server, sudoPassword string) {
 	mu.Lock()
 	status := statusMap[server.Name]
+	if status == nil {
+		mu.Unlock()
+		return
+	}
 	status.Status = "sudoers"
 	if strings.TrimSpace(status.Logs) == "" {
 		status.Logs = "Starting Linux Updater..."
@@ -564,10 +722,19 @@ func runSudoersBootstrap(server Server, sudoPassword string) {
 		mu.Unlock()
 		return
 	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		mu.Lock()
+		status.Status = "error"
+		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
+		mu.Unlock()
+		return
+	}
 	config := &ssh.ClientConfig{
 		User:            server.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
 	}
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
@@ -599,7 +766,10 @@ func runSudoersBootstrap(server Server, sudoPassword string) {
 	session.Stderr = &stderr
 	session.Stdin = strings.NewReader(sudoPassword + "\n")
 	err = session.Run(cmd)
-	logs := status.Logs + "\n" + stdout.String() + stderr.String()
+	mu.Lock()
+	currentLogs := status.Logs
+	mu.Unlock()
+	logs := currentLogs + "\n" + stdout.String() + stderr.String()
 	if err != nil {
 		logs += fmt.Sprintf("\nError: %v", err)
 		mu.Lock()
@@ -618,6 +788,10 @@ func runSudoersBootstrap(server Server, sudoPassword string) {
 func runSudoersDisable(server Server, sudoPassword string) {
 	mu.Lock()
 	status := statusMap[server.Name]
+	if status == nil {
+		mu.Unlock()
+		return
+	}
 	status.Status = "sudoers"
 	if strings.TrimSpace(status.Logs) == "" {
 		status.Logs = "Starting Linux Updater..."
@@ -633,10 +807,19 @@ func runSudoersDisable(server Server, sudoPassword string) {
 		mu.Unlock()
 		return
 	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		mu.Lock()
+		status.Status = "error"
+		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
+		mu.Unlock()
+		return
+	}
 	config := &ssh.ClientConfig{
 		User:            server.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
 	}
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
@@ -666,7 +849,10 @@ func runSudoersDisable(server Server, sudoPassword string) {
 	session.Stderr = &stderr
 	session.Stdin = strings.NewReader(sudoPassword + "\n")
 	err = session.Run(cmd)
-	logs := status.Logs + "\n" + stdout.String() + stderr.String()
+	mu.Lock()
+	currentLogs := status.Logs
+	mu.Unlock()
+	logs := currentLogs + "\n" + stdout.String() + stderr.String()
 	if err != nil {
 		logs += fmt.Sprintf("\nError: %v", err)
 		mu.Lock()
@@ -685,6 +871,10 @@ func runSudoersDisable(server Server, sudoPassword string) {
 func runAutoremove(server Server) {
 	mu.Lock()
 	status := statusMap[server.Name]
+	if status == nil {
+		mu.Unlock()
+		return
+	}
 	status.Status = "autoremove"
 	if strings.TrimSpace(status.Logs) == "" {
 		status.Logs = "Starting Linux Updater..."
@@ -700,10 +890,19 @@ func runAutoremove(server Server) {
 		mu.Unlock()
 		return
 	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		mu.Lock()
+		status.Status = "error"
+		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
+		mu.Unlock()
+		return
+	}
 	config := &ssh.ClientConfig{
 		User:            server.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
 	}
 
 	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
@@ -730,7 +929,10 @@ func runAutoremove(server Server) {
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 	err = session.Run("sudo apt autoremove -y")
-	logs := status.Logs + "\n" + stdout.String() + stderr.String()
+	mu.Lock()
+	currentLogs := status.Logs
+	mu.Unlock()
+	logs := currentLogs + "\n" + stdout.String() + stderr.String()
 	if err != nil {
 		logs += fmt.Sprintf("\nError: %v", err)
 		mu.Lock()
@@ -871,6 +1073,196 @@ func normalizePort(port int) int {
 	return port
 }
 
+func normalizeServerName(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func normalizeServerHost(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func serverNameExistsLocked(name string, skipIndex int) bool {
+	normalized := normalizeServerName(name)
+	for i, existing := range servers {
+		if i == skipIndex {
+			continue
+		}
+		if normalizeServerName(existing.Name) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+func serverHostExistsLocked(host string, skipIndex int) bool {
+	normalized := normalizeServerHost(host)
+	for i, existing := range servers {
+		if i == skipIndex {
+			continue
+		}
+		if normalizeServerHost(existing.Host) == normalized {
+			return true
+		}
+	}
+	return false
+}
+
+func knownHostsPaths() []string {
+	if raw := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_KNOWN_HOSTS")); raw != "" {
+		parts := strings.Split(raw, ":")
+		paths := make([]string, 0, len(parts))
+		for _, part := range parts {
+			path := strings.TrimSpace(part)
+			if path != "" {
+				paths = append(paths, path)
+			}
+		}
+		return paths
+	}
+	paths := []string{filepath.Join(filepath.Dir(dbPath()), "known_hosts")}
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		paths = append(paths, filepath.Join(home, ".ssh", "known_hosts"))
+	}
+	paths = append(paths, "/etc/ssh/ssh_known_hosts")
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
+}
+
+func getHostKeyCallback() (ssh.HostKeyCallback, error) {
+	candidates := knownHostsPaths()
+	existing := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			existing = append(existing, path)
+		}
+	}
+	if len(existing) == 0 {
+		return nil, errors.New("no known_hosts file found; set DEBIAN_UPDATER_KNOWN_HOSTS or create ~/.ssh/known_hosts")
+	}
+	cb, err := knownhosts.New(existing...)
+	if err != nil {
+		return nil, fmt.Errorf("load known_hosts: %w", err)
+	}
+	return cb, nil
+}
+
+func knownHostsWritePath() (string, error) {
+	paths := knownHostsPaths()
+	if len(paths) == 0 {
+		return "", errors.New("no known_hosts path configured")
+	}
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+	return paths[0], nil
+}
+
+func knownHostsHostToken(host string, port int) string {
+	cleanHost := strings.Trim(strings.TrimSpace(host), "[]")
+	if normalizePort(port) == 22 {
+		return cleanHost
+	}
+	return fmt.Sprintf("[%s]:%d", cleanHost, normalizePort(port))
+}
+
+func appendKnownHostLine(line string) error {
+	cleanLine := strings.TrimSpace(line)
+	if cleanLine == "" {
+		return errors.New("empty known_hosts line")
+	}
+	path, err := knownHostsWritePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("create known_hosts dir: %w", err)
+	}
+
+	knownHostsMu.Lock()
+	defer knownHostsMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read known_hosts: %w", err)
+	}
+	if strings.Contains("\n"+string(data)+"\n", "\n"+cleanLine+"\n") {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("open known_hosts for append: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(cleanLine + "\n"); err != nil {
+		return fmt.Errorf("append known_hosts line: %w", err)
+	}
+	return nil
+}
+
+func scanHostKey(host string, port int) (ssh.PublicKey, error) {
+	cleanHost := strings.TrimSpace(host)
+	if cleanHost == "" {
+		return nil, errors.New("host is required")
+	}
+	address := net.JoinHostPort(cleanHost, strconv.Itoa(normalizePort(port)))
+	var scanned ssh.PublicKey
+	cfg := &ssh.ClientConfig{
+		User: "hostkey-scan",
+		Auth: []ssh.AuthMethod{
+			ssh.Password("invalid"),
+		},
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			scanned = key
+			return nil
+		},
+		Timeout: sshConnectTimeout,
+	}
+	client, err := ssh.Dial("tcp", address, cfg)
+	if client != nil {
+		_ = client.Close()
+	}
+	if scanned != nil {
+		return scanned, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return nil, errors.New("unable to scan host key")
+}
+
+func buildKnownHostsLine(host string, port int, key ssh.PublicKey) string {
+	return knownhosts.Line([]string{knownHostsHostToken(host, port)}, key)
+}
+
+func trustHostKey(host string, port int, expectedFingerprint string) (string, string, error) {
+	key, err := scanHostKeyFunc(host, port)
+	if err != nil {
+		return "", "", err
+	}
+	fingerprint := ssh.FingerprintSHA256(key)
+	if strings.TrimSpace(expectedFingerprint) != "" && !stringsEqualConstantTime(fingerprint, strings.TrimSpace(expectedFingerprint)) {
+		return "", "", errFingerprintMismatch
+	}
+	line := buildKnownHostsLine(host, port, key)
+	if err := appendKnownHostLine(line); err != nil {
+		return "", "", err
+	}
+	return fingerprint, line, nil
+}
+
 func shellEscapeSingleQuotes(input string) string {
 	return strings.ReplaceAll(input, "'", "'\"'\"'")
 }
@@ -899,6 +1291,16 @@ func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 
 func main() {
 	r := gin.Default()
+	username, password, basicAuthEnabled, err := basicAuthFromEnv()
+	if err != nil {
+		log.Fatalf("Invalid basic auth configuration: %v", err)
+	}
+	if basicAuthEnabled {
+		r.Use(basicAuthMiddleware(username, password))
+		log.Printf("Basic auth enabled from %s/%s", basicAuthUserEnv, basicAuthPassEnv)
+	} else {
+		log.Printf("Basic auth is disabled (set %s and %s to enable it)", basicAuthUserEnv, basicAuthPassEnv)
+	}
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
 
@@ -936,14 +1338,27 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		newServer.Name = strings.TrimSpace(newServer.Name)
+		newServer.Host = strings.TrimSpace(newServer.Host)
+		newServer.User = strings.TrimSpace(newServer.User)
+		if newServer.Name == "" || newServer.Host == "" || newServer.User == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
 		newServer.Port = normalizePort(newServer.Port)
+		newServer.Tags = parseTags(joinTags(newServer.Tags))
 		mu.Lock()
-		for _, s := range servers {
-			if s.Name == newServer.Name {
-				mu.Unlock()
-				c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
-				return
-			}
+		prevServers := cloneServers(servers)
+		prevStatusMap := cloneStatusMap(statusMap)
+		if serverNameExistsLocked(newServer.Name, -1) {
+			mu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
+			return
+		}
+		if serverHostExistsLocked(newServer.Host, -1) {
+			mu.Unlock()
+			c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
+			return
 		}
 		servers = append(servers, newServer)
 		statusMap[newServer.Name] = &ServerStatus{
@@ -958,7 +1373,13 @@ func main() {
 			HasKey:      newServer.Key != "",
 			Tags:        newServer.Tags,
 		}
-		saveServers()
+		if err := saveServers(); err != nil {
+			servers = prevServers
+			statusMap = prevStatusMap
+			mu.Unlock()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
+			return
+		}
 		mu.Unlock()
 		c.JSON(http.StatusCreated, newServer)
 	})
@@ -970,7 +1391,16 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+		updatedServer.Name = strings.TrimSpace(updatedServer.Name)
+		updatedServer.Host = strings.TrimSpace(updatedServer.Host)
+		updatedServer.User = strings.TrimSpace(updatedServer.User)
+		if updatedServer.Name == "" || updatedServer.Host == "" || updatedServer.User == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
 		mu.Lock()
+		prevServers := cloneServers(servers)
+		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
 				if strings.TrimSpace(updatedServer.Pass) == "" {
@@ -985,6 +1415,17 @@ func main() {
 				updatedServer.Port = normalizePort(updatedServer.Port)
 				if updatedServer.Tags == nil {
 					updatedServer.Tags = s.Tags
+				}
+				updatedServer.Tags = parseTags(joinTags(updatedServer.Tags))
+				if serverNameExistsLocked(updatedServer.Name, i) {
+					mu.Unlock()
+					c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
+					return
+				}
+				if serverHostExistsLocked(updatedServer.Host, i) {
+					mu.Unlock()
+					c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
+					return
 				}
 				servers[i] = updatedServer
 				if updatedServer.Name != name {
@@ -1002,6 +1443,13 @@ func main() {
 						Tags:        updatedServer.Tags,
 					}
 				} else {
+					if statusMap[name] == nil {
+						statusMap[name] = &ServerStatus{
+							Name:       updatedServer.Name,
+							Status:     "idle",
+							Upgradable: []string{},
+						}
+					}
 					statusMap[name].Host = updatedServer.Host
 					statusMap[name].Port = normalizePort(updatedServer.Port)
 					statusMap[name].User = updatedServer.User
@@ -1009,7 +1457,13 @@ func main() {
 					statusMap[name].HasKey = updatedServer.Key != ""
 					statusMap[name].Tags = updatedServer.Tags
 				}
-				saveServers()
+				if err := saveServers(); err != nil {
+					servers = prevServers
+					statusMap = prevStatusMap
+					mu.Unlock()
+					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
+					return
+				}
 				mu.Unlock()
 				c.JSON(http.StatusOK, updatedServer)
 				return
@@ -1022,11 +1476,19 @@ func main() {
 	r.DELETE("/api/servers/:name", func(c *gin.Context) {
 		name := c.Param("name")
 		mu.Lock()
+		prevServers := cloneServers(servers)
+		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
 				servers = append(servers[:i], servers[i+1:]...)
 				delete(statusMap, name)
-				saveServers()
+				if err := saveServers(); err != nil {
+					servers = prevServers
+					statusMap = prevStatusMap
+					mu.Unlock()
+					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
+					return
+				}
 				mu.Unlock()
 				c.JSON(http.StatusOK, gin.H{"message": "Server deleted"})
 				return
@@ -1040,10 +1502,17 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		defer mu.Unlock()
+		prevServers := cloneServers(servers)
+		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
 				servers[i].Pass = ""
-				saveServers()
+				if err := saveServers(); err != nil {
+					servers = prevServers
+					statusMap = prevStatusMap
+					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
+					return
+				}
 				if status, ok := statusMap[name]; ok {
 					status.HasPassword = false
 				}
@@ -1061,20 +1530,17 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
-		src, err := file.Open()
+		key, err := readUploadedPrivateKey(file)
 		if err != nil {
+			if errors.Is(err, errUploadedKeyTooLarge) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+				return
+			}
+			if errors.Is(err, errUploadedKeyEmpty) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
-			return
-		}
-		defer src.Close()
-		data, err := io.ReadAll(src)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
-			return
-		}
-		key := strings.TrimSpace(string(data))
-		if key == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "empty key"})
 			return
 		}
 		mu.Lock()
@@ -1123,20 +1589,17 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
-		src, err := file.Open()
+		key, err := readUploadedPrivateKey(file)
 		if err != nil {
+			if errors.Is(err, errUploadedKeyTooLarge) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
+				return
+			}
+			if errors.Is(err, errUploadedKeyEmpty) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
-			return
-		}
-		defer src.Close()
-		data, err := io.ReadAll(src)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
-			return
-		}
-		key := strings.TrimSpace(string(data))
-		if key == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "empty key"})
 			return
 		}
 		if err := setGlobalKey(key); err != nil {
@@ -1169,25 +1632,88 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"has_key": true})
 	})
 
+	r.POST("/api/hostkeys/scan", func(c *gin.Context) {
+		var req struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		host := strings.TrimSpace(req.Host)
+		if host == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+			return
+		}
+		port := normalizePort(req.Port)
+		key, err := scanHostKeyFunc(host, port)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"host":               host,
+			"port":               port,
+			"algorithm":          key.Type(),
+			"fingerprint_sha256": ssh.FingerprintSHA256(key),
+			"known_hosts_line":   buildKnownHostsLine(host, port, key),
+		})
+	})
+
+	r.POST("/api/hostkeys/trust", func(c *gin.Context) {
+		var req struct {
+			Host              string `json:"host"`
+			Port              int    `json:"port"`
+			FingerprintSHA256 string `json:"fingerprint_sha256"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		host := strings.TrimSpace(req.Host)
+		if host == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+			return
+		}
+		expectedFingerprint := strings.TrimSpace(req.FingerprintSHA256)
+		if expectedFingerprint == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "fingerprint_sha256 is required"})
+			return
+		}
+		port := normalizePort(req.Port)
+		fingerprint, line, err := trustHostKey(host, port, expectedFingerprint)
+		if err != nil {
+			if errors.Is(err, errFingerprintMismatch) {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to trust host key: %v", err)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"message":            "Host key trusted",
+			"host":               host,
+			"port":               port,
+			"fingerprint_sha256": fingerprint,
+			"known_hosts_line":   line,
+		})
+	})
+
 	r.POST("/api/update/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		mu.Lock()
-		status, exists := statusMap[name]
-		mu.Unlock()
-		if !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
-			return
-		}
-		var server Server
-		for _, s := range servers {
-			if s.Name == name {
-				server = s
-				break
+		server, err := beginServerAction(name, "updating")
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+				return
 			}
+			if errors.Is(err, errActionInProgress) {
+				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
+			return
 		}
 		go runUpdate(server)
 		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
@@ -1195,23 +1721,18 @@ func main() {
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		mu.Lock()
-		status, exists := statusMap[name]
-		mu.Unlock()
-		if !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
-			return
-		}
-		var server Server
-		for _, s := range servers {
-			if s.Name == name {
-				server = s
-				break
+		server, err := beginServerAction(name, "autoremove")
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+				return
 			}
+			if errors.Is(err, errActionInProgress) {
+				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
+			return
 		}
 		go runAutoremove(server)
 		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started"})
@@ -1230,23 +1751,18 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
-		mu.Lock()
-		status, exists := statusMap[name]
-		mu.Unlock()
-		if !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
-			return
-		}
-		var server Server
-		for _, s := range servers {
-			if s.Name == name {
-				server = s
-				break
+		server, err := beginServerAction(name, "sudoers")
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+				return
 			}
+			if errors.Is(err, errActionInProgress) {
+				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
+			return
 		}
 		go runSudoersBootstrap(server, req.Password)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started"})
@@ -1265,23 +1781,18 @@ func main() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
-		mu.Lock()
-		status, exists := statusMap[name]
-		mu.Unlock()
-		if !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
-		if status.Status == "updating" || status.Status == "pending_approval" || status.Status == "approved" || status.Status == "upgrading" || status.Status == "autoremove" || status.Status == "sudoers" {
-			c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
-			return
-		}
-		var server Server
-		for _, s := range servers {
-			if s.Name == name {
-				server = s
-				break
+		server, err := beginServerAction(name, "sudoers")
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+				return
 			}
+			if errors.Is(err, errActionInProgress) {
+				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
+			return
 		}
 		go runSudoersDisable(server, req.Password)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started"})
@@ -1321,12 +1832,14 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		status, exists := statusMap[name]
-		mu.Unlock()
-		if !exists {
+		if !exists || status == nil {
+			mu.Unlock()
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"logs": status.Logs})
+		logs := status.Logs
+		mu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"logs": logs})
 	})
 
 	log.Println("Starting web server on :8080")
