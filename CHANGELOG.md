@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is inspired by Keep a Changelog, and this project uses Semantic Versioning for tags like `vMAJOR.MINOR.PATCH`.
+
+## [Unreleased]
+
+### Added
+
+- Placeholder for upcoming changes.
+
+## [v0.1.0] - 2026-02-09
+
+### Added
+
+- Initial web UI for managing Debian-family apt updates over SSH.
+- Per-server and global authentication support (password or SSH key).
+- Upgrade approval flow, logs, and bulk operations.
+
+### Security
+
+- Encrypted storage for credentials in SQLite with a local config key.

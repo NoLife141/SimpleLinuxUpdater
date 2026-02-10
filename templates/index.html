@@ -476,6 +476,34 @@
         let hoveredName = null;
         let passwordResolve = null;
         let passwordReject = null;
+        const allowedStatuses = new Set([
+            "idle", "updating", "pending_approval", "approved", "cancelled",
+            "upgrading", "autoremove", "sudoers", "done", "error"
+        ]);
+
+        function escapeHtml(value) {
+            return String(value ?? "")
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+        }
+
+        function escapeJsSingleQuoted(value) {
+            return String(value ?? "")
+                .replace(/\\/g, "\\\\")
+                .replace(/'/g, "\\'")
+                .replace(/\r/g, "\\r")
+                .replace(/\n/g, "\\n")
+                .replace(/\u2028/g, "\\u2028")
+                .replace(/\u2029/g, "\\u2029");
+        }
+
+        function safeStatusClass(value) {
+            const normalized = String(value ?? "").toLowerCase();
+            return allowedStatuses.has(normalized) ? normalized : "error";
+        }
 
         function saveWindowScroll() {
             return { x: window.scrollX, y: window.scrollY };
@@ -576,7 +604,7 @@
                 if (group.key) {
                     const groupRow = document.createElement('tr');
                     groupRow.className = 'group-row';
-                    groupRow.innerHTML = `<td colspan="5">${group.key}</td>`;
+                    groupRow.innerHTML = `<td colspan="5">${escapeHtml(group.key)}</td>`;
                     tbody.appendChild(groupRow);
                 }
                 group.items.forEach(server => {
@@ -587,27 +615,33 @@
                     }
                     const isExpanded = expandedLogs.has(server.name);
                     const isBusy = server.status === 'updating' || server.status === 'upgrading' || server.status === 'autoremove' || server.status === 'sudoers';
+                    const safeNameJs = escapeJsSingleQuoted(server.name);
+                    const safeNameHtml = escapeHtml(server.name);
+                    const safeStatusText = escapeHtml(server.status || "unknown");
+                    const safeStatus = safeStatusClass(server.status);
+                    const safeLogs = escapeHtml(server.logs || "");
+                    const safeDataName = escapeHtml(server.name);
                     const actionButtons = server.status === 'pending_approval'
                         ? `
-                            <button onclick="approveUpgrade('${server.name}')">Approve Upgrade</button>
-                            <button onclick="cancelUpgrade('${server.name}')">Cancel</button>
+                            <button onclick="approveUpgrade('${safeNameJs}')">Approve Upgrade</button>
+                            <button onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
                           `
                         : `
-                            <button onclick="updateServer('${server.name}')" ${isBusy ? 'disabled' : ''}>Update</button>
-                            <button onclick="runAutoremove('${server.name}')" ${isBusy ? 'disabled' : ''}>apt autoremove</button>
+                            <button onclick="updateServer('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Update</button>
+                            <button onclick="runAutoremove('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>apt autoremove</button>
                             <div class="action-row">
-                                <button onclick="enablePasswordlessApt('${server.name}')" ${isBusy ? 'disabled' : ''}>Enable passwordless apt</button>
-                                <button onclick="disablePasswordlessApt('${server.name}')" ${isBusy ? 'disabled' : ''}>Disable passwordless apt</button>
+                                <button onclick="enablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Enable passwordless apt</button>
+                                <button onclick="disablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Disable passwordless apt</button>
                             </div>
                           `;
                     row.innerHTML = `
-                        <td><input type="checkbox" class="row-select" data-name="${server.name}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
-                        <td>${server.name}</td>
-                        <td><span class="status-pill status-${server.status}">${server.status}</span></td>
+                        <td><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
+                        <td>${safeNameHtml}</td>
+                        <td><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="actions-col">${actionButtons}</td>
                         <td class="logs-col">
-                            <button class="btn-ghost inline-btn" onclick="toggleLogs('${server.name}')">${isExpanded ? "Hide" : "Show"} logs</button>
-                            <div class="logs ${isExpanded ? "" : "logs-collapsed"}" data-name="${server.name}">${server.logs}</div>
+                            <button class="btn-ghost inline-btn" onclick="toggleLogs('${safeNameJs}')">${isExpanded ? "Hide" : "Show"} logs</button>
+                            <div class="logs ${isExpanded ? "" : "logs-collapsed"}" data-name="${safeDataName}">${safeLogs}</div>
                         </td>
                     `;
                     tbody.appendChild(row);
@@ -722,39 +756,39 @@
 
         document.getElementById('bulk-update').addEventListener('click', async () => {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/update/${name}`, { method: 'POST' })));
+            await Promise.all(names.map(name => fetch(`/api/update/${encodeURIComponent(name)}`, { method: 'POST' })));
             fetchServers();
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/approve/${name}`, { method: 'POST' })));
+            await Promise.all(names.map(name => fetch(`/api/approve/${encodeURIComponent(name)}`, { method: 'POST' })));
             fetchServers();
         });
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/cancel/${name}`, { method: 'POST' })));
+            await Promise.all(names.map(name => fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' })));
             fetchServers();
         });
         document.getElementById('bulk-autoremove').addEventListener('click', async () => {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/autoremove/${name}`, { method: 'POST' })));
+            await Promise.all(names.map(name => fetch(`/api/autoremove/${encodeURIComponent(name)}`, { method: 'POST' })));
             fetchServers();
         });
 
         async function updateServer(name) {
-            await fetch(`/api/update/${name}`, { method: 'POST' });
+            await fetch(`/api/update/${encodeURIComponent(name)}`, { method: 'POST' });
             fetchServers();
         }
 
         async function runAutoremove(name) {
-            await fetch(`/api/autoremove/${name}`, { method: 'POST' });
+            await fetch(`/api/autoremove/${encodeURIComponent(name)}`, { method: 'POST' });
             fetchServers();
         }
 
         async function enablePasswordlessApt(name) {
             const password = await promptPassword(`Enter sudo password for ${name}`);
             if (!password) return;
-            await fetch(`/api/sudoers/${name}`, {
+            await fetch(`/api/sudoers/${encodeURIComponent(name)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password })
@@ -765,7 +799,7 @@
         async function disablePasswordlessApt(name) {
             const password = await promptPassword(`Enter sudo password to disable for ${name}`);
             if (!password) return;
-            await fetch(`/api/sudoers/disable/${name}`, {
+            await fetch(`/api/sudoers/disable/${encodeURIComponent(name)}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password })
@@ -819,12 +853,12 @@
         });
 
         async function approveUpgrade(name) {
-            await fetch(`/api/approve/${name}`, { method: 'POST' });
+            await fetch(`/api/approve/${encodeURIComponent(name)}`, { method: 'POST' });
             fetchServers();
         }
 
         async function cancelUpgrade(name) {
-            await fetch(`/api/cancel/${name}`, { method: 'POST' });
+            await fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' });
             fetchServers();
         }
 
