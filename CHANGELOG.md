@@ -10,6 +10,12 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Placeholder for upcoming changes.
 
+## [v0.1.1] - 2026-02-10
+
+### Changed
+
+- Bump release metadata and workflow/tooling alignment for Go 1.25 and release automation.
+
 ## [v0.1.0] - 2026-02-09
 
 ### Added
