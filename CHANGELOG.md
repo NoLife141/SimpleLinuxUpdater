@@ -10,6 +10,12 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Placeholder for upcoming changes.
 
+## [v0.1.3] - 2026-02-10
+
+### Changed
+
+- Align release metadata with tag `v0.1.3` for release-gate verification.
+
 ## [v0.1.2] - 2026-02-10
 
 ### Changed
