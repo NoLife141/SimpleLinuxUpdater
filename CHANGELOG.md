@@ -10,6 +10,13 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Placeholder for upcoming changes.
 
+## [v0.1.2] - 2026-02-10
+
+### Changed
+
+- Release workflow now publishes Windows artifacts as `.zip` while keeping `.tar.gz` for Linux/macOS.
+- Clarify that runtime testing is currently performed on Linux amd64.
+
 ## [v0.1.1] - 2026-02-10
 
 ### Changed
