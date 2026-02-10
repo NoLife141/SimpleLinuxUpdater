@@ -6,9 +6,14 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Placeholder for upcoming changes.
+- Improve status logs UX and cancel behavior.
+- Clear and collapse logs on cancel (single + bulk).
+- Add fixed-height log panel with live auto-scroll handling.
+- Colorize log lines for faster scanning.
+- Add per-server log actions: copy and download.
+- Refine log readability with subtle spacing and separators.
 
 ## [v0.1.2] - 2026-02-10
 
