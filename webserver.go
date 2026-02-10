@@ -652,20 +652,22 @@ func runUpdate(server Server) {
 	mu.Unlock()
 
 	// Wait for approval
-	for {
-		time.Sleep(1 * time.Second)
-		mu.Lock()
-		if status.Status == "approved" {
+		for {
+			time.Sleep(1 * time.Second)
+			mu.Lock()
+			if status.Status == "approved" {
+				mu.Unlock()
+				break
+			}
+			if status.Status == "cancelled" {
+				status.Status = "idle"
+				status.Logs = ""
+				status.Upgradable = nil
+				mu.Unlock()
+				return
+			}
 			mu.Unlock()
-			break
 		}
-		if status.Status == "cancelled" {
-			status.Status = "idle"
-			mu.Unlock()
-			return
-		}
-		mu.Unlock()
-	}
 
 	// Proceed with upgrade
 	mu.Lock()
@@ -1826,6 +1828,8 @@ func main() {
 		status, exists := statusMap[name]
 		if exists && status.Status == "pending_approval" {
 			status.Status = "cancelled"
+			status.Logs = ""
+			status.Upgradable = nil
 		}
 		mu.Unlock()
 		if !exists {
