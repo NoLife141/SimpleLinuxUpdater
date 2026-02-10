@@ -132,6 +132,7 @@ Automated checks:
 
 - CI on pushes/PRs to main runs tests: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
 - Release workflow on tag `v*` runs tests, validates version/changelog metadata, builds release archives, and publishes a GitHub Release: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+- Release artifacts are cross-compiled for multiple platforms, but runtime testing is currently performed only on Linux amd64.
 
 Release checklist (v0.1.0 and later):
 
