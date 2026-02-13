@@ -1354,6 +1354,7 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 		return
 	}
 	status.Status = "updating"
+	status.Upgradable = nil
 	status.Logs = fmt.Sprintf(
 		"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
 		policy.MaxAttempts,
