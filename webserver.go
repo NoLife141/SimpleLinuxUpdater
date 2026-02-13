@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -629,6 +630,9 @@ func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolic
 		}
 		c, dialErr := dialSSHConnection(server, config)
 		if dialErr == nil {
+			if client != nil {
+				_ = client.Close()
+			}
 			client = c
 		}
 		return dialErr
@@ -952,7 +956,8 @@ func sanitizeAuditMeta(meta map[string]any) string {
 	for k, v := range meta {
 		key := strings.ToLower(strings.TrimSpace(k))
 		isPrecheckField := strings.HasPrefix(key, "precheck")
-		if (strings.Contains(key, "pass") || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
+		isPassField := key == "pass" || strings.HasPrefix(key, "pass_") || strings.HasSuffix(key, "_pass")
+		if (isPassField || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
 			continue
 		}
 		if !isPrecheckField && (key == "api_key" ||
@@ -1053,17 +1058,22 @@ func pruneAuditEvents(retentionDays int) error {
 	return err
 }
 
-func startAuditPruner() {
+func startAuditPruner(ctx context.Context) {
 	auditPruneTickerOnce.Do(func() {
 		if err := pruneAuditEvents(auditRetentionDays); err != nil {
 			log.Printf("audit prune failed: %v", err)
 		}
 		go func() {
 			t := time.NewTicker(auditPruneInterval)
-			defer t.Stop()
-			for range t.C {
-				if err := pruneAuditEvents(auditRetentionDays); err != nil {
-					log.Printf("audit prune failed: %v", err)
+			for {
+				select {
+				case <-t.C:
+					if err := pruneAuditEvents(auditRetentionDays); err != nil {
+						log.Printf("audit prune failed: %v", err)
+					}
+				case <-ctx.Done():
+					t.Stop()
+					return
 				}
 			}
 		}()
@@ -1611,7 +1621,6 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		updateCompletionOutcome,
 		"update.ssh_dial",
 		func(r *withActorRunner) {
-			logPrefix := ""
 			r.appendStatusLog("\nRunning pre-checks...")
 
 			precheckSummary := runUpdatePrechecks(r.client)
@@ -1639,7 +1648,6 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			r.prechecksPassed = true
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Logs += "\nPre-checks passed.\nRunning apt update..."
-				logPrefix = status.Logs + "\n"
 			})
 
 			var stdout, stderr bytes.Buffer
@@ -1665,7 +1673,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 				},
 			)
-			logs := logPrefix + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -1811,7 +1819,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 		"sudoers.enable.ssh_dial",
 		func(r *withActorRunner) {
 			line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", r.server.User)
-			escapedLine := shellEscapeSingleQuotes(line)
+			escapedLine := shellEscapeDoubleQuotes(line)
 			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
 			var stdout, stderr bytes.Buffer
@@ -2336,6 +2344,31 @@ func shellEscapeSingleQuotes(input string) string {
 	return strings.ReplaceAll(input, "'", "'\"'\"'")
 }
 
+func shellEscapeDoubleQuotes(input string) string {
+	escaped := strings.ReplaceAll(input, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+	escaped = strings.ReplaceAll(escaped, "`", "\\`")
+	return escaped
+}
+
+func isValidSSHUsername(username string) bool {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" || len(trimmed) > 64 {
+		return false
+	}
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 	key := strings.TrimSpace(server.Key)
@@ -2372,7 +2405,7 @@ func main() {
 	}
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
-	startAuditPruner()
+	startAuditPruner(context.Background())
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -2415,6 +2448,11 @@ func main() {
 		if newServer.Name == "" || newServer.Host == "" || newServer.User == "" {
 			audit(c, "server.create", "server", newServer.Name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
+		if !isValidSSHUsername(newServer.User) {
+			audit(c, "server.create", "server", newServer.Name, "failure", "Invalid SSH username", map[string]any{"user": newServer.User})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user; allowed characters are letters, digits, '.', '-', '_'"})
 			return
 		}
 		newServer.Port = normalizePort(newServer.Port)
@@ -2472,6 +2510,11 @@ func main() {
 		if updatedServer.Name == "" || updatedServer.Host == "" || updatedServer.User == "" {
 			audit(c, "server.update", "server", name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
+		if !isValidSSHUsername(updatedServer.User) {
+			audit(c, "server.update", "server", name, "failure", "Invalid SSH username", map[string]any{"user": updatedServer.User})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user; allowed characters are letters, digits, '.', '-', '_'"})
 			return
 		}
 		mu.Lock()

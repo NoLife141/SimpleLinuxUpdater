@@ -479,6 +479,21 @@ func TestSanitizeAuditMetaRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestSanitizeAuditMetaDoesNotOverRedactPassSubstrings(t *testing.T) {
+	meta := map[string]any{
+		"compass": "north",
+		"bypass":  true,
+		"pass":    "secret",
+	}
+	raw := sanitizeAuditMeta(meta)
+	if strings.Contains(raw, "secret") {
+		t.Fatalf("sanitizeAuditMeta() leaked pass value: %s", raw)
+	}
+	if !strings.Contains(raw, "compass") || !strings.Contains(raw, "bypass") {
+		t.Fatalf("sanitizeAuditMeta() over-redacted benign pass substrings: %s", raw)
+	}
+}
+
 func TestWriteAuditEventAndPrune(t *testing.T) {
 	preserveDBState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit.db"))
