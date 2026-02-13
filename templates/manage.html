@@ -330,6 +330,40 @@
             width: 180px;
         }
 
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 2px 8px;
+            font-size: 12px;
+            text-transform: capitalize;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .status-success { color: #34d399; }
+        .status-failure { color: #f87171; }
+        .status-started { color: #38bdf8; }
+        .status-ignored { color: #fbbf24; }
+
+        .audit-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .audit-controls input,
+        .audit-controls select {
+            min-width: 180px;
+        }
+
+        .audit-pagination {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 12px;
+        }
+
         .pill {
             display: inline-flex;
             align-items: center;
@@ -546,6 +580,44 @@
                 <button class="btn-ghost inline-btn" id="next-page">Next</button>
             </div>
         </section>
+
+        <section class="card fade-in" style="margin-top: 20px;">
+            <h2>Activity History</h2>
+            <p class="subtle">Tracks who did what and when. Entries older than 90 days are auto-pruned.</p>
+            <div class="audit-controls">
+                <input type="text" id="audit-target-filter" placeholder="Target name">
+                <input type="text" id="audit-action-filter" placeholder="Action (e.g. server.create)">
+                <select id="audit-status-filter">
+                    <option value="">All statuses</option>
+                    <option value="success">Success</option>
+                    <option value="failure">Failure</option>
+                    <option value="started">Started</option>
+                    <option value="ignored">Ignored</option>
+                </select>
+                <button class="btn-ghost inline-btn" id="audit-refresh">Refresh</button>
+                <button class="btn-ghost inline-btn" id="audit-prune">Prune (90d)</button>
+            </div>
+            <div class="table-wrap">
+                <table id="audit-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Actor</th>
+                            <th>Action</th>
+                            <th>Target</th>
+                            <th>Status</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+            <div class="audit-pagination">
+                <button class="btn-ghost inline-btn" id="audit-prev-page">Prev</button>
+                <span id="audit-page-info" class="subtle"></span>
+                <button class="btn-ghost inline-btn" id="audit-next-page">Next</button>
+            </div>
+        </section>
     </div>
 
     <div class="modal-backdrop" id="edit-modal">
@@ -605,6 +677,10 @@
         let manageServers = [];
         let page = 1;
         let editingServerName = null;
+        let auditEvents = [];
+        let auditPage = 1;
+        let auditPageSize = 20;
+        let auditTotal = 0;
 
         function escapeHtml(value) {
             return String(value ?? "")
@@ -828,6 +904,35 @@
             page += 1;
             renderTable();
         });
+        document.getElementById('audit-prev-page').addEventListener('click', async () => {
+            auditPage = Math.max(1, auditPage - 1);
+            await fetchAuditEvents();
+        });
+        document.getElementById('audit-next-page').addEventListener('click', async () => {
+            auditPage += 1;
+            await fetchAuditEvents();
+        });
+        document.getElementById('audit-target-filter').addEventListener('input', async () => {
+            auditPage = 1;
+            await fetchAuditEvents();
+        });
+        document.getElementById('audit-action-filter').addEventListener('input', async () => {
+            auditPage = 1;
+            await fetchAuditEvents();
+        });
+        document.getElementById('audit-status-filter').addEventListener('change', async () => {
+            auditPage = 1;
+            await fetchAuditEvents();
+        });
+        document.getElementById('audit-refresh').addEventListener('click', fetchAuditEvents);
+        document.getElementById('audit-prune').addEventListener('click', async () => {
+            const res = await fetch('/api/audit-events/prune', { method: 'POST' });
+            if (!res.ok) {
+                alert(await parseErrorResponse(res, 'Failed to prune audit events.'));
+                return;
+            }
+            await fetchAuditEvents();
+        });
 
         function renderAuth(server) {
             const bits = [];
@@ -849,6 +954,64 @@
                 return '<span class="pill pill-muted">None</span>';
             }
             return tags.map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join(' ');
+        }
+
+        function renderAuditTable() {
+            const tbody = document.querySelector('#audit-table tbody');
+            if (!tbody) return;
+            tbody.innerHTML = '';
+            if (!auditEvents.length) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="6" class="subtle">No activity yet.</td>';
+                tbody.appendChild(row);
+            } else {
+                auditEvents.forEach(evt => {
+                    const row = document.createElement('tr');
+                    const status = escapeHtml(evt.status || 'unknown');
+                    const statusClass = `status-${String(evt.status || '').toLowerCase()}`;
+                    row.innerHTML = `
+                        <td>${escapeHtml(evt.created_at || '')}</td>
+                        <td>${escapeHtml(evt.actor || '')}</td>
+                        <td>${escapeHtml(evt.action || '')}</td>
+                        <td>${escapeHtml(evt.target_type || '')}: ${escapeHtml(evt.target_name || '')}</td>
+                        <td><span class="status-badge ${statusClass}">${status}</span></td>
+                        <td>${escapeHtml(evt.message || '')}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+            }
+            const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
+            const currentPage = Math.min(auditPage, totalPages);
+            document.getElementById('audit-page-info').textContent = `Page ${currentPage} of ${totalPages} (${auditTotal} events)`;
+        }
+
+        async function fetchAuditEvents() {
+            const params = new URLSearchParams({
+                page: String(auditPage),
+                page_size: String(auditPageSize)
+            });
+            const targetName = document.getElementById('audit-target-filter').value.trim();
+            const action = document.getElementById('audit-action-filter').value.trim();
+            const status = document.getElementById('audit-status-filter').value;
+            if (targetName) params.set('target_name', targetName);
+            if (action) params.set('action', action);
+            if (status) params.set('status', status);
+            const res = await fetch(`/api/audit-events?${params.toString()}`);
+            if (!res.ok) {
+                const msg = await parseErrorResponse(res, 'Failed to load audit events.');
+                alert(msg);
+                return;
+            }
+            const data = await res.json();
+            auditEvents = data.items || [];
+            auditTotal = Number(data.total || 0);
+            const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
+            if (auditPage > totalPages) {
+                auditPage = totalPages;
+                await fetchAuditEvents();
+                return;
+            }
+            renderAuditTable();
         }
 
         document.getElementById('add-server-form').addEventListener('submit', async (e) => {
@@ -1084,6 +1247,8 @@
 
         fetchManageServers();
         fetchGlobalKeyStatus();
+        fetchAuditEvents();
+        setInterval(fetchAuditEvents, 15000);
     </script>
 </body>
 </html>

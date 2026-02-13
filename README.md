@@ -1,6 +1,6 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.2
+Version: v0.1.3
 
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 
@@ -37,10 +37,10 @@ sudo visudo -f /etc/sudoers.d/apt-nopasswd
 Add this line:
 
 ```
-<user> ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get
+<user> ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser
 ```
 
-This allows non-interactive sudo for apt commands only. The app writes this rule under `/etc/sudoers.d/`. Test on a non-critical host first; optional hardening is to validate with `visudo -c` after changes. If you prefer broader access, adjust accordingly.
+This allows non-interactive sudo for update and pre-check commands. The app writes this rule under `/etc/sudoers.d/`. Test on a non-critical host first; optional hardening is to validate with `visudo -c` after changes. If you prefer broader access, adjust accordingly.
 
 ## Building
 
@@ -69,7 +69,8 @@ This allows non-interactive sudo for apt commands only. The app writes this rule
 
 ```
 docker build -t debian-updater-web .
-docker run -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+cp .env-template .env
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
 ```
 
 The web server listens on `:8080` by default.
@@ -82,6 +83,7 @@ The app supports built-in HTTP Basic Auth (use this even behind your reverse pro
 - `DEBIAN_UPDATER_BASIC_AUTH_PASS`
 
 If only one of these is set, the server exits at startup with a configuration error.
+For Docker, `.env` is not loaded automatically unless you pass `--env-file .env`.
 
 Example (binary):
 
@@ -94,11 +96,8 @@ DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
 Example (Docker):
 
 ```bash
-docker run -p 8080:8080 \
-  -e DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
-  -e DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
-  -v debian-updater-data:/data \
-  debian-updater-web
+cp .env-template .env
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
 ```
 
 ### Quickstart (Binary)
@@ -119,6 +118,71 @@ The web interface allows managing multiple servers:
 2. Trigger updates: the process will update packages, list available upgrades, and wait for approval.
 3. Approve or cancel upgrades from the web interface.
 4. View real-time logs and status.
+
+### Audit Trail / Activity History
+
+- The Manage page includes an **Activity History** panel.
+- Each entry records: timestamp, actor, action, target, status, and message.
+- Actor is derived from app Basic Auth username when enabled.
+- If Basic Auth is disabled, actor is recorded as `unknown` (or `system` for background tasks).
+- Entries are stored in SQLite (`audit_events` table) and auto-pruned after 90 days.
+
+Audit API:
+
+- `GET /api/audit-events?page=1&page_size=50&target_name=&action=&status=&from=&to=`
+- `POST /api/audit-events/prune` (manual prune trigger)
+
+Example:
+
+```bash
+curl -u admin:change-me "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure&from=2026-02-10T00:00:00Z&to=2026-02-10T23:59:59Z"
+```
+
+### Retry Policy (Transient Failures)
+
+Remote actions (`update`, `autoremove`, `sudoers enable/disable`) use retry with exponential backoff for transient errors (network resets/timeouts, temporary SSH transport issues, apt lock contention). Permanent failures (bad auth, host key verification, invalid config) fail fast without retries.
+
+Defaults:
+
+- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS=3`
+- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS=1000`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS=8000`
+- `DEBIAN_UPDATER_RETRY_JITTER_PCT=20`
+
+Validation rules:
+
+- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS` must be in `[1,10]`
+- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` must be `> 0`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `> 0`
+- `DEBIAN_UPDATER_RETRY_JITTER_PCT` must be in `[0,50]`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `>= DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (otherwise base/max delay fall back to defaults)
+
+If a retry env value is invalid, the app logs a warning and uses defaults.
+
+### Update Pre-Checks (Fail Fast)
+
+Before `apt update` starts, update actions now run mandatory pre-checks over SSH:
+
+- Disk space: checks free space on `/var` and `/` and requires at least `1 GiB` (`1048576 KB`).
+- Lock files: checks apt/dpkg lock contention with `sudo /usr/bin/fuser` and fails immediately if locks are in use.
+- APT health: runs `sudo dpkg --audit` and `sudo apt-get check`.
+
+Lock check behavior:
+
+- If `/usr/bin/fuser` is missing on the remote host, the pre-check fails (install `psmisc`).
+- If a probed lock file path does not exist, this is treated as a no-lock state (non-fatal).
+
+Troubleshooting lock pre-check:
+
+- Missing `fuser` (fatal):
+  - Example: `sudo: /usr/bin/fuser: command not found`
+  - Example: `sudo: unable to execute /usr/bin/fuser: No such file or directory`
+- Lock file path missing (non-fatal/no-lock):
+  - Example: `/usr/bin/fuser: /var/cache/apt/archives/lock: No such file or directory`
+- Lock is in use (fatal):
+  - `fuser` exits `0` and reports one or more PIDs holding lock files.
+
+If any pre-check fails, the update stops before entering the normal update/approval flow, status becomes `error`, and logs/audit metadata include the failed check and details.
 
 ### Tests and Release
 
@@ -141,6 +205,8 @@ Release tags also publish a Docker image to GHCR:
 - `ghcr.io/nolife141/simplelinuxupdater:vX.Y.Z`
 - `ghcr.io/nolife141/simplelinuxupdater:latest`
 
+Note: local `docker build` examples use the image name `debian-updater-web`; this is just a local tag and can be changed.
+
 Runtime testing is currently performed on Linux amd64.
 
 ```bash
@@ -158,16 +224,6 @@ Release checklist (v0.1.0 and later):
 - [ ] Dashboard loads and shows version pill
 - [ ] Add/edit server works (including SSH port)
 - [ ] Autoremove and sudoers setup work on a test host
-
-### Web Server
-
-1. Run `./webserver` on your central server.
-
-2. Access the web interface at http://your-central-server:8080
-
-3. Use the web interface to manage servers: add, edit, delete servers.
-
-4. Trigger updates on servers. The web interface will show server status and allow triggering updates. Logs are displayed in real-time.
 
 ### Encryption Key (Auto-Generated)
 
@@ -188,19 +244,27 @@ Optional DB path override:
    docker build -t debian-updater-web .
    ```
 
-3. Run the container:
-   ```
-   docker run -p 8080:8080 debian-updater-web
+3. Copy env template and set your credentials:
+
+   ```bash
+   cp .env-template .env
    ```
 
-4. Access the web interface at http://localhost:8080
+4. Run the container:
 
-5. To persist server configurations, use a named volume:
-   ```
-   docker run -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+   ```bash
+   docker run --env-file .env -p 8080:8080 debian-updater-web
    ```
 
-6. If you use SSH keys, upload the private key from the web UI (global or per-server). The key is stored encrypted in the DB.
+5. Access the web interface at http://localhost:8080
+
+6. To persist server configurations, use a named volume:
+
+   ```bash
+   docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+   ```
+
+7. If you use SSH keys, upload the private key from the web UI (global or per-server). The key is stored encrypted in the DB.
 
 ## SECURITY
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -13,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
+	mathrand "math/rand"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -60,11 +63,12 @@ var db *sql.DB
 var dbOnce sync.Once
 var keyOnce sync.Once
 var encryptionKey []byte
-var globalKeyOnce sync.Once
+var globalKeyMu sync.RWMutex
 var globalKey string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
+var auditPruneTickerOnce sync.Once
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -73,11 +77,122 @@ const basicAuthUserEnv = "DEBIAN_UPDATER_BASIC_AUTH_USER"
 const basicAuthPassEnv = "DEBIAN_UPDATER_BASIC_AUTH_PASS"
 const maxUploadedKeyBytes = 64 * 1024
 const sshConnectTimeout = 15 * time.Second
+const auditRetentionDays = 90
+const auditPruneInterval = 12 * time.Hour
+const auditMessageMaxLen = 512
+const auditMetaMaxLen = 2048
+const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
+const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
+const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
+const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
+const updatePrecheckMinFreeKB int64 = 1024 * 1024
+const precheckOutputMaxLen = 240
+const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
+const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+const precheckDpkgAuditCmd = "sudo dpkg --audit"
+const precheckAptCheckCmd = "sudo apt-get check"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
 var errActionInProgress = errors.New("action already in progress")
 var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
+
+type AuditEvent struct {
+	ID         int64  `json:"id"`
+	CreatedAt  string `json:"created_at"`
+	Actor      string `json:"actor"`
+	Action     string `json:"action"`
+	TargetType string `json:"target_type"`
+	TargetName string `json:"target_name"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+	MetaJSON   string `json:"meta_json"`
+	RequestID  string `json:"request_id"`
+	ClientIP   string `json:"client_ip"`
+}
+
+type RetryPolicy struct {
+	MaxAttempts int
+	BaseDelay   time.Duration
+	MaxDelay    time.Duration
+	JitterPct   int
+}
+
+type updatePrecheckResult struct {
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Details string `json:"details"`
+	Output  string `json:"output,omitempty"`
+}
+
+type updatePrecheckSummary struct {
+	AllPassed   bool                   `json:"all_passed"`
+	FailedCheck string                 `json:"failed_check,omitempty"`
+	Results     []updatePrecheckResult `json:"results"`
+}
+
+type retryableTaggedError struct {
+	err error
+}
+
+type sshSessionRunner interface {
+	SetStdin(io.Reader)
+	SetStdout(io.Writer)
+	SetStderr(io.Writer)
+	Run(string) error
+	Close() error
+}
+
+type sshConnection interface {
+	NewSession() (sshSessionRunner, error)
+	Close() error
+}
+
+type realSSHSession struct {
+	session *ssh.Session
+}
+
+func (s *realSSHSession) SetStdin(r io.Reader)  { s.session.Stdin = r }
+func (s *realSSHSession) SetStdout(w io.Writer) { s.session.Stdout = w }
+func (s *realSSHSession) SetStderr(w io.Writer) { s.session.Stderr = w }
+func (s *realSSHSession) Run(cmd string) error  { return s.session.Run(cmd) }
+func (s *realSSHSession) Close() error          { return s.session.Close() }
+
+type realSSHConnection struct {
+	client *ssh.Client
+}
+
+func (c *realSSHConnection) NewSession() (sshSessionRunner, error) {
+	session, err := c.client.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	return &realSSHSession{session: session}, nil
+}
+
+func (c *realSSHConnection) Close() error {
+	return c.client.Close()
+}
+
+var dialSSHConnection = func(server Server, config *ssh.ClientConfig) (sshConnection, error) {
+	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
+	if err != nil {
+		return nil, err
+	}
+	return &realSSHConnection{client: client}, nil
+}
+
+func (e retryableTaggedError) Error() string {
+	return e.err.Error()
+}
+
+func (e retryableTaggedError) Unwrap() error {
+	return e.err
+}
+
+func (e retryableTaggedError) Retryable() bool {
+	return true
+}
 
 func dbPath() string {
 	if p := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_DB_PATH")); p != "" {
@@ -233,7 +348,875 @@ func ensureSchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
 		return err
 	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS audit_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target_type TEXT NOT NULL,
+			target_name TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL,
+			meta_json TEXT NOT NULL DEFAULT '{}',
+			request_id TEXT NOT NULL DEFAULT '',
+			client_ip TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_events (created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_events (target_type, target_name, created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= maxLen {
+		return string(runes)
+	}
+	return string(runes[:maxLen])
+}
+
+func normalizeAuditFilterTimestamp(raw string) (string, error) {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	return parsed.UTC().Format(time.RFC3339), nil
+}
+
+func updateCompletionOutcome(finalStatus string) string {
+	switch finalStatus {
+	case "done":
+		return "success"
+	case "idle":
+		return "ignored"
+	default:
+		return "failure"
+	}
+}
+
+func parseIntEnvWithDefault(envKey string, defaultValue int) int {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, using default %d", envKey, raw, defaultValue)
+		return defaultValue
+	}
+	return parsed
+}
+
+func loadRetryPolicyFromEnv() RetryPolicy {
+	p := RetryPolicy{
+		MaxAttempts: 3,
+		BaseDelay:   1 * time.Second,
+		MaxDelay:    8 * time.Second,
+		JitterPct:   20,
+	}
+	attempts := parseIntEnvWithDefault(retryMaxAttemptsEnv, p.MaxAttempts)
+	if attempts < 1 || attempts > 10 {
+		log.Printf("Invalid %s=%d, must be in [1,10], using default %d", retryMaxAttemptsEnv, attempts, p.MaxAttempts)
+	} else {
+		p.MaxAttempts = attempts
+	}
+	baseDelayMs := parseIntEnvWithDefault(retryBaseDelayMSEnv, int(p.BaseDelay/time.Millisecond))
+	if baseDelayMs <= 0 {
+		log.Printf("Invalid %s=%d, must be > 0, using default %d", retryBaseDelayMSEnv, baseDelayMs, int(p.BaseDelay/time.Millisecond))
+	} else {
+		p.BaseDelay = time.Duration(baseDelayMs) * time.Millisecond
+	}
+	maxDelayMs := parseIntEnvWithDefault(retryMaxDelayMSEnv, int(p.MaxDelay/time.Millisecond))
+	if maxDelayMs <= 0 {
+		log.Printf("Invalid %s=%d, must be > 0, using default %d", retryMaxDelayMSEnv, maxDelayMs, int(p.MaxDelay/time.Millisecond))
+	} else {
+		p.MaxDelay = time.Duration(maxDelayMs) * time.Millisecond
+	}
+	if p.MaxDelay < p.BaseDelay {
+		log.Printf("Invalid retry delay configuration: max delay %v lower than base delay %v, using defaults", p.MaxDelay, p.BaseDelay)
+		p.BaseDelay = 1 * time.Second
+		p.MaxDelay = 8 * time.Second
+	}
+	jitterPct := parseIntEnvWithDefault(retryJitterPctEnv, p.JitterPct)
+	if jitterPct < 0 || jitterPct > 50 {
+		log.Printf("Invalid %s=%d, must be in [0,50], using default %d", retryJitterPctEnv, jitterPct, p.JitterPct)
+	} else {
+		p.JitterPct = jitterPct
+	}
+	return p
+}
+
+func isRetryableMessage(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	if normalized == "" {
+		return false
+	}
+
+	nonRetryableHints := []string{
+		"unable to authenticate",
+		"permission denied",
+		"no auth",
+		"authentication",
+		"host key",
+		"knownhosts",
+		"missing password or ssh key",
+		"fingerprint mismatch",
+		"invalid credentials",
+		"invalid key",
+		"invalid private key",
+	}
+	for _, hint := range nonRetryableHints {
+		if strings.Contains(normalized, hint) {
+			return false
+		}
+	}
+
+	retryableHints := []string{
+		"i/o timeout",
+		"timeout",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"eof",
+		"temporarily unavailable",
+		"resource temporarily unavailable",
+		"could not get lock",
+		"dpkg frontend lock",
+		"network is unreachable",
+		"no route to host",
+		"connection closed",
+	}
+	for _, hint := range retryableHints {
+		if strings.Contains(normalized, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var tagged interface{ Retryable() bool }
+	if errors.As(err, &tagged) && tagged.Retryable() {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+	}
+	return isRetryableMessage(err.Error())
+}
+
+func markRetryableFromOutput(err error, output string) error {
+	if err == nil {
+		return nil
+	}
+	if isRetryableMessage(output) {
+		return retryableTaggedError{err: err}
+	}
+	return err
+}
+
+func computeRetryDelay(policy RetryPolicy, failedAttempt int, jitterRand float64) time.Duration {
+	if failedAttempt < 1 {
+		failedAttempt = 1
+	}
+	delay := float64(policy.BaseDelay) * math.Pow(2, float64(failedAttempt-1))
+	maxDelay := float64(policy.MaxDelay)
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	if policy.JitterPct > 0 {
+		// jitterRand in [0,1) maps to [-1,1)
+		jitterFactor := (jitterRand*2 - 1) * (float64(policy.JitterPct) / 100.0)
+		delay = delay * (1 + jitterFactor)
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+	if delay < float64(time.Millisecond) {
+		delay = float64(time.Millisecond)
+	}
+	return time.Duration(delay)
+}
+
+func runWithRetryWithSleep(
+	policy RetryPolicy,
+	opName string,
+	fn func() error,
+	onRetry func(attempt int, wait time.Duration, err error),
+	sleepFn func(time.Duration),
+) error {
+	if policy.MaxAttempts < 1 {
+		policy.MaxAttempts = 1
+	}
+	var lastErr error
+	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
+		lastErr = fn()
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryableError(lastErr) {
+			return lastErr
+		}
+		if attempt == policy.MaxAttempts {
+			break
+		}
+		wait := computeRetryDelay(policy, attempt, mathrand.Float64())
+		if onRetry != nil {
+			onRetry(attempt, wait, lastErr)
+		}
+		if sleepFn != nil {
+			sleepFn(wait)
+		}
+	}
+	if lastErr != nil && isRetryableError(lastErr) {
+		log.Printf("Retry exhausted for %s after %d attempts: %v", opName, policy.MaxAttempts, lastErr)
+	}
+	return lastErr
+}
+
+func runWithRetry(policy RetryPolicy, opName string, fn func() error, onRetry func(attempt int, wait time.Duration, err error)) error {
+	return runWithRetryWithSleep(policy, opName, fn, onRetry, time.Sleep)
+}
+
+func reconnectSSHClient(server Server, config *ssh.ClientConfig, clientRef *sshConnection) error {
+	if clientRef != nil && *clientRef != nil {
+		(*clientRef).Close()
+		*clientRef = nil
+	}
+	conn, err := dialSSHConnection(server, config)
+	if err != nil {
+		return err
+	}
+	if clientRef != nil {
+		*clientRef = conn
+	} else {
+		conn.Close()
+	}
+	return nil
+}
+
+func appendStatusRetryLog(serverName string, format string, args ...any) {
+	mu.Lock()
+	if status := statusMap[serverName]; status != nil {
+		status.Logs += fmt.Sprintf(format, args...)
+	}
+	mu.Unlock()
+}
+
+func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolicy, opName string, attemptsUsed *int) (sshConnection, error) {
+	var client sshConnection
+	err := runWithRetry(policy, opName, func() error {
+		if attemptsUsed != nil {
+			*attemptsUsed += 1
+		}
+		c, dialErr := dialSSHConnection(server, config)
+		if dialErr == nil {
+			if client != nil {
+				_ = client.Close()
+			}
+			client = c
+		}
+		return dialErr
+	}, func(attempt int, wait time.Duration, retryErr error) {
+		appendStatusRetryLog(
+			server.Name,
+			"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
+			attempt,
+			policy.MaxAttempts,
+			retryErr,
+			wait.Round(time.Millisecond),
+		)
+	})
+	return client, err
+}
+
+func runSSHOperationWithRetry(
+	server Server,
+	config *ssh.ClientConfig,
+	clientRef *sshConnection,
+	policy RetryPolicy,
+	opName string,
+	retryLogFormat string,
+	attemptsUsed *int,
+	operation func() error,
+) error {
+	attempt := 0
+	return runWithRetry(policy, opName, func() error {
+		if attemptsUsed != nil {
+			*attemptsUsed += 1
+		}
+		attempt++
+		if attempt > 1 {
+			if reconnectErr := reconnectSSHClient(server, config, clientRef); reconnectErr != nil {
+				return reconnectErr
+			}
+		}
+		return operation()
+	}, func(retryAttempt int, wait time.Duration, retryErr error) {
+		appendStatusRetryLog(
+			server.Name,
+			retryLogFormat,
+			retryAttempt,
+			policy.MaxAttempts,
+			retryErr,
+			wait.Round(time.Millisecond),
+		)
+	})
+}
+
+func compactCommandOutput(stdout, stderr string) string {
+	combined := strings.TrimSpace(strings.TrimSpace(stdout) + "\n" + strings.TrimSpace(stderr))
+	if combined == "" {
+		return ""
+	}
+	return truncateString(combined, precheckOutputMaxLen)
+}
+
+func kbToGiB(kb int64) float64 {
+	return float64(kb) / (1024.0 * 1024.0)
+}
+
+func isSudoPolicyOrPasswordError(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(normalized, "a password is required") ||
+		strings.Contains(normalized, "not allowed to run sudo") ||
+		strings.Contains(normalized, "is not in the sudoers file")
+}
+
+func isCommandNotFoundError(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(normalized, "/usr/bin/fuser: command not found") ||
+		strings.Contains(normalized, "/usr/bin/fuser: not found") ||
+		strings.Contains(normalized, "unable to execute /usr/bin/fuser") ||
+		strings.Contains(normalized, "sudo: /usr/bin/fuser: no such file or directory") ||
+		(strings.Contains(normalized, "command not found") && strings.Contains(normalized, "fuser"))
+}
+
+func isBenignNoLockStateOutput(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	if normalized == "" {
+		return true
+	}
+	if strings.Contains(normalized, "no process found") {
+		return true
+	}
+	lockPathMentioned := strings.Contains(normalized, "/var/lib/dpkg/lock-frontend") ||
+		strings.Contains(normalized, "/var/lib/dpkg/lock") ||
+		strings.Contains(normalized, "/var/cache/apt/archives/lock")
+	if lockPathMentioned && (strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "no such file or directory")) {
+		return true
+	}
+	return false
+}
+
+func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+	if client == nil {
+		return "", "", errors.New("missing SSH connection")
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer session.Close()
+	var stdout, stderr bytes.Buffer
+	session.SetStdout(&stdout)
+	session.SetStderr(&stderr)
+	if stdin != nil {
+		session.SetStdin(stdin)
+	}
+	err = session.Run(cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+func sshExitCode(err error) (int, bool) {
+	if err == nil {
+		return 0, true
+	}
+	var exitStatusErr interface{ ExitStatus() int }
+	if errors.As(err, &exitStatusErr) {
+		return exitStatusErr.ExitStatus(), true
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), true
+	}
+	return 0, false
+}
+
+func checkDiskSpace(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, precheckDiskSpaceCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err != nil {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: fmt.Sprintf("Failed to read free disk space: %v", err),
+			Output:  output,
+		}
+	}
+	fields := strings.Fields(stdout)
+	if len(fields) == 0 {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: "Could not parse free disk space output.",
+			Output:  output,
+		}
+	}
+	minFreeKB := int64(-1)
+	for _, field := range fields {
+		value, convErr := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
+		if convErr != nil {
+			return updatePrecheckResult{
+				Name:    "disk_space",
+				Passed:  false,
+				Details: fmt.Sprintf("Invalid free space value %q.", field),
+				Output:  output,
+			}
+		}
+		if minFreeKB == -1 || value < minFreeKB {
+			minFreeKB = value
+		}
+	}
+	if minFreeKB < updatePrecheckMinFreeKB {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: fmt.Sprintf("Insufficient disk space: %.2f GiB free (minimum %.2f GiB).", kbToGiB(minFreeKB), kbToGiB(updatePrecheckMinFreeKB)),
+			Output:  "",
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "disk_space",
+		Passed:  true,
+		Details: fmt.Sprintf("Disk space OK: %.2f GiB free (minimum %.2f GiB).", kbToGiB(minFreeKB), kbToGiB(updatePrecheckMinFreeKB)),
+		Output:  "",
+	}
+}
+
+func checkAptLocks(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, precheckLocksCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err == nil {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "APT/DPKG lock files are currently in use.",
+			Output:  output,
+		}
+	}
+	if isSudoPolicyOrPasswordError(output + "\n" + err.Error()) {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock pre-check requires passwordless sudo for `/usr/bin/fuser`. Click \"Enable passwordless apt\" for this server, then retry.",
+			Output:  output,
+		}
+	}
+	if isCommandNotFoundError(output + "\n" + err.Error()) {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  output,
+		}
+	}
+	if exitCode, ok := sshExitCode(err); ok && exitCode == 1 {
+		trimmedOutput := strings.TrimSpace(output)
+		if !isBenignNoLockStateOutput(trimmedOutput) {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  false,
+				Details: "Could not determine apt/dpkg lock state from lock check output.",
+				Output:  output,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  true,
+			Details: "No apt/dpkg lock contention detected.",
+			Output:  output,
+		}
+	}
+	if exitCode, ok := sshExitCode(err); ok && exitCode == 127 {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  output,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "apt_locks",
+		Passed:  false,
+		Details: fmt.Sprintf("Failed to evaluate apt/dpkg lock state: %v", err),
+		Output:  output,
+	}
+}
+
+func checkAptHealth(client sshConnection) updatePrecheckResult {
+	dpkgStdout, dpkgStderr, dpkgErr := runSSHCommand(client, precheckDpkgAuditCmd, nil)
+	dpkgOutput := compactCommandOutput(dpkgStdout, dpkgStderr)
+	if dpkgErr != nil {
+		if isSudoPolicyOrPasswordError(dpkgOutput + "\n" + dpkgErr.Error()) {
+			return updatePrecheckResult{
+				Name:    "apt_health",
+				Passed:  false,
+				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/dpkg`. Click \"Enable passwordless apt\" for this server, then retry.",
+				Output:  dpkgOutput,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: fmt.Sprintf("dpkg audit failed: %v", dpkgErr),
+			Output:  dpkgOutput,
+		}
+	}
+	if strings.TrimSpace(dpkgStdout+dpkgStderr) != "" {
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: "dpkg audit reported package state issues.",
+			Output:  dpkgOutput,
+		}
+	}
+	aptStdout, aptStderr, aptErr := runSSHCommand(client, precheckAptCheckCmd, nil)
+	aptOutput := compactCommandOutput(aptStdout, aptStderr)
+	if aptErr != nil {
+		if isSudoPolicyOrPasswordError(aptOutput + "\n" + aptErr.Error()) {
+			return updatePrecheckResult{
+				Name:    "apt_health",
+				Passed:  false,
+				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/apt-get`. Click \"Enable passwordless apt\" for this server, then retry.",
+				Output:  aptOutput,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: fmt.Sprintf("apt-get check failed: %v", aptErr),
+			Output:  aptOutput,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "apt_health",
+		Passed:  true,
+		Details: "APT health checks passed.",
+		Output:  compactCommandOutput(dpkgOutput, aptOutput),
+	}
+}
+
+func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
+	checks := []func(sshConnection) updatePrecheckResult{
+		checkDiskSpace,
+		checkAptLocks,
+		checkAptHealth,
+	}
+	summary := updatePrecheckSummary{
+		AllPassed: true,
+		Results:   make([]updatePrecheckResult, 0, len(checks)),
+	}
+	for _, check := range checks {
+		result := check(client)
+		summary.Results = append(summary.Results, result)
+		if !result.Passed {
+			summary.AllPassed = false
+			summary.FailedCheck = result.Name
+			return summary
+		}
+	}
+	return summary
+}
+
+func sanitizeAuditMeta(meta map[string]any) string {
+	if meta == nil {
+		return "{}"
+	}
+	redacted := make(map[string]any, len(meta))
+	for k, v := range meta {
+		key := strings.ToLower(strings.TrimSpace(k))
+		isPrecheckField := strings.HasPrefix(key, "precheck")
+		isPassField := key == "pass" || strings.HasPrefix(key, "pass_") || strings.HasSuffix(key, "_pass")
+		if (isPassField || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
+			continue
+		}
+		if !isPrecheckField && (key == "api_key" ||
+			key == "access_key" ||
+			key == "secret_key" ||
+			key == "private_key" ||
+			key == "ssh_key" ||
+			key == "key" ||
+			strings.HasPrefix(key, "key_") ||
+			strings.HasSuffix(key, "_key") ||
+			strings.HasSuffix(key, "_secret")) {
+			continue
+		}
+		redacted[k] = v
+	}
+	raw, err := json.Marshal(redacted)
+	if err != nil {
+		return "{}"
+	}
+	if len(raw) > auditMetaMaxLen {
+		log.Printf("Warning: audit metadata truncated from %d bytes across %d fields", len(raw), len(redacted))
+		truncated := map[string]any{
+			"_truncated":      true,
+			"original_length": len(raw),
+			"fields":          len(redacted),
+			"preview":         "",
+		}
+		previewRunes := []rune(string(raw))
+		lo := 0
+		hi := len(previewRunes)
+		best := `{"_truncated":true}`
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			preview := string(previewRunes[:mid])
+			if mid < len(previewRunes) {
+				preview += "..."
+			}
+			truncated["preview"] = preview
+			candidate, marshalErr := json.Marshal(truncated)
+			if marshalErr != nil {
+				hi = mid - 1
+				continue
+			}
+			if len(candidate) <= auditMetaMaxLen {
+				best = string(candidate)
+				lo = mid + 1
+				continue
+			}
+			hi = mid - 1
+		}
+		return best
+	}
+	return string(raw)
+}
+
+func handleAuditEvents(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	targetName := strings.TrimSpace(c.Query("target_name"))
+	action := strings.TrimSpace(c.Query("action"))
+	status := strings.TrimSpace(c.Query("status"))
+	from := strings.TrimSpace(c.Query("from"))
+	to := strings.TrimSpace(c.Query("to"))
+	offset := (page - 1) * pageSize
+
+	var whereParts []string
+	var args []any
+	if targetName != "" {
+		whereParts = append(whereParts, "target_name = ?")
+		args = append(args, targetName)
+	}
+	if action != "" {
+		whereParts = append(whereParts, "action = ?")
+		args = append(args, action)
+	}
+	if status != "" {
+		whereParts = append(whereParts, "status = ?")
+		args = append(args, status)
+	}
+	if from != "" {
+		normalizedFrom, err := normalizeAuditFilterTimestamp(from)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from timestamp; expected RFC3339"})
+			return
+		}
+		whereParts = append(whereParts, "created_at >= ?")
+		args = append(args, normalizedFrom)
+	}
+	if to != "" {
+		normalizedTo, err := normalizeAuditFilterTimestamp(to)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to timestamp; expected RFC3339"})
+			return
+		}
+		whereParts = append(whereParts, "created_at <= ?")
+		args = append(args, normalizedTo)
+	}
+
+	whereClause := ""
+	if len(whereParts) > 0 {
+		whereClause = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	db := getDB()
+	countQuery := "SELECT COUNT(*) FROM audit_events" + whereClause
+	var total int
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count audit events"})
+		return
+	}
+
+	query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
+			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	queryArgs := append(append([]any{}, args...), pageSize, offset)
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
+		return
+	}
+	defer rows.Close()
+
+	items := make([]AuditEvent, 0, pageSize)
+	for rows.Next() {
+		var evt AuditEvent
+		if err := rows.Scan(
+			&evt.ID,
+			&evt.CreatedAt,
+			&evt.Actor,
+			&evt.Action,
+			&evt.TargetType,
+			&evt.TargetName,
+			&evt.Status,
+			&evt.Message,
+			&evt.MetaJSON,
+			&evt.RequestID,
+			&evt.ClientIP,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
+			return
+		}
+		items = append(items, evt)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to iterate audit events"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":     items,
+		"page":      page,
+		"page_size": pageSize,
+		"total":     total,
+	})
+}
+
+func actorFromContext(c *gin.Context) string {
+	if c == nil {
+		return "system"
+	}
+	if actor, ok := c.Get("actor"); ok {
+		if s := strings.TrimSpace(fmt.Sprintf("%v", actor)); s != "" {
+			return s
+		}
+	}
+	return "unknown"
+}
+
+func clientIPFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.ClientIP())
+}
+
+func writeAuditEvent(evt AuditEvent) error {
+	db := getDB()
+	_, err := db.Exec(
+		`INSERT INTO audit_events (created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		evt.CreatedAt,
+		evt.Actor,
+		evt.Action,
+		evt.TargetType,
+		evt.TargetName,
+		evt.Status,
+		evt.Message,
+		evt.MetaJSON,
+		evt.RequestID,
+		evt.ClientIP,
+	)
+	return err
+}
+
+func auditWithActor(actor, clientIP, action, targetType, targetName, status, message string, meta map[string]any) {
+	evt := AuditEvent{
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Actor:      truncateString(actor, 128),
+		Action:     truncateString(action, 64),
+		TargetType: truncateString(targetType, 64),
+		TargetName: truncateString(targetName, 255),
+		Status:     truncateString(status, 32),
+		Message:    truncateString(message, auditMessageMaxLen),
+		MetaJSON:   sanitizeAuditMeta(meta),
+		RequestID:  "",
+		ClientIP:   truncateString(clientIP, 128),
+	}
+	if evt.Actor == "" {
+		evt.Actor = "unknown"
+	}
+	if evt.TargetName == "" {
+		evt.TargetName = "-"
+	}
+	if err := writeAuditEvent(evt); err != nil {
+		log.Printf("audit write failed: action=%s target=%s err=%v", action, targetName, err)
+	}
+}
+
+func audit(c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
+	auditWithActor(actorFromContext(c), clientIPFromContext(c), action, targetType, targetName, status, message, meta)
+}
+
+func pruneAuditEvents(retentionDays int) error {
+	if retentionDays <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	_, err := getDB().Exec("DELETE FROM audit_events WHERE created_at < ?", cutoff)
+	return err
+}
+
+func startAuditPruner(ctx context.Context) {
+	auditPruneTickerOnce.Do(func() {
+		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+			log.Printf("audit prune failed: %v", err)
+		}
+		go func() {
+			t := time.NewTicker(auditPruneInterval)
+			for {
+				select {
+				case <-t.C:
+					if err := pruneAuditEvents(auditRetentionDays); err != nil {
+						log.Printf("audit prune failed: %v", err)
+					}
+				case <-ctx.Done():
+					t.Stop()
+					return
+				}
+			}
+		}()
+	})
 }
 
 func encryptSecret(secret string) (string, error) {
@@ -524,6 +1507,7 @@ func basicAuthMiddleware(username, password string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
+		c.Set("actor", user)
 		c.Next()
 	}
 }
@@ -559,410 +1543,606 @@ func init() {
 }
 
 func runUpdate(server Server) {
+	retryPolicy := loadRetryPolicyFromEnv()
+	runUpdateWithActor(server, "system", "", retryPolicy)
+}
+
+type withActorRunner struct {
+	server   Server
+	actor    string
+	clientIP string
+	policy   RetryPolicy
+
+	config *ssh.ClientConfig
+	client sshConnection
+
+	sshDialAttempts        int
+	aptUpdateAttempts      int
+	listUpgradableAttempts int
+	aptUpgradeAttempts     int
+	commandAttempts        int
+
+	retryExhausted bool
+	lastErrClass   string
+
+	prechecksPassed bool
+	precheckFailed  string
+	precheckResults []updatePrecheckResult
+}
+
+func (r *withActorRunner) withStatus(update func(*ServerStatus)) bool {
 	mu.Lock()
-	status := statusMap[server.Name]
+	defer mu.Unlock()
+	status := statusMap[r.server.Name]
 	if status == nil {
-		mu.Unlock()
+		return false
+	}
+	update(status)
+	return true
+}
+
+func (r *withActorRunner) appendStatusLog(line string) {
+	_ = r.withStatus(func(status *ServerStatus) {
+		status.Logs += line
+	})
+}
+
+func (r *withActorRunner) setErrorLogs(logs string) {
+	_ = r.withStatus(func(status *ServerStatus) {
+		status.Status = "error"
+		status.Logs = logs
+	})
+}
+
+func (r *withActorRunner) currentLogs() string {
+	mu.Lock()
+	defer mu.Unlock()
+	if status := statusMap[r.server.Name]; status != nil {
+		return status.Logs
+	}
+	return ""
+}
+
+func (r *withActorRunner) markErrorClass(err error) {
+	if isRetryableError(err) {
+		r.lastErrClass = "transient"
+		r.retryExhausted = true
 		return
 	}
-	status.Status = "updating"
-	status.Logs = "Starting Linux Updater...\nRunning apt update..."
-	mu.Unlock()
+	r.lastErrClass = "permanent"
+}
 
-	authMethods, err := buildAuthMethods(server)
+func (r *withActorRunner) setupSSH(dialOpName string) bool {
+	authMethods, err := buildAuthMethods(r.server)
 	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
+		r.lastErrClass = "permanent"
+		r.setErrorLogs(fmt.Sprintf("Auth setup failed: %v", err))
+		return false
 	}
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
+		r.lastErrClass = "permanent"
+		r.setErrorLogs(fmt.Sprintf("Host key verification setup failed: %v", err))
+		return false
 	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
+	r.config = &ssh.ClientConfig{
+		User:            r.server.User,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         sshConnectTimeout,
 	}
-
-	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
+	client, err := dialSSHWithRetry(r.server, r.config, r.policy, dialOpName, &r.sshDialAttempts)
 	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
+		r.markErrorClass(err)
+		r.setErrorLogs(fmt.Sprintf("SSH connection failed: %v", err))
+		return false
 	}
-	defer client.Close()
+	r.client = client
+	return true
+}
 
-	// Run apt update
-	session, err := client.NewSession()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH session failed: %v", err)
-		mu.Unlock()
-		return
+func runWithActorShared(
+	server Server,
+	actor, clientIP string,
+	policy RetryPolicy,
+	auditAction string,
+	initStatus func(*ServerStatus, RetryPolicy),
+	auditMeta func(*withActorRunner, string) map[string]any,
+	outcomeForStatus func(string) string,
+	dialOpName string,
+	runSteps func(*withActorRunner),
+) {
+	runner := &withActorRunner{
+		server:       server,
+		actor:        actor,
+		clientIP:     clientIP,
+		policy:       policy,
+		lastErrClass: "none",
 	}
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	err = session.Run("sudo apt update")
-	session.Close()
-	logs := stdout.String() + stderr.String()
-	if err != nil {
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
+	if auditMeta == nil {
+		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
 	}
-
-	// Get upgradable
-	upgradable, err := getUpgradable(client)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs + fmt.Sprintf("\nError listing upgradable: %v", err)
-		mu.Unlock()
-		return
+	if outcomeForStatus == nil {
+		outcomeForStatus = updateCompletionOutcome
 	}
 
-	if len(upgradable) == 0 {
+	defer func() {
 		mu.Lock()
-		status.Status = "done"
-		status.Logs = logs + "\nNo packages to upgrade."
-		mu.Unlock()
-		return
-	}
-
-	// Set pending approval
-	mu.Lock()
-	status.Status = "pending_approval"
-	status.Upgradable = upgradable
-	status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
-	mu.Unlock()
-
-	// Wait for approval
-	for {
-		time.Sleep(1 * time.Second)
-		mu.Lock()
-		if status.Status == "approved" {
-			mu.Unlock()
-			break
-		}
-		if status.Status == "cancelled" {
-			status.Status = "idle"
-			mu.Unlock()
-			return
+		finalStatus := "unknown"
+		if status := statusMap[server.Name]; status != nil {
+			finalStatus = status.Status
 		}
 		mu.Unlock()
-	}
+		outcome := outcomeForStatus(finalStatus)
+		auditWithActor(
+			actor,
+			clientIP,
+			auditAction,
+			"server",
+			server.Name,
+			outcome,
+			fmt.Sprintf("Final status: %s", finalStatus),
+			auditMeta(runner, finalStatus),
+		)
+	}()
 
-	// Proceed with upgrade
-	mu.Lock()
-	status.Status = "upgrading"
-	status.Logs += "\nRunning apt upgrade..."
-	mu.Unlock()
-
-	session, err = client.NewSession()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs += fmt.Sprintf("\nSSH session failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer session.Close()
-
-	stdout.Reset()
-	stderr.Reset()
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	err = session.Run("sudo apt upgrade -y")
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs = currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
+	if !runner.withStatus(func(status *ServerStatus) {
+		initStatus(status, policy)
+	}) {
 		return
 	}
 
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nUpgrade completed."
-	mu.Unlock()
+	if !runner.setupSSH(dialOpName) {
+		return
+	}
+	defer func() {
+		if runner.client != nil {
+			_ = runner.client.Close()
+		}
+	}()
+
+	runSteps(runner)
+}
+
+func doneOnlyOutcome(finalStatus string) string {
+	if finalStatus == "done" {
+		return "success"
+	}
+	return "failure"
+}
+
+func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
+	return map[string]any{
+		"status":                        finalStatus,
+		"ssh_dial_attempts_used":        r.sshDialAttempts,
+		"apt_update_attempts_used":      r.aptUpdateAttempts,
+		"list_upgradable_attempts_used": r.listUpgradableAttempts,
+		"apt_upgrade_attempts_used":     r.aptUpgradeAttempts,
+		"total_attempts_used":           r.sshDialAttempts + r.aptUpdateAttempts + r.listUpgradableAttempts + r.aptUpgradeAttempts,
+		"last_error_class":              r.lastErrClass,
+		"retry_exhausted":               r.retryExhausted,
+		"prechecks_passed":              r.prechecksPassed,
+		"precheck_failed":               r.precheckFailed,
+		"precheck_results":              r.precheckResults,
+	}
+}
+
+func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
+	return map[string]any{
+		"status":                 finalStatus,
+		"ssh_dial_attempts_used": r.sshDialAttempts,
+		"command_attempts_used":  r.commandAttempts,
+		"total_attempts_used":    r.sshDialAttempts + r.commandAttempts,
+		"last_error_class":       r.lastErrClass,
+		"retry_exhausted":        r.retryExhausted,
+	}
+}
+
+func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	runWithActorShared(
+		server,
+		actor,
+		clientIP,
+		policy,
+		"update.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "updating"
+			status.Upgradable = nil
+			status.Logs = fmt.Sprintf(
+				"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		updateRunnerAuditMeta,
+		updateCompletionOutcome,
+		"update.ssh_dial",
+		func(r *withActorRunner) {
+			r.appendStatusLog("\nRunning pre-checks...")
+
+			precheckSummary := runUpdatePrechecks(r.client)
+			r.precheckResults = precheckSummary.Results
+			for _, result := range precheckSummary.Results {
+				state := "PASS"
+				if !result.Passed {
+					state = "FAIL"
+				}
+				line := fmt.Sprintf("\nPre-check %s [%s]: %s", result.Name, state, result.Details)
+				if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
+					line += fmt.Sprintf(" Output: %s", trimmed)
+				}
+				r.appendStatusLog(line)
+			}
+			if !precheckSummary.AllPassed {
+				r.lastErrClass = "permanent"
+				r.precheckFailed = precheckSummary.FailedCheck
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "error"
+					status.Logs += fmt.Sprintf("\nPre-check failed (%s). Update aborted before apt update.", precheckSummary.FailedCheck)
+				})
+				return
+			}
+			r.prechecksPassed = true
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Logs += "\nPre-checks passed.\nRunning apt update..."
+			})
+
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.apt_update",
+				"\napt update attempt %d/%d failed: %v; retrying in %s",
+				&r.aptUpdateAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt update")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+
+			var upgradable []string
+			err = runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.list_upgradable",
+				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
+				&r.listUpgradableAttempts,
+				func() error {
+					items, listErr := getUpgradable(r.client)
+					if listErr == nil {
+						upgradable = items
+					}
+					return listErr
+				},
+			)
+			if err != nil {
+				r.markErrorClass(err)
+				r.setErrorLogs(logs + fmt.Sprintf("\nError listing upgradable: %v", err))
+				return
+			}
+
+			if len(upgradable) == 0 {
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "done"
+					status.Logs = logs + "\nNo packages to upgrade."
+				})
+				return
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "pending_approval"
+				status.Upgradable = upgradable
+				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
+			})
+
+			approvalDeadline := time.Now().Add(30 * time.Minute)
+			for {
+				time.Sleep(1 * time.Second)
+				approved := false
+				cancelledOrTimeout := false
+				mu.Lock()
+				status := statusMap[r.server.Name]
+				if status != nil {
+					if status.Status == "approved" {
+						approved = true
+					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
+						status.Status = "idle"
+						status.Logs = ""
+						status.Upgradable = nil
+						cancelledOrTimeout = true
+					}
+				}
+				mu.Unlock()
+				if approved {
+					break
+				}
+				if cancelledOrTimeout {
+					return
+				}
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "upgrading"
+				status.Logs += "\nRunning apt upgrade..."
+			})
+
+			stdout.Reset()
+			stderr.Reset()
+			err = runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.apt_upgrade",
+				"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
+				&r.aptUpgradeAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt upgrade -y")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs = r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nUpgrade completed."
+			})
+		},
+	)
 }
 
 func runSudoersBootstrap(server Server, sudoPassword string) {
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "sudoers"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += "\nConfiguring passwordless apt sudoers..."
-	mu.Unlock()
+	retryPolicy := loadRetryPolicyFromEnv()
+	runSudoersBootstrapWithActor(server, sudoPassword, "system", "", retryPolicy)
+}
 
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
+func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	runWithActorShared(
+		server,
+		actor,
+		clientIP,
+		policy,
+		"sudoers.enable.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "sudoers"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
+			}
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nConfiguring passwordless apt sudoers...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"sudoers.enable.ssh_dial",
+		func(r *withActorRunner) {
+			line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", r.server.User)
+			escapedLine := shellEscapeSingleQuotes(line)
+			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs += fmt.Sprintf("\nSSH session failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer session.Close()
-
-	line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get", server.User)
-	escapedLine := shellEscapeSingleQuotes(line)
-	cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
-
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	session.Stdin = strings.NewReader(sudoPassword + "\n")
-	err = session.Run(cmd)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nPasswordless apt sudoers enabled."
-	mu.Unlock()
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"sudoers.enable.command",
+				"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+					return session.Run(cmd)
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nPasswordless apt sudoers enabled."
+			})
+		},
+	)
 }
 
 func runSudoersDisable(server Server, sudoPassword string) {
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "sudoers"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += "\nDisabling passwordless apt sudoers..."
-	mu.Unlock()
+	retryPolicy := loadRetryPolicyFromEnv()
+	runSudoersDisableWithActor(server, sudoPassword, "system", "", retryPolicy)
+}
 
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
+func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	runWithActorShared(
+		server,
+		actor,
+		clientIP,
+		policy,
+		"sudoers.disable.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "sudoers"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
+			}
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nDisabling passwordless apt sudoers...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"sudoers.disable.ssh_dial",
+		func(r *withActorRunner) {
+			cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs += fmt.Sprintf("\nSSH session failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer session.Close()
-
-	cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
-
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	session.Stdin = strings.NewReader(sudoPassword + "\n")
-	err = session.Run(cmd)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nPasswordless apt sudoers disabled."
-	mu.Unlock()
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"sudoers.disable.command",
+				"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+					return session.Run(cmd)
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nPasswordless apt sudoers disabled."
+			})
+		},
+	)
 }
 
 func runAutoremove(server Server) {
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "autoremove"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += "\nRunning apt autoremove..."
-	mu.Unlock()
-
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
-
-	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		mu.Lock()
-		status.Status = "error"
-		status.Logs += fmt.Sprintf("\nSSH session failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer session.Close()
-
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-	err = session.Run("sudo apt autoremove -y")
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nAutoremove completed."
-	mu.Unlock()
+	retryPolicy := loadRetryPolicyFromEnv()
+	runAutoremoveWithActor(server, "system", "", retryPolicy)
 }
 
-func getUpgradable(client *ssh.Client) ([]string, error) {
+func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	runWithActorShared(
+		server,
+		actor,
+		clientIP,
+		policy,
+		"autoremove.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "autoremove"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
+			}
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nRunning apt autoremove...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"autoremove.ssh_dial",
+		func(r *withActorRunner) {
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"autoremove.command",
+				"\nautoremove attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt autoremove -y")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nAutoremove completed."
+			})
+		},
+	)
+}
+
+func getUpgradable(client sshConnection) ([]string, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return nil, err
 	}
 	defer session.Close()
 	var stdout bytes.Buffer
-	session.Stdout = &stdout
+	session.SetStdout(&stdout)
 	err = session.Run("apt list --upgradable")
 	if err != nil {
 		return nil, err
@@ -979,28 +2159,47 @@ func getUpgradable(client *ssh.Client) ([]string, error) {
 }
 
 func getGlobalKey() string {
-	globalKeyOnce.Do(func() {
-		db := getDB()
+	db := getDB()
+	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
 		if err == sql.ErrNoRows {
+			globalKeyMu.Lock()
 			globalKey = ""
-			return
+			globalKeyMu.Unlock()
+			return ""
 		}
 		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "database is locked") && attempt < 3 {
+				time.Sleep(75 * time.Millisecond)
+				continue
+			}
+			globalKeyMu.RLock()
+			cached := globalKey
+			globalKeyMu.RUnlock()
 			log.Printf("Failed to load global SSH key: %v", err)
-			globalKey = ""
-			return
+			if strings.TrimSpace(cached) != "" {
+				log.Printf("Using cached global SSH key due to read failure")
+			}
+			return cached
 		}
-		key, err := decryptSecret(enc)
-		if err != nil {
-			log.Printf("Failed to decrypt global SSH key: %v", err)
-			globalKey = ""
-			return
+		key, decErr := decryptSecret(enc)
+		if decErr != nil {
+			globalKeyMu.RLock()
+			cached := globalKey
+			globalKeyMu.RUnlock()
+			log.Printf("Failed to decrypt global SSH key: %v", decErr)
+			if strings.TrimSpace(cached) != "" {
+				log.Printf("Using cached global SSH key due to decrypt failure")
+			}
+			return cached
 		}
+		globalKeyMu.Lock()
 		globalKey = key
-	})
-	return globalKey
+		globalKeyMu.Unlock()
+		return key
+	}
+	return ""
 }
 
 func setGlobalKey(key string) error {
@@ -1016,8 +2215,9 @@ func setGlobalKey(key string) error {
 	if err != nil {
 		return err
 	}
-	globalKeyOnce = sync.Once{}
+	globalKeyMu.Lock()
 	globalKey = key
+	globalKeyMu.Unlock()
 	return nil
 }
 
@@ -1026,8 +2226,9 @@ func clearGlobalKey() error {
 	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", globalKeySetting); err != nil {
 		return err
 	}
-	globalKeyOnce = sync.Once{}
+	globalKeyMu.Lock()
 	globalKey = ""
+	globalKeyMu.Unlock()
 	return nil
 }
 
@@ -1282,6 +2483,31 @@ func shellEscapeSingleQuotes(input string) string {
 	return strings.ReplaceAll(input, "'", "'\"'\"'")
 }
 
+func shellEscapeDoubleQuotes(input string) string {
+	escaped := strings.ReplaceAll(input, `\`, `\\`)
+	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+	escaped = strings.ReplaceAll(escaped, `$`, `\$`)
+	escaped = strings.ReplaceAll(escaped, "`", "\\`")
+	return escaped
+}
+
+func isValidSSHUsername(username string) bool {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" || len(trimmed) > 64 {
+		return false
+	}
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 	key := strings.TrimSpace(server.Key)
@@ -1318,6 +2544,7 @@ func main() {
 	}
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
+	startAuditPruner(context.Background())
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -1350,6 +2577,7 @@ func main() {
 	r.POST("/api/servers", func(c *gin.Context) {
 		var newServer Server
 		if err := c.ShouldBindJSON(&newServer); err != nil {
+			audit(c, "server.create", "server", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1357,7 +2585,13 @@ func main() {
 		newServer.Host = strings.TrimSpace(newServer.Host)
 		newServer.User = strings.TrimSpace(newServer.User)
 		if newServer.Name == "" || newServer.Host == "" || newServer.User == "" {
+			audit(c, "server.create", "server", newServer.Name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
+		if !isValidSSHUsername(newServer.User) {
+			audit(c, "server.create", "server", newServer.Name, "failure", "Invalid SSH username", map[string]any{"user": newServer.User})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user; allowed characters are letters, digits, '.', '-', '_'"})
 			return
 		}
 		newServer.Port = normalizePort(newServer.Port)
@@ -1367,11 +2601,13 @@ func main() {
 		prevStatusMap := cloneStatusMap(statusMap)
 		if serverNameExistsLocked(newServer.Name, -1) {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Server name already exists", nil)
 			c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
 			return
 		}
 		if serverHostExistsLocked(newServer.Host, -1) {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Server host already exists", map[string]any{"host": newServer.Host})
 			c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
 			return
 		}
@@ -1390,10 +2626,12 @@ func main() {
 		}
 		if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 			return
 		}
 		mu.Unlock()
+		audit(c, "server.create", "server", newServer.Name, "success", "Server created", map[string]any{"host": newServer.Host, "port": newServer.Port, "tags_count": len(newServer.Tags)})
 		c.JSON(http.StatusCreated, newServer)
 	})
 
@@ -1401,6 +2639,7 @@ func main() {
 		name := c.Param("name")
 		var updatedServer Server
 		if err := c.ShouldBindJSON(&updatedServer); err != nil {
+			audit(c, "server.update", "server", name, "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1408,7 +2647,13 @@ func main() {
 		updatedServer.Host = strings.TrimSpace(updatedServer.Host)
 		updatedServer.User = strings.TrimSpace(updatedServer.User)
 		if updatedServer.Name == "" || updatedServer.Host == "" || updatedServer.User == "" {
+			audit(c, "server.update", "server", name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
+			return
+		}
+		if !isValidSSHUsername(updatedServer.User) {
+			audit(c, "server.update", "server", name, "failure", "Invalid SSH username", map[string]any{"user": updatedServer.User})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user; allowed characters are letters, digits, '.', '-', '_'"})
 			return
 		}
 		mu.Lock()
@@ -1432,11 +2677,13 @@ func main() {
 				updatedServer.Tags = parseTags(joinTags(updatedServer.Tags))
 				if serverNameExistsLocked(updatedServer.Name, i) {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Server name already exists", nil)
 					c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
 					return
 				}
 				if serverHostExistsLocked(updatedServer.Host, i) {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Server host already exists", map[string]any{"host": updatedServer.Host})
 					c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
 					return
 				}
@@ -1472,15 +2719,18 @@ func main() {
 				}
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				mu.Unlock()
+				audit(c, "server.update", "server", updatedServer.Name, "success", "Server updated", map[string]any{"from": name, "host": updatedServer.Host, "port": updatedServer.Port, "tags_count": len(updatedServer.Tags)})
 				c.JSON(http.StatusOK, updatedServer)
 				return
 			}
 		}
 		mu.Unlock()
+		audit(c, "server.update", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1495,15 +2745,18 @@ func main() {
 				delete(statusMap, name)
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
+					audit(c, "server.delete", "server", name, "failure", "Failed to persist deletion", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				mu.Unlock()
+				audit(c, "server.delete", "server", name, "success", "Server deleted", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Server deleted"})
 				return
 			}
 		}
 		mu.Unlock()
+		audit(c, "server.delete", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1517,16 +2770,19 @@ func main() {
 			if s.Name == name {
 				servers[i].Pass = ""
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
+					audit(c, "server.password.clear", "server", name, "failure", "Failed to persist password clear", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasPassword = false
 				}
+				audit(c, "server.password.clear", "server", name, "success", "Password cleared", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Password cleared"})
 				return
 			}
 		}
+		audit(c, "server.password.clear", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1534,19 +2790,23 @@ func main() {
 		name := c.Param("name")
 		file, err := c.FormFile("key")
 		if err != nil {
+			audit(c, "server.key.upload", "server", name, "failure", "Missing key file", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
 		if err != nil {
 			if errors.Is(err, errUploadedKeyTooLarge) {
+				audit(c, "server.key.upload", "server", name, "failure", "Uploaded key too large", nil)
 				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 				return
 			}
 			if errors.Is(err, errUploadedKeyEmpty) {
+				audit(c, "server.key.upload", "server", name, "failure", "Uploaded key empty", nil)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "server.key.upload", "server", name, "failure", "Failed to read key", nil)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
 			return
 		}
@@ -1556,16 +2816,19 @@ func main() {
 			if s.Name == name {
 				servers[i].Key = key
 				if err := updateServerKey(name, key); err != nil {
+					audit(c, "server.key.upload", "server", name, "failure", "Failed to save key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = key != ""
 				}
+				audit(c, "server.key.upload", "server", name, "success", "SSH key uploaded", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Key uploaded"})
 				return
 			}
 		}
+		audit(c, "server.key.upload", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1577,50 +2840,61 @@ func main() {
 			if s.Name == name {
 				servers[i].Key = ""
 				if err := updateServerKey(name, ""); err != nil {
+					audit(c, "server.key.clear", "server", name, "failure", "Failed to clear key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = false
 				}
+				audit(c, "server.key.clear", "server", name, "success", "SSH key cleared", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Key cleared"})
 				return
 			}
 		}
+		audit(c, "server.key.clear", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
 	r.POST("/api/keys/global", func(c *gin.Context) {
 		file, err := c.FormFile("key")
 		if err != nil {
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Missing key file", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
 		if err != nil {
 			if errors.Is(err, errUploadedKeyTooLarge) {
+				audit(c, "global_key.upload", "global_key", "global", "failure", "Uploaded key too large", nil)
 				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 				return
 			}
 			if errors.Is(err, errUploadedKeyEmpty) {
+				audit(c, "global_key.upload", "global_key", "global", "failure", "Uploaded key empty", nil)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Failed to read key", nil)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
 			return
 		}
 		if err := setGlobalKey(key); err != nil {
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Failed to save global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		audit(c, "global_key.upload", "global_key", "global", "success", "Global key saved", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Global key saved"})
 	})
 
 	r.DELETE("/api/keys/global", func(c *gin.Context) {
 		if err := clearGlobalKey(); err != nil {
+			audit(c, "global_key.clear", "global_key", "global", "failure", "Failed to clear global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		audit(c, "global_key.clear", "global_key", "global", "success", "Global key cleared", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Global key cleared"})
 	})
 
@@ -1639,26 +2913,41 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"has_key": true})
 	})
 
+	r.GET("/api/audit-events", handleAuditEvents)
+
+	r.POST("/api/audit-events/prune", func(c *gin.Context) {
+		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune audit events"})
+			return
+		}
+		audit(c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
+		c.JSON(http.StatusOK, gin.H{"message": "Audit events pruned"})
+	})
+
 	r.POST("/api/hostkeys/scan", func(c *gin.Context) {
 		var req struct {
 			Host string `json:"host"`
 			Port int    `json:"port"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.scan", "hostkey", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		host := strings.TrimSpace(req.Host)
 		if host == "" {
+			audit(c, "hostkey.scan", "hostkey", "-", "failure", "Host is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
 			return
 		}
 		port := normalizePort(req.Port)
 		key, err := scanHostKeyFunc(host, port)
 		if err != nil {
+			audit(c, "hostkey.scan", "hostkey", host, "failure", "Host key scan failed", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
 			return
 		}
+		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type()})
 		c.JSON(http.StatusOK, gin.H{
 			"host":               host,
 			"port":               port,
@@ -1675,16 +2964,19 @@ func main() {
 			FingerprintSHA256 string `json:"fingerprint_sha256"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.trust", "hostkey", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		host := strings.TrimSpace(req.Host)
 		if host == "" {
+			audit(c, "hostkey.trust", "hostkey", "-", "failure", "Host is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
 			return
 		}
 		expectedFingerprint := strings.TrimSpace(req.FingerprintSHA256)
 		if expectedFingerprint == "" {
+			audit(c, "hostkey.trust", "hostkey", host, "failure", "Fingerprint is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "fingerprint_sha256 is required"})
 			return
 		}
@@ -1692,12 +2984,15 @@ func main() {
 		fingerprint, line, err := trustHostKey(host, port, expectedFingerprint)
 		if err != nil {
 			if errors.Is(err, errFingerprintMismatch) {
+				audit(c, "hostkey.trust", "hostkey", host, "failure", "Host key fingerprint mismatch", map[string]any{"port": port})
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "hostkey.trust", "hostkey", host, "failure", "Failed to trust host key", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to trust host key: %v", err)})
 			return
 		}
+		audit(c, "hostkey.trust", "hostkey", host, "success", "Host key trusted", map[string]any{"port": port, "fingerprint_sha256": fingerprint})
 		c.JSON(http.StatusOK, gin.H{
 			"message":            "Host key trusted",
 			"host":               host,
@@ -1709,99 +3004,167 @@ func main() {
 
 	r.POST("/api/update/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
+		retryPolicy := loadRetryPolicyFromEnv()
+		retryMeta := map[string]any{
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
+		}
 		server, err := beginServerAction(name, "updating")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "update.start", "server", name, "failure", "Server not found", retryMeta)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "update.start", "server", name, "failure", "Action already in progress", retryMeta)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			retryMeta["error"] = err.Error()
+			audit(c, "update.start", "server", name, "failure", "Failed to start update", retryMeta)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		go runUpdate(server)
+		go runUpdateWithActor(server, actor, ip, retryPolicy)
+		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
 	})
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
+		retryPolicy := loadRetryPolicyFromEnv()
+		retryMeta := map[string]any{
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
+		}
 		server, err := beginServerAction(name, "autoremove")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "autoremove.start", "server", name, "failure", "Server not found", retryMeta)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "autoremove.start", "server", name, "failure", "Action already in progress", retryMeta)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			retryMeta["error"] = err.Error()
+			audit(c, "autoremove.start", "server", name, "failure", "Failed to start autoremove", retryMeta)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
 			return
 		}
-		go runAutoremove(server)
+		go runAutoremoveWithActor(server, actor, ip, retryPolicy)
+		audit(c, "autoremove.start", "server", name, "started", "Autoremove started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started"})
 	})
 
 	r.POST("/api/sudoers/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
+		retryPolicy := loadRetryPolicyFromEnv()
+		retryMeta := map[string]any{
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
+		}
 		var req struct {
 			Password string `json:"password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Invalid request payload", retryMeta)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if strings.TrimSpace(req.Password) == "" {
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Missing sudo password", retryMeta)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "sudoers.enable.start", "server", name, "failure", "Server not found", retryMeta)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "sudoers.enable.start", "server", name, "failure", "Action already in progress", retryMeta)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			retryMeta["error"] = err.Error()
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Failed to start sudoers setup", retryMeta)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
 			return
 		}
-		go runSudoersBootstrap(server, req.Password)
+		go runSudoersBootstrapWithActor(server, req.Password, actor, ip, retryPolicy)
+		audit(c, "sudoers.enable.start", "server", name, "started", "Sudoers setup started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started"})
 	})
 
 	r.POST("/api/sudoers/disable/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
+		retryPolicy := loadRetryPolicyFromEnv()
+		retryMeta := map[string]any{
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
+		}
 		var req struct {
 			Password string `json:"password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Invalid request payload", retryMeta)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if strings.TrimSpace(req.Password) == "" {
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Missing sudo password", retryMeta)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "sudoers.disable.start", "server", name, "failure", "Server not found", retryMeta)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "sudoers.disable.start", "server", name, "failure", "Action already in progress", retryMeta)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			retryMeta["error"] = err.Error()
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Failed to start sudoers disable", retryMeta)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
 			return
 		}
-		go runSudoersDisable(server, req.Password)
+		go runSudoersDisableWithActor(server, req.Password, actor, ip, retryPolicy)
+		audit(c, "sudoers.disable.start", "server", name, "started", "Sudoers disable started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started"})
 	})
 
@@ -1809,13 +3172,21 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		status, exists := statusMap[name]
+		approved := false
 		if exists && status.Status == "pending_approval" {
 			status.Status = "approved"
+			approved = true
 		}
 		mu.Unlock()
 		if !exists {
+			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
+		}
+		if approved {
+			audit(c, "update.approve", "server", name, "success", "Upgrade approved", nil)
+		} else {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", nil)
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade approved"})
 	})
@@ -1824,13 +3195,23 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		status, exists := statusMap[name]
+		cancelled := false
 		if exists && status.Status == "pending_approval" {
 			status.Status = "cancelled"
+			status.Logs = ""
+			status.Upgradable = nil
+			cancelled = true
 		}
 		mu.Unlock()
 		if !exists {
+			audit(c, "update.cancel", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
+		}
+		if cancelled {
+			audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
+		} else {
+			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
 	})

@@ -285,6 +285,7 @@
             font-weight: 600;
             text-transform: capitalize;
             background: rgba(255, 255, 255, 0.06);
+            white-space: nowrap;
         }
 
         .status-idle { color: var(--success); }
@@ -298,22 +299,62 @@
         .status-error { color: var(--danger); }
         .status-cancelled { color: var(--danger); }
 
+        .logs-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-top: 8px;
+            margin-bottom: 8px;
+        }
+
+        .logs-actions {
+            display: inline-flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .logs-hint {
+            color: var(--muted);
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
         .logs {
             background: rgba(8, 12, 16, 0.7);
             border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 10px;
-            padding: 10px;
-            white-space: pre-wrap;
-            min-height: 240px;
-            max-height: 360px;
+            padding: 10px 12px;
+            height: 300px;
             overflow-y: auto;
             font-family: "Cascadia Mono", "Consolas", monospace;
             font-size: 12px;
             color: #d6dee6;
         }
 
+        .log-line {
+            white-space: pre-wrap;
+            line-height: 1.5;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 2px 0;
+        }
+
+        .log-line:nth-child(even) {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .log-line:last-child {
+            border-bottom: none;
+        }
+
+        .log-line-error { color: #fda4af; }
+        .log-line-warning { color: #fde68a; }
+        .log-line-success { color: #86efac; }
+        .log-line-info { color: #93c5fd; }
+
         .logs-col { width: 60%; min-width: 520px; }
         .actions-col { width: 140px; }
+        .status-col { width: 180px; min-width: 180px; }
 
         td button { display: block; margin: 6px 0; width: 100%; }
         td .inline-btn { width: auto; display: inline-flex; }
@@ -386,7 +427,7 @@
         <header class="hero fade-in">
             <img class="hero-logo" src="/static/logo.png" alt="Linux updates logo">
             <h1>Automate Linux Server Updates</h1>
-            <div class="version-pill">Version v0.1.2</div>
+            <div class="version-pill">Version v0.1.3</div>
             <div class="nav">
                 <a class="btn-link" href="/manage">Manage Servers</a>
             </div>
@@ -437,7 +478,7 @@
                         <tr>
                             <th></th>
                             <th class="sortable" data-sort-key="name">Server</th>
-                            <th class="sortable" data-sort-key="status">Status</th>
+                            <th class="sortable status-col" data-sort-key="status">Status</th>
                             <th class="actions-col">Actions</th>
                             <th class="logs-col">Logs</th>
                         </tr>
@@ -467,6 +508,8 @@
 
     <script>
         const scrollPositions = {};
+        const followLogs = {};
+        const LOG_BOTTOM_THRESHOLD = 20;
         let sortKey = "name";
         let sortDir = "asc";
         let allServers = [];
@@ -505,6 +548,33 @@
             return allowedStatuses.has(normalized) ? normalized : "error";
         }
 
+        function isNearBottom(el) {
+            return (el.scrollHeight - el.scrollTop - el.clientHeight) <= LOG_BOTTOM_THRESHOLD;
+        }
+
+        function classifyLogLine(line) {
+            const lower = line.toLowerCase();
+            if (/(error|failed|fatal|denied|refused|panic|timeout|timed out)/.test(lower)) return "error";
+            if (/(warn|warning|retry|deprecated)/.test(lower)) return "warning";
+            if (/(done|completed|success|approved|enabled|disabled|cancelled)/.test(lower)) return "success";
+            if (/(starting|running|connecting|upgradable|upgrade|apt|ssh|info)/.test(lower)) return "info";
+            return "";
+        }
+
+        function formatLogsHtml(logText) {
+            const text = String(logText || "");
+            if (!text) {
+                return `<div class="log-line log-line-info">No logs yet.</div>`;
+            }
+            const lines = text.split(/\r?\n/);
+            return lines.map(line => {
+                const klass = classifyLogLine(line);
+                const classAttr = klass ? ` log-line-${klass}` : "";
+                const printable = line.length ? line : " ";
+                return `<div class="log-line${classAttr}">${escapeHtml(printable)}</div>`;
+            }).join("");
+        }
+
         function saveWindowScroll() {
             return { x: window.scrollX, y: window.scrollY };
         }
@@ -520,10 +590,11 @@
             allServers = await response.json();
             const tbody = document.querySelector('#servers-table tbody');
             // Save scroll positions
-            tbody.querySelectorAll('.logs').forEach(div => {
+            tbody.querySelectorAll('.logs-block:not(.logs-collapsed) .logs').forEach(div => {
                 const name = div.dataset.name;
                 if (name) {
                     scrollPositions[name] = div.scrollTop;
+                    followLogs[name] = isNearBottom(div);
                 }
             });
             renderTable();
@@ -619,7 +690,7 @@
                     const safeNameHtml = escapeHtml(server.name);
                     const safeStatusText = escapeHtml(server.status || "unknown");
                     const safeStatus = safeStatusClass(server.status);
-                    const safeLogs = escapeHtml(server.logs || "");
+                    const formattedLogs = formatLogsHtml(server.logs || "");
                     const safeDataName = escapeHtml(server.name);
                     const actionButtons = server.status === 'pending_approval'
                         ? `
@@ -637,11 +708,20 @@
                     row.innerHTML = `
                         <td><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
                         <td>${safeNameHtml}</td>
-                        <td><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
+                        <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="actions-col">${actionButtons}</td>
                         <td class="logs-col">
                             <button class="btn-ghost inline-btn" onclick="toggleLogs('${safeNameJs}')">${isExpanded ? "Hide" : "Show"} logs</button>
-                            <div class="logs ${isExpanded ? "" : "logs-collapsed"}" data-name="${safeDataName}">${safeLogs}</div>
+                            <div class="logs-block ${isExpanded ? "" : "logs-collapsed"}">
+                                <div class="logs-toolbar">
+                                    <span class="logs-hint">${followLogs[server.name] === false ? "Auto-scroll paused" : "Live auto-scroll"}</span>
+                                    <div class="logs-actions">
+                                        <button class="btn-ghost inline-btn" onclick="copyLogs('${safeNameJs}')">Copy</button>
+                                        <button class="btn-ghost inline-btn" onclick="downloadLogs('${safeNameJs}')">Download</button>
+                                    </div>
+                                </div>
+                                <div class="logs" data-name="${safeDataName}">${formattedLogs}</div>
+                            </div>
                         </td>
                     `;
                     tbody.appendChild(row);
@@ -649,9 +729,20 @@
             });
             tbody.querySelectorAll('.logs').forEach(div => {
                 const name = div.dataset.name;
-                if (name && scrollPositions[name] !== undefined) {
+                if (!name) return;
+                if (followLogs[name] !== false) {
+                    div.scrollTop = div.scrollHeight;
+                } else if (scrollPositions[name] !== undefined) {
                     div.scrollTop = scrollPositions[name];
                 }
+            });
+            tbody.querySelectorAll('.logs').forEach(div => {
+                div.addEventListener('scroll', () => {
+                    const name = div.dataset.name;
+                    if (!name) return;
+                    scrollPositions[name] = div.scrollTop;
+                    followLogs[name] = isNearBottom(div);
+                });
             });
             applyHoverClass();
             tbody.querySelectorAll('.row-select').forEach(cb => {
@@ -672,8 +763,45 @@
                 expandedLogs.delete(name);
             } else {
                 expandedLogs.add(name);
+                if (followLogs[name] === undefined) {
+                    followLogs[name] = true;
+                }
             }
             renderTable();
+        }
+
+        function getServerByName(name) {
+            return allServers.find(server => server.name === name);
+        }
+
+        async function copyLogs(name) {
+            const server = getServerByName(name);
+            const logs = String(server?.logs || "");
+            try {
+                await navigator.clipboard.writeText(logs);
+            } catch (_) {
+                const tmp = document.createElement('textarea');
+                tmp.value = logs;
+                document.body.appendChild(tmp);
+                tmp.select();
+                document.execCommand('copy');
+                tmp.remove();
+            }
+        }
+
+        function downloadLogs(name) {
+            const server = getServerByName(name);
+            const logs = String(server?.logs || "");
+            const blob = new Blob([logs], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const safeName = name.replace(/[^a-zA-Z0-9._-]/g, '_');
+            link.href = url;
+            link.download = `${safeName}-logs.txt`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
         }
 
         function applyHoverClass() {
@@ -767,6 +895,7 @@
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
             const names = Array.from(selectedServers);
             await Promise.all(names.map(name => fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' })));
+            names.forEach(name => expandedLogs.delete(name));
             fetchServers();
         });
         document.getElementById('bulk-autoremove').addEventListener('click', async () => {
@@ -859,6 +988,7 @@
 
         async function cancelUpgrade(name) {
             await fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' });
+            expandedLogs.delete(name);
             fetchServers();
         }
 
