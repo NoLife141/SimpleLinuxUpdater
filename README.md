@@ -138,6 +138,27 @@ Example:
 curl -u admin:change-me "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure&from=2026-02-10T00:00:00Z&to=2026-02-10T23:59:59Z"
 ```
 
+### Retry Policy (Transient Failures)
+
+Remote actions (`update`, `autoremove`, `sudoers enable/disable`) use retry with exponential backoff for transient errors (network resets/timeouts, temporary SSH transport issues, apt lock contention). Permanent failures (bad auth, host key verification, invalid config) fail fast without retries.
+
+Defaults:
+
+- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS=3`
+- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS=1000`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS=8000`
+- `DEBIAN_UPDATER_RETRY_JITTER_PCT=20`
+
+Validation rules:
+
+- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS` must be in `[1,10]`
+- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` must be `> 0`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `> 0`
+- `DEBIAN_UPDATER_RETRY_JITTER_PCT` must be in `[0,50]`
+- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `>= DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (otherwise base/max delay fall back to defaults)
+
+If a retry env value is invalid, the app logs a warning and uses defaults.
+
 ### Tests and Release
 
 Local test run:
