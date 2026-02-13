@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	crand "crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
+	_ "modernc.org/sqlite"
 )
 
 func preserveServerState(t *testing.T) {
@@ -32,6 +36,21 @@ func preserveServerState(t *testing.T) {
 		statusMap = origStatusMap
 		saveServersFunc = origSaveServersFunc
 		mu.Unlock()
+	})
+}
+
+func preserveDBState(t *testing.T) {
+	t.Helper()
+	origDB := db
+	origOnce := dbOnce
+	db = nil
+	dbOnce = sync.Once{}
+	t.Cleanup(func() {
+		if db != nil {
+			_ = db.Close()
+		}
+		db = origDB
+		dbOnce = origOnce
 	})
 }
 
@@ -108,6 +127,32 @@ func TestStringsEqualConstantTime(t *testing.T) {
 	}
 	if stringsEqualConstantTime("short", "longer") {
 		t.Fatalf("stringsEqualConstantTime() = true, want false for different lengths")
+	}
+}
+
+func TestNormalizeAuditFilterTimestamp(t *testing.T) {
+	got, err := normalizeAuditFilterTimestamp("2026-02-10T12:00:00+02:00")
+	if err != nil {
+		t.Fatalf("normalizeAuditFilterTimestamp(valid) unexpected error: %v", err)
+	}
+	want := "2026-02-10T10:00:00Z"
+	if got != want {
+		t.Fatalf("normalizeAuditFilterTimestamp() = %q, want %q", got, want)
+	}
+	if _, err := normalizeAuditFilterTimestamp("not-a-timestamp"); err == nil {
+		t.Fatalf("normalizeAuditFilterTimestamp(invalid) error = nil, want non-nil")
+	}
+}
+
+func TestUpdateCompletionOutcome(t *testing.T) {
+	if got := updateCompletionOutcome("done"); got != "success" {
+		t.Fatalf("updateCompletionOutcome(done) = %q, want success", got)
+	}
+	if got := updateCompletionOutcome("idle"); got != "ignored" {
+		t.Fatalf("updateCompletionOutcome(idle) = %q, want ignored", got)
+	}
+	if got := updateCompletionOutcome("error"); got != "failure" {
+		t.Fatalf("updateCompletionOutcome(error) = %q, want failure", got)
 	}
 }
 
@@ -360,4 +405,187 @@ func TestSaveServersOrRollbackLockedOnFailure(t *testing.T) {
 		t.Fatalf("statusMap was not rolled back on save failure")
 	}
 	mu.Unlock()
+}
+
+func TestEnsureSchemaCreatesAuditArtifacts(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "schema.db")
+	testDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer testDB.Close()
+	if _, err := testDB.Exec(`
+		CREATE TABLE IF NOT EXISTS servers (
+			name TEXT PRIMARY KEY,
+			host TEXT NOT NULL,
+			port INTEGER NOT NULL DEFAULT 22,
+			user TEXT NOT NULL,
+			pass_enc TEXT NOT NULL,
+			key_enc TEXT NOT NULL DEFAULT '',
+			key_path TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		t.Fatalf("create servers table error = %v", err)
+	}
+
+	if err := ensureSchema(testDB); err != nil {
+		t.Fatalf("ensureSchema() error = %v", err)
+	}
+
+	var count int
+	if err := testDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='audit_events'").Scan(&count); err != nil {
+		t.Fatalf("table query error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("audit_events table missing")
+	}
+	for _, idx := range []string{"idx_audit_created_at", "idx_audit_target", "idx_audit_action"} {
+		if err := testDB.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", idx).Scan(&count); err != nil {
+			t.Fatalf("index query error = %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("index %s missing", idx)
+		}
+	}
+}
+
+func TestActorFromContext(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	if got := actorFromContext(c); got != "unknown" {
+		t.Fatalf("actorFromContext() = %q, want unknown", got)
+	}
+	c.Set("actor", "admin")
+	if got := actorFromContext(c); got != "admin" {
+		t.Fatalf("actorFromContext() = %q, want admin", got)
+	}
+}
+
+func TestSanitizeAuditMetaRedactsSecrets(t *testing.T) {
+	meta := map[string]any{
+		"host":      "srv-1",
+		"password":  "secret",
+		"ssh_key":   "private",
+		"error":     "boom",
+		"api_token": "token-value",
+	}
+	raw := sanitizeAuditMeta(meta)
+	if strings.Contains(raw, "secret") || strings.Contains(raw, "private") || strings.Contains(raw, "token-value") {
+		t.Fatalf("sanitizeAuditMeta() leaked secret data: %s", raw)
+	}
+	if !strings.Contains(raw, "srv-1") || !strings.Contains(raw, "boom") {
+		t.Fatalf("sanitizeAuditMeta() dropped expected safe values: %s", raw)
+	}
+}
+
+func TestWriteAuditEventAndPrune(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit.db"))
+	_ = getDB()
+
+	newEvt := AuditEvent{
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Actor:      "admin",
+		Action:     "server.create",
+		TargetType: "server",
+		TargetName: "srv-new",
+		Status:     "success",
+		Message:    "created",
+		MetaJSON:   `{"host":"srv-new"}`,
+	}
+	if err := writeAuditEvent(newEvt); err != nil {
+		t.Fatalf("writeAuditEvent(new) error = %v", err)
+	}
+
+	oldDate := time.Now().UTC().AddDate(0, 0, -(auditRetentionDays + 2)).Format(time.RFC3339)
+	oldEvt := AuditEvent{
+		CreatedAt:  oldDate,
+		Actor:      "admin",
+		Action:     "server.delete",
+		TargetType: "server",
+		TargetName: "srv-old",
+		Status:     "success",
+		Message:    "deleted",
+		MetaJSON:   "{}",
+	}
+	if err := writeAuditEvent(oldEvt); err != nil {
+		t.Fatalf("writeAuditEvent(old) error = %v", err)
+	}
+
+	if err := pruneAuditEvents(auditRetentionDays); err != nil {
+		t.Fatalf("pruneAuditEvents() error = %v", err)
+	}
+
+	rows, err := getDB().Query("SELECT target_name FROM audit_events ORDER BY id")
+	if err != nil {
+		t.Fatalf("query audit_events error = %v", err)
+	}
+	defer rows.Close()
+	var targets []string
+	for rows.Next() {
+		var target string
+		if err := rows.Scan(&target); err != nil {
+			t.Fatalf("scan error = %v", err)
+		}
+		targets = append(targets, target)
+	}
+	if len(targets) != 1 || targets[0] != "srv-new" {
+		t.Fatalf("unexpected audit rows after prune: %v", targets)
+	}
+}
+
+func TestAuditEventsAPIFiltering(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit_api.db"))
+	testDB := getDB()
+
+	seed := []AuditEvent{
+		{CreatedAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "alpha", Status: "success", Message: "ok", MetaJSON: "{}"},
+		{CreatedAt: time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "nope", MetaJSON: "{}"},
+	}
+	for _, evt := range seed {
+		if err := writeAuditEvent(evt); err != nil {
+			t.Fatalf("seed writeAuditEvent() error = %v", err)
+		}
+	}
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/audit-events", func(c *gin.Context) {
+		targetName := strings.TrimSpace(c.Query("target_name"))
+		status := strings.TrimSpace(c.Query("status"))
+		rows, err := testDB.Query("SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip FROM audit_events WHERE target_name = ? AND status = ? ORDER BY id DESC", targetName, status)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+		var items []AuditEvent
+		for rows.Next() {
+			var evt AuditEvent
+			if err := rows.Scan(&evt.ID, &evt.CreatedAt, &evt.Actor, &evt.Action, &evt.TargetType, &evt.TargetName, &evt.Status, &evt.Message, &evt.MetaJSON, &evt.RequestID, &evt.ClientIP); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			items = append(items, evt)
+		}
+		c.JSON(http.StatusOK, gin.H{"items": items})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/audit-events?target_name=beta&status=failure", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var payload struct {
+		Items []AuditEvent `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("json unmarshal error = %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Action != "server.update" {
+		t.Fatalf("unexpected filtered items: %+v", payload.Items)
+	}
 }

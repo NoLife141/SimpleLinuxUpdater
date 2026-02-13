@@ -65,6 +65,7 @@ var globalKey string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
+var auditPruneTickerOnce sync.Once
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -73,11 +74,29 @@ const basicAuthUserEnv = "DEBIAN_UPDATER_BASIC_AUTH_USER"
 const basicAuthPassEnv = "DEBIAN_UPDATER_BASIC_AUTH_PASS"
 const maxUploadedKeyBytes = 64 * 1024
 const sshConnectTimeout = 15 * time.Second
+const auditRetentionDays = 90
+const auditPruneInterval = 12 * time.Hour
+const auditMessageMaxLen = 512
+const auditMetaMaxLen = 2048
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
 var errActionInProgress = errors.New("action already in progress")
 var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
+
+type AuditEvent struct {
+	ID         int64  `json:"id"`
+	CreatedAt  string `json:"created_at"`
+	Actor      string `json:"actor"`
+	Action     string `json:"action"`
+	TargetType string `json:"target_type"`
+	TargetName string `json:"target_name"`
+	Status     string `json:"status"`
+	Message    string `json:"message"`
+	MetaJSON   string `json:"meta_json"`
+	RequestID  string `json:"request_id"`
+	ClientIP   string `json:"client_ip"`
+}
 
 func dbPath() string {
 	if p := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_DB_PATH")); p != "" {
@@ -233,7 +252,177 @@ func ensureSchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
 		return err
 	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS audit_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target_type TEXT NOT NULL,
+			target_name TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL,
+			meta_json TEXT NOT NULL DEFAULT '{}',
+			request_id TEXT NOT NULL DEFAULT '',
+			client_ip TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_events (created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_events (target_type, target_name, created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= maxLen {
+		return string(runes)
+	}
+	return string(runes[:maxLen])
+}
+
+func normalizeAuditFilterTimestamp(raw string) (string, error) {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	return parsed.UTC().Format(time.RFC3339), nil
+}
+
+func updateCompletionOutcome(finalStatus string) string {
+	switch finalStatus {
+	case "done":
+		return "success"
+	case "idle":
+		return "ignored"
+	default:
+		return "failure"
+	}
+}
+
+func sanitizeAuditMeta(meta map[string]any) string {
+	if meta == nil {
+		return "{}"
+	}
+	redacted := make(map[string]any, len(meta))
+	for k, v := range meta {
+		key := strings.ToLower(strings.TrimSpace(k))
+		if strings.Contains(key, "pass") || strings.Contains(key, "password") || strings.Contains(key, "key") || strings.Contains(key, "secret") || strings.Contains(key, "token") {
+			continue
+		}
+		redacted[k] = v
+	}
+	raw, err := json.Marshal(redacted)
+	if err != nil {
+		return "{}"
+	}
+	if len(raw) > auditMetaMaxLen {
+		return "{}"
+	}
+	return string(raw)
+}
+
+func actorFromContext(c *gin.Context) string {
+	if c == nil {
+		return "system"
+	}
+	if actor, ok := c.Get("actor"); ok {
+		if s := strings.TrimSpace(fmt.Sprintf("%v", actor)); s != "" {
+			return s
+		}
+	}
+	return "unknown"
+}
+
+func clientIPFromContext(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	return strings.TrimSpace(c.ClientIP())
+}
+
+func writeAuditEvent(evt AuditEvent) error {
+	db := getDB()
+	_, err := db.Exec(
+		`INSERT INTO audit_events (created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		evt.CreatedAt,
+		evt.Actor,
+		evt.Action,
+		evt.TargetType,
+		evt.TargetName,
+		evt.Status,
+		evt.Message,
+		evt.MetaJSON,
+		evt.RequestID,
+		evt.ClientIP,
+	)
+	return err
+}
+
+func auditWithActor(actor, clientIP, action, targetType, targetName, status, message string, meta map[string]any) {
+	evt := AuditEvent{
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+		Actor:      truncateString(actor, 128),
+		Action:     truncateString(action, 64),
+		TargetType: truncateString(targetType, 64),
+		TargetName: truncateString(targetName, 255),
+		Status:     truncateString(status, 32),
+		Message:    truncateString(message, auditMessageMaxLen),
+		MetaJSON:   sanitizeAuditMeta(meta),
+		RequestID:  "",
+		ClientIP:   truncateString(clientIP, 128),
+	}
+	if evt.Actor == "" {
+		evt.Actor = "unknown"
+	}
+	if evt.TargetName == "" {
+		evt.TargetName = "-"
+	}
+	if err := writeAuditEvent(evt); err != nil {
+		log.Printf("audit write failed: action=%s target=%s err=%v", action, targetName, err)
+	}
+}
+
+func audit(c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
+	auditWithActor(actorFromContext(c), clientIPFromContext(c), action, targetType, targetName, status, message, meta)
+}
+
+func pruneAuditEvents(retentionDays int) error {
+	if retentionDays <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+	_, err := getDB().Exec("DELETE FROM audit_events WHERE created_at < ?", cutoff)
+	return err
+}
+
+func startAuditPruner() {
+	auditPruneTickerOnce.Do(func() {
+		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+			log.Printf("audit prune failed: %v", err)
+		}
+		go func() {
+			t := time.NewTicker(auditPruneInterval)
+			defer t.Stop()
+			for range t.C {
+				if err := pruneAuditEvents(auditRetentionDays); err != nil {
+					log.Printf("audit prune failed: %v", err)
+				}
+			}
+		}()
+	})
 }
 
 func encryptSecret(secret string) (string, error) {
@@ -524,6 +713,7 @@ func basicAuthMiddleware(username, password string) gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusUnauthorized)
 			return
 		}
+		c.Set("actor", user)
 		c.Next()
 	}
 }
@@ -559,6 +749,20 @@ func init() {
 }
 
 func runUpdate(server Server) {
+	runUpdateWithActor(server, "system", "")
+}
+
+func runUpdateWithActor(server Server, actor, clientIP string) {
+	defer func() {
+		mu.Lock()
+		finalStatus := "unknown"
+		if s := statusMap[server.Name]; s != nil {
+			finalStatus = s.Status
+		}
+		mu.Unlock()
+		outcome := updateCompletionOutcome(finalStatus)
+		auditWithActor(actor, clientIP, "update.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{"status": finalStatus})
+	}()
 	mu.Lock()
 	status := statusMap[server.Name]
 	if status == nil {
@@ -652,22 +856,22 @@ func runUpdate(server Server) {
 	mu.Unlock()
 
 	// Wait for approval
-		for {
-			time.Sleep(1 * time.Second)
-			mu.Lock()
-			if status.Status == "approved" {
-				mu.Unlock()
-				break
-			}
-			if status.Status == "cancelled" {
-				status.Status = "idle"
-				status.Logs = ""
-				status.Upgradable = nil
-				mu.Unlock()
-				return
-			}
+	for {
+		time.Sleep(1 * time.Second)
+		mu.Lock()
+		if status.Status == "approved" {
 			mu.Unlock()
+			break
 		}
+		if status.Status == "cancelled" {
+			status.Status = "idle"
+			status.Logs = ""
+			status.Upgradable = nil
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+	}
 
 	// Proceed with upgrade
 	mu.Lock()
@@ -710,6 +914,23 @@ func runUpdate(server Server) {
 }
 
 func runSudoersBootstrap(server Server, sudoPassword string) {
+	runSudoersBootstrapWithActor(server, sudoPassword, "system", "")
+}
+
+func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string) {
+	defer func() {
+		mu.Lock()
+		finalStatus := "unknown"
+		if s := statusMap[server.Name]; s != nil {
+			finalStatus = s.Status
+		}
+		mu.Unlock()
+		outcome := "failure"
+		if finalStatus == "done" {
+			outcome = "success"
+		}
+		auditWithActor(actor, clientIP, "sudoers.enable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{"status": finalStatus})
+	}()
 	mu.Lock()
 	status := statusMap[server.Name]
 	if status == nil {
@@ -795,6 +1016,23 @@ func runSudoersBootstrap(server Server, sudoPassword string) {
 }
 
 func runSudoersDisable(server Server, sudoPassword string) {
+	runSudoersDisableWithActor(server, sudoPassword, "system", "")
+}
+
+func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string) {
+	defer func() {
+		mu.Lock()
+		finalStatus := "unknown"
+		if s := statusMap[server.Name]; s != nil {
+			finalStatus = s.Status
+		}
+		mu.Unlock()
+		outcome := "failure"
+		if finalStatus == "done" {
+			outcome = "success"
+		}
+		auditWithActor(actor, clientIP, "sudoers.disable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{"status": finalStatus})
+	}()
 	mu.Lock()
 	status := statusMap[server.Name]
 	if status == nil {
@@ -878,6 +1116,23 @@ func runSudoersDisable(server Server, sudoPassword string) {
 }
 
 func runAutoremove(server Server) {
+	runAutoremoveWithActor(server, "system", "")
+}
+
+func runAutoremoveWithActor(server Server, actor, clientIP string) {
+	defer func() {
+		mu.Lock()
+		finalStatus := "unknown"
+		if s := statusMap[server.Name]; s != nil {
+			finalStatus = s.Status
+		}
+		mu.Unlock()
+		outcome := "failure"
+		if finalStatus == "done" {
+			outcome = "success"
+		}
+		auditWithActor(actor, clientIP, "autoremove.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{"status": finalStatus})
+	}()
 	mu.Lock()
 	status := statusMap[server.Name]
 	if status == nil {
@@ -1320,6 +1575,7 @@ func main() {
 	}
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
+	startAuditPruner()
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -1352,6 +1608,7 @@ func main() {
 	r.POST("/api/servers", func(c *gin.Context) {
 		var newServer Server
 		if err := c.ShouldBindJSON(&newServer); err != nil {
+			audit(c, "server.create", "server", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1359,6 +1616,7 @@ func main() {
 		newServer.Host = strings.TrimSpace(newServer.Host)
 		newServer.User = strings.TrimSpace(newServer.User)
 		if newServer.Name == "" || newServer.Host == "" || newServer.User == "" {
+			audit(c, "server.create", "server", newServer.Name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
 			return
 		}
@@ -1369,11 +1627,13 @@ func main() {
 		prevStatusMap := cloneStatusMap(statusMap)
 		if serverNameExistsLocked(newServer.Name, -1) {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Server name already exists", nil)
 			c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
 			return
 		}
 		if serverHostExistsLocked(newServer.Host, -1) {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Server host already exists", map[string]any{"host": newServer.Host})
 			c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
 			return
 		}
@@ -1392,10 +1652,12 @@ func main() {
 		}
 		if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 			mu.Unlock()
+			audit(c, "server.create", "server", newServer.Name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 			return
 		}
 		mu.Unlock()
+		audit(c, "server.create", "server", newServer.Name, "success", "Server created", map[string]any{"host": newServer.Host, "port": newServer.Port, "tags_count": len(newServer.Tags)})
 		c.JSON(http.StatusCreated, newServer)
 	})
 
@@ -1403,6 +1665,7 @@ func main() {
 		name := c.Param("name")
 		var updatedServer Server
 		if err := c.ShouldBindJSON(&updatedServer); err != nil {
+			audit(c, "server.update", "server", name, "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -1410,6 +1673,7 @@ func main() {
 		updatedServer.Host = strings.TrimSpace(updatedServer.Host)
 		updatedServer.User = strings.TrimSpace(updatedServer.User)
 		if updatedServer.Name == "" || updatedServer.Host == "" || updatedServer.User == "" {
+			audit(c, "server.update", "server", name, "failure", "Missing required fields", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "name, host, and user are required"})
 			return
 		}
@@ -1434,11 +1698,13 @@ func main() {
 				updatedServer.Tags = parseTags(joinTags(updatedServer.Tags))
 				if serverNameExistsLocked(updatedServer.Name, i) {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Server name already exists", nil)
 					c.JSON(http.StatusConflict, gin.H{"error": "Server name already exists"})
 					return
 				}
 				if serverHostExistsLocked(updatedServer.Host, i) {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Server host already exists", map[string]any{"host": updatedServer.Host})
 					c.JSON(http.StatusConflict, gin.H{"error": "Server host already exists"})
 					return
 				}
@@ -1474,15 +1740,18 @@ func main() {
 				}
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				mu.Unlock()
+				audit(c, "server.update", "server", updatedServer.Name, "success", "Server updated", map[string]any{"from": name, "host": updatedServer.Host, "port": updatedServer.Port, "tags_count": len(updatedServer.Tags)})
 				c.JSON(http.StatusOK, updatedServer)
 				return
 			}
 		}
 		mu.Unlock()
+		audit(c, "server.update", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1497,15 +1766,18 @@ func main() {
 				delete(statusMap, name)
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					mu.Unlock()
+					audit(c, "server.delete", "server", name, "failure", "Failed to persist deletion", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				mu.Unlock()
+				audit(c, "server.delete", "server", name, "success", "Server deleted", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Server deleted"})
 				return
 			}
 		}
 		mu.Unlock()
+		audit(c, "server.delete", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1519,16 +1791,19 @@ func main() {
 			if s.Name == name {
 				servers[i].Pass = ""
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
+					audit(c, "server.password.clear", "server", name, "failure", "Failed to persist password clear", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasPassword = false
 				}
+				audit(c, "server.password.clear", "server", name, "success", "Password cleared", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Password cleared"})
 				return
 			}
 		}
+		audit(c, "server.password.clear", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1536,19 +1811,23 @@ func main() {
 		name := c.Param("name")
 		file, err := c.FormFile("key")
 		if err != nil {
+			audit(c, "server.key.upload", "server", name, "failure", "Missing key file", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
 		if err != nil {
 			if errors.Is(err, errUploadedKeyTooLarge) {
+				audit(c, "server.key.upload", "server", name, "failure", "Uploaded key too large", nil)
 				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 				return
 			}
 			if errors.Is(err, errUploadedKeyEmpty) {
+				audit(c, "server.key.upload", "server", name, "failure", "Uploaded key empty", nil)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "server.key.upload", "server", name, "failure", "Failed to read key", nil)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
 			return
 		}
@@ -1558,16 +1837,19 @@ func main() {
 			if s.Name == name {
 				servers[i].Key = key
 				if err := updateServerKey(name, key); err != nil {
+					audit(c, "server.key.upload", "server", name, "failure", "Failed to save key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = key != ""
 				}
+				audit(c, "server.key.upload", "server", name, "success", "SSH key uploaded", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Key uploaded"})
 				return
 			}
 		}
+		audit(c, "server.key.upload", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
@@ -1579,50 +1861,61 @@ func main() {
 			if s.Name == name {
 				servers[i].Key = ""
 				if err := updateServerKey(name, ""); err != nil {
+					audit(c, "server.key.clear", "server", name, "failure", "Failed to clear key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = false
 				}
+				audit(c, "server.key.clear", "server", name, "success", "SSH key cleared", nil)
 				c.JSON(http.StatusOK, gin.H{"message": "Key cleared"})
 				return
 			}
 		}
+		audit(c, "server.key.clear", "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 	})
 
 	r.POST("/api/keys/global", func(c *gin.Context) {
 		file, err := c.FormFile("key")
 		if err != nil {
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Missing key file", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
 		if err != nil {
 			if errors.Is(err, errUploadedKeyTooLarge) {
+				audit(c, "global_key.upload", "global_key", "global", "failure", "Uploaded key too large", nil)
 				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": err.Error()})
 				return
 			}
 			if errors.Is(err, errUploadedKeyEmpty) {
+				audit(c, "global_key.upload", "global_key", "global", "failure", "Uploaded key empty", nil)
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Failed to read key", nil)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
 			return
 		}
 		if err := setGlobalKey(key); err != nil {
+			audit(c, "global_key.upload", "global_key", "global", "failure", "Failed to save global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		audit(c, "global_key.upload", "global_key", "global", "success", "Global key saved", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Global key saved"})
 	})
 
 	r.DELETE("/api/keys/global", func(c *gin.Context) {
 		if err := clearGlobalKey(); err != nil {
+			audit(c, "global_key.clear", "global_key", "global", "failure", "Failed to clear global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		audit(c, "global_key.clear", "global_key", "global", "success", "Global key cleared", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Global key cleared"})
 	})
 
@@ -1641,26 +1934,148 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"has_key": true})
 	})
 
+	r.GET("/api/audit-events", func(c *gin.Context) {
+		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+		if page < 1 {
+			page = 1
+		}
+		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+		if pageSize < 1 {
+			pageSize = 50
+		}
+		if pageSize > 200 {
+			pageSize = 200
+		}
+		targetName := strings.TrimSpace(c.Query("target_name"))
+		action := strings.TrimSpace(c.Query("action"))
+		status := strings.TrimSpace(c.Query("status"))
+		from := strings.TrimSpace(c.Query("from"))
+		to := strings.TrimSpace(c.Query("to"))
+		offset := (page - 1) * pageSize
+
+		var whereParts []string
+		var args []any
+		if targetName != "" {
+			whereParts = append(whereParts, "target_name = ?")
+			args = append(args, targetName)
+		}
+		if action != "" {
+			whereParts = append(whereParts, "action = ?")
+			args = append(args, action)
+		}
+		if status != "" {
+			whereParts = append(whereParts, "status = ?")
+			args = append(args, status)
+		}
+		if from != "" {
+			normalizedFrom, err := normalizeAuditFilterTimestamp(from)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from timestamp; expected RFC3339"})
+				return
+			}
+			whereParts = append(whereParts, "created_at >= ?")
+			args = append(args, normalizedFrom)
+		}
+		if to != "" {
+			normalizedTo, err := normalizeAuditFilterTimestamp(to)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to timestamp; expected RFC3339"})
+				return
+			}
+			whereParts = append(whereParts, "created_at <= ?")
+			args = append(args, normalizedTo)
+		}
+
+		whereClause := ""
+		if len(whereParts) > 0 {
+			whereClause = " WHERE " + strings.Join(whereParts, " AND ")
+		}
+
+		db := getDB()
+		countQuery := "SELECT COUNT(*) FROM audit_events" + whereClause
+		var total int
+		if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count audit events"})
+			return
+		}
+
+		query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
+			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
+		queryArgs := append(append([]any{}, args...), pageSize, offset)
+		rows, err := db.Query(query, queryArgs...)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
+			return
+		}
+		defer rows.Close()
+
+		items := make([]AuditEvent, 0, pageSize)
+		for rows.Next() {
+			var evt AuditEvent
+			if err := rows.Scan(
+				&evt.ID,
+				&evt.CreatedAt,
+				&evt.Actor,
+				&evt.Action,
+				&evt.TargetType,
+				&evt.TargetName,
+				&evt.Status,
+				&evt.Message,
+				&evt.MetaJSON,
+				&evt.RequestID,
+				&evt.ClientIP,
+			); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
+				return
+			}
+			items = append(items, evt)
+		}
+		if err := rows.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to iterate audit events"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"items":     items,
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+		})
+	})
+
+	r.POST("/api/audit-events/prune", func(c *gin.Context) {
+		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune audit events"})
+			return
+		}
+		audit(c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
+		c.JSON(http.StatusOK, gin.H{"message": "Audit events pruned"})
+	})
+
 	r.POST("/api/hostkeys/scan", func(c *gin.Context) {
 		var req struct {
 			Host string `json:"host"`
 			Port int    `json:"port"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.scan", "hostkey", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		host := strings.TrimSpace(req.Host)
 		if host == "" {
+			audit(c, "hostkey.scan", "hostkey", "-", "failure", "Host is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
 			return
 		}
 		port := normalizePort(req.Port)
 		key, err := scanHostKeyFunc(host, port)
 		if err != nil {
+			audit(c, "hostkey.scan", "hostkey", host, "failure", "Host key scan failed", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
 			return
 		}
+		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type()})
 		c.JSON(http.StatusOK, gin.H{
 			"host":               host,
 			"port":               port,
@@ -1677,16 +2092,19 @@ func main() {
 			FingerprintSHA256 string `json:"fingerprint_sha256"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.trust", "hostkey", "-", "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		host := strings.TrimSpace(req.Host)
 		if host == "" {
+			audit(c, "hostkey.trust", "hostkey", "-", "failure", "Host is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
 			return
 		}
 		expectedFingerprint := strings.TrimSpace(req.FingerprintSHA256)
 		if expectedFingerprint == "" {
+			audit(c, "hostkey.trust", "hostkey", host, "failure", "Fingerprint is required", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "fingerprint_sha256 is required"})
 			return
 		}
@@ -1694,12 +2112,15 @@ func main() {
 		fingerprint, line, err := trustHostKey(host, port, expectedFingerprint)
 		if err != nil {
 			if errors.Is(err, errFingerprintMismatch) {
+				audit(c, "hostkey.trust", "hostkey", host, "failure", "Host key fingerprint mismatch", map[string]any{"port": port})
 				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 				return
 			}
+			audit(c, "hostkey.trust", "hostkey", host, "failure", "Failed to trust host key", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to trust host key: %v", err)})
 			return
 		}
+		audit(c, "hostkey.trust", "hostkey", host, "success", "Host key trusted", map[string]any{"port": port, "fingerprint_sha256": fingerprint})
 		c.JSON(http.StatusOK, gin.H{
 			"message":            "Host key trusted",
 			"host":               host,
@@ -1711,99 +2132,127 @@ func main() {
 
 	r.POST("/api/update/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
 		server, err := beginServerAction(name, "updating")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "update.start", "server", name, "failure", "Server not found", nil)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "update.start", "server", name, "failure", "Action already in progress", nil)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			audit(c, "update.start", "server", name, "failure", "Failed to start update", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		go runUpdate(server)
+		go runUpdateWithActor(server, actor, ip)
+		audit(c, "update.start", "server", name, "started", "Update started", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
 	})
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
 		server, err := beginServerAction(name, "autoremove")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "autoremove.start", "server", name, "failure", "Server not found", nil)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "autoremove.start", "server", name, "failure", "Action already in progress", nil)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			audit(c, "autoremove.start", "server", name, "failure", "Failed to start autoremove", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
 			return
 		}
-		go runAutoremove(server)
+		go runAutoremoveWithActor(server, actor, ip)
+		audit(c, "autoremove.start", "server", name, "started", "Autoremove started", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started"})
 	})
 
 	r.POST("/api/sudoers/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
 		var req struct {
 			Password string `json:"password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if strings.TrimSpace(req.Password) == "" {
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Missing sudo password", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "sudoers.enable.start", "server", name, "failure", "Server not found", nil)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "sudoers.enable.start", "server", name, "failure", "Action already in progress", nil)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Failed to start sudoers setup", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
 			return
 		}
-		go runSudoersBootstrap(server, req.Password)
+		go runSudoersBootstrapWithActor(server, req.Password, actor, ip)
+		audit(c, "sudoers.enable.start", "server", name, "started", "Sudoers setup started", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started"})
 	})
 
 	r.POST("/api/sudoers/disable/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		actor := actorFromContext(c)
+		ip := clientIPFromContext(c)
 		var req struct {
 			Password string `json:"password"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Invalid request payload", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 		if strings.TrimSpace(req.Password) == "" {
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Missing sudo password", nil)
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				audit(c, "sudoers.disable.start", "server", name, "failure", "Server not found", nil)
 				c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 				return
 			}
 			if errors.Is(err, errActionInProgress) {
+				audit(c, "sudoers.disable.start", "server", name, "failure", "Action already in progress", nil)
 				c.JSON(http.StatusConflict, gin.H{"error": "Update already in progress"})
 				return
 			}
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Failed to start sudoers disable", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
 			return
 		}
-		go runSudoersDisable(server, req.Password)
+		go runSudoersDisableWithActor(server, req.Password, actor, ip)
+		audit(c, "sudoers.disable.start", "server", name, "started", "Sudoers disable started", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started"})
 	})
 
@@ -1811,13 +2260,21 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		status, exists := statusMap[name]
+		approved := false
 		if exists && status.Status == "pending_approval" {
 			status.Status = "approved"
+			approved = true
 		}
 		mu.Unlock()
 		if !exists {
+			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
+		}
+		if approved {
+			audit(c, "update.approve", "server", name, "success", "Upgrade approved", nil)
+		} else {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", nil)
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade approved"})
 	})
@@ -1826,15 +2283,23 @@ func main() {
 		name := c.Param("name")
 		mu.Lock()
 		status, exists := statusMap[name]
+		cancelled := false
 		if exists && status.Status == "pending_approval" {
 			status.Status = "cancelled"
 			status.Logs = ""
 			status.Upgradable = nil
+			cancelled = true
 		}
 		mu.Unlock()
 		if !exists {
+			audit(c, "update.cancel", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
+		}
+		if cancelled {
+			audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
+		} else {
+			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
 		}
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
 	})

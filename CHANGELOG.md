@@ -14,6 +14,7 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 - Colorize log lines for faster scanning.
 - Add per-server log actions: copy and download.
 - Refine log readability with subtle spacing and separators.
+- Add persistent audit trail with Activity History UI, filtering, and 90-day auto-prune.
 
 ## [v0.1.2] - 2026-02-10
 

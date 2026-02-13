@@ -69,7 +69,8 @@ This allows non-interactive sudo for apt commands only. The app writes this rule
 
 ```
 docker build -t debian-updater-web .
-docker run -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+cp .env-template .env
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
 ```
 
 The web server listens on `:8080` by default.
@@ -82,6 +83,7 @@ The app supports built-in HTTP Basic Auth (use this even behind your reverse pro
 - `DEBIAN_UPDATER_BASIC_AUTH_PASS`
 
 If only one of these is set, the server exits at startup with a configuration error.
+For Docker, `.env` is not loaded automatically unless you pass `--env-file .env`.
 
 Example (binary):
 
@@ -94,11 +96,8 @@ DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
 Example (Docker):
 
 ```bash
-docker run -p 8080:8080 \
-  -e DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
-  -e DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
-  -v debian-updater-data:/data \
-  debian-updater-web
+cp .env-template .env
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
 ```
 
 ### Quickstart (Binary)
@@ -119,6 +118,25 @@ The web interface allows managing multiple servers:
 2. Trigger updates: the process will update packages, list available upgrades, and wait for approval.
 3. Approve or cancel upgrades from the web interface.
 4. View real-time logs and status.
+
+### Audit Trail / Activity History
+
+- The Manage page includes an **Activity History** panel.
+- Each entry records: timestamp, actor, action, target, status, and message.
+- Actor is derived from app Basic Auth username when enabled.
+- If Basic Auth is disabled, actor is recorded as `unknown` (or `system` for background tasks).
+- Entries are stored in SQLite (`audit_events` table) and auto-pruned after 90 days.
+
+Audit API:
+
+- `GET /api/audit-events?page=1&page_size=50&target_name=&action=&status=&from=&to=`
+- `POST /api/audit-events/prune` (manual prune trigger)
+
+Example:
+
+```bash
+curl -u admin:change-me "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure&from=2026-02-10T00:00:00Z&to=2026-02-10T23:59:59Z"
+```
 
 ### Tests and Release
 
@@ -141,6 +159,8 @@ Release tags also publish a Docker image to GHCR:
 - `ghcr.io/nolife141/simplelinuxupdater:vX.Y.Z`
 - `ghcr.io/nolife141/simplelinuxupdater:latest`
 
+Note: local `docker build` examples use the image name `debian-updater-web`; this is just a local tag and can be changed.
+
 Runtime testing is currently performed on Linux amd64.
 
 ```bash
@@ -158,16 +178,6 @@ Release checklist (v0.1.0 and later):
 - [ ] Dashboard loads and shows version pill
 - [ ] Add/edit server works (including SSH port)
 - [ ] Autoremove and sudoers setup work on a test host
-
-### Web Server
-
-1. Run `./webserver` on your central server.
-
-2. Access the web interface at http://your-central-server:8080
-
-3. Use the web interface to manage servers: add, edit, delete servers.
-
-4. Trigger updates on servers. The web interface will show server status and allow triggering updates. Logs are displayed in real-time.
 
 ### Encryption Key (Auto-Generated)
 
@@ -188,19 +198,24 @@ Optional DB path override:
    docker build -t debian-updater-web .
    ```
 
-3. Run the container:
+3. Copy env template and set your credentials:
    ```
-   docker run -p 8080:8080 debian-updater-web
-   ```
-
-4. Access the web interface at http://localhost:8080
-
-5. To persist server configurations, use a named volume:
-   ```
-   docker run -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+   cp .env-template .env
    ```
 
-6. If you use SSH keys, upload the private key from the web UI (global or per-server). The key is stored encrypted in the DB.
+4. Run the container:
+   ```
+   docker run --env-file .env -p 8080:8080 debian-updater-web
+   ```
+
+5. Access the web interface at http://localhost:8080
+
+6. To persist server configurations, use a named volume:
+   ```
+   docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+   ```
+
+7. If you use SSH keys, upload the private key from the web UI (global or per-server). The key is stored encrypted in the DB.
 
 ## SECURITY
 
