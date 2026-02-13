@@ -6,6 +6,18 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+### Added
+
+- No entries yet.
+
+### Changed
+
+- No entries yet.
+
+### Fixed
+
+- No entries yet.
+
 ## [v0.1.3] - 2026-02-13
 
 ### Added
@@ -24,6 +36,13 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 - Add per-server log actions: copy and download.
 - Refine log readability with subtle spacing and separators.
 - Add persistent audit trail with Activity History UI, filtering, and 90-day auto-prune.
+- Route audit event filtering tests through the production handler so dynamic WHERE, pagination, and total-count paths are exercised.
+
+### Fixed
+
+- Avoid copying `sync.Once` in test DB state preservation to respect no-copy semantics.
+- Use single-quote shell escaping for sudoers `sh -c` command construction.
+- Preserve audit metadata context when oversized by returning valid truncated JSON with a `_truncated` marker and warning log.
 
 ## [v0.1.2] - 2026-02-10
 
