@@ -89,6 +89,7 @@ const updatePrecheckMinFreeKB int64 = 1024 * 1024
 const precheckOutputMaxLen = 240
 const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
 const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+const precheckLocksFallbackCmd = "sh -c \"pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x unattended-upgrade >/dev/null\""
 const precheckDpkgAuditCmd = "sudo dpkg --audit"
 const precheckAptCheckCmd = "sudo apt-get check"
 
@@ -833,11 +834,30 @@ func checkAptLocks(client sshConnection) updatePrecheckResult {
 		}
 	}
 	if isCommandNotFoundError(output + "\n" + err.Error()) {
+		fallbackStdout, fallbackStderr, fallbackErr := runSSHCommand(client, precheckLocksFallbackCmd, nil)
+		fallbackOutput := compactCommandOutput(fallbackStdout, fallbackStderr)
+		combinedOutput := strings.TrimSpace(strings.TrimSpace(output) + "\n" + strings.TrimSpace(fallbackOutput))
+		if fallbackErr == nil {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  false,
+				Details: "APT/DPKG lock contention likely in progress (fallback process check detected apt/dpkg activity).",
+				Output:  combinedOutput,
+			}
+		}
+		if exitCode, ok := sshExitCode(fallbackErr); ok && exitCode == 1 {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  true,
+				Details: "No apt/dpkg lock contention detected (fuser unavailable; process-based fallback used).",
+				Output:  combinedOutput,
+			}
+		}
 		return updatePrecheckResult{
 			Name:    "apt_locks",
 			Passed:  false,
-			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
-			Output:  output,
+			Details: "Lock check command not found and fallback process check failed. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  combinedOutput,
 		}
 	}
 	if exitCode, ok := sshExitCode(err); ok && exitCode == 1 {
@@ -858,11 +878,30 @@ func checkAptLocks(client sshConnection) updatePrecheckResult {
 		}
 	}
 	if exitCode, ok := sshExitCode(err); ok && exitCode == 127 {
+		fallbackStdout, fallbackStderr, fallbackErr := runSSHCommand(client, precheckLocksFallbackCmd, nil)
+		fallbackOutput := compactCommandOutput(fallbackStdout, fallbackStderr)
+		combinedOutput := strings.TrimSpace(strings.TrimSpace(output) + "\n" + strings.TrimSpace(fallbackOutput))
+		if fallbackErr == nil {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  false,
+				Details: "APT/DPKG lock contention likely in progress (fallback process check detected apt/dpkg activity).",
+				Output:  combinedOutput,
+			}
+		}
+		if fbCode, ok := sshExitCode(fallbackErr); ok && fbCode == 1 {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  true,
+				Details: "No apt/dpkg lock contention detected (fuser unavailable; process-based fallback used).",
+				Output:  combinedOutput,
+			}
+		}
 		return updatePrecheckResult{
 			Name:    "apt_locks",
 			Passed:  false,
-			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
-			Output:  output,
+			Details: "Lock check command not found and fallback process check failed. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  combinedOutput,
 		}
 	}
 	return updatePrecheckResult{

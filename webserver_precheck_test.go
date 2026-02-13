@@ -153,10 +153,11 @@ func TestCheckAptLocks(t *testing.T) {
 				stderr: "sudo: /usr/bin/fuser: command not found\n",
 				err:    fakeExitStatusError{code: 1, msg: "exit status 1"},
 			},
+			precheckLocksFallbackCmd: {err: fakeExitStatusError{code: 1, msg: "no process found"}},
 		},
 	}
-	if got := checkAptLocks(commandNotFoundConn); got.Passed {
-		t.Fatalf("checkAptLocks(command not found via sudo) = passed, want fail")
+	if got := checkAptLocks(commandNotFoundConn); !got.Passed {
+		t.Fatalf("checkAptLocks(command not found via sudo, no apt/dpkg processes) = failed, got %+v", got)
 	}
 
 	commandNotFoundNoSuchFileConn := &scriptedSSHConnection{
@@ -165,10 +166,11 @@ func TestCheckAptLocks(t *testing.T) {
 				stderr: "sudo: unable to execute /usr/bin/fuser: No such file or directory\n",
 				err:    fakeExitStatusError{code: 1, msg: "exit status 1"},
 			},
+			precheckLocksFallbackCmd: {},
 		},
 	}
 	if got := checkAptLocks(commandNotFoundNoSuchFileConn); got.Passed {
-		t.Fatalf("checkAptLocks(missing fuser binary) = passed, want fail")
+		t.Fatalf("checkAptLocks(missing fuser binary, fallback detects apt/dpkg activity) = passed, want fail")
 	}
 
 	missingLockFileConn := &scriptedSSHConnection{
@@ -186,10 +188,14 @@ func TestCheckAptLocks(t *testing.T) {
 	errorConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
 			precheckLocksCmd: {err: fakeExitStatusError{code: 127, msg: "fuser: not found"}},
+			precheckLocksFallbackCmd: {
+				err:    fakeExitStatusError{code: 127, msg: "pgrep: not found"},
+				stderr: "sh: 1: pgrep: not found\n",
+			},
 		},
 	}
 	if got := checkAptLocks(errorConn); got.Passed {
-		t.Fatalf("checkAptLocks(command error) = passed, want fail")
+		t.Fatalf("checkAptLocks(command error with failed fallback) = passed, want fail")
 	}
 }
 

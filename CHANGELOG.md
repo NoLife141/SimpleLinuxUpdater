@@ -18,6 +18,17 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.4] - 2026-02-13
+
+### Changed
+
+- Lock pre-check now falls back to a process-based check (`apt`, `apt-get`, `dpkg`, `unattended-upgrade`) when `fuser` is unavailable.
+- Update pre-check documentation to describe fallback behavior and troubleshooting.
+
+### Fixed
+
+- Fix regression where updates were aborted on hosts missing `/usr/bin/fuser` even when no lock contention existed.
+
 ## [v0.1.3] - 2026-02-13
 
 ### Added

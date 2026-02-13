@@ -1,6 +1,6 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.3
+Version: v0.1.4
 
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 
@@ -164,19 +164,21 @@ If a retry env value is invalid, the app logs a warning and uses defaults.
 Before `apt update` starts, update actions now run mandatory pre-checks over SSH:
 
 - Disk space: checks free space on `/var` and `/` and requires at least `1 GiB` (`1048576 KB`).
-- Lock files: checks apt/dpkg lock contention with `sudo /usr/bin/fuser` and fails immediately if locks are in use.
+- Lock files: checks apt/dpkg lock contention with `sudo /usr/bin/fuser` and falls back to a process-based check when `fuser` is unavailable.
 - APT health: runs `sudo dpkg --audit` and `sudo apt-get check`.
 
 Lock check behavior:
 
-- If `/usr/bin/fuser` is missing on the remote host, the pre-check fails (install `psmisc`).
+- If `/usr/bin/fuser` is missing on the remote host, the pre-check falls back to checking whether `apt`, `apt-get`, `dpkg`, or `unattended-upgrade` is running.
 - If a probed lock file path does not exist, this is treated as a no-lock state (non-fatal).
 
 Troubleshooting lock pre-check:
 
-- Missing `fuser` (fatal):
+- Missing `fuser` (fallback path):
   - Example: `sudo: /usr/bin/fuser: command not found`
   - Example: `sudo: unable to execute /usr/bin/fuser: No such file or directory`
+- Fallback lock is in use (fatal):
+  - `pgrep` fallback exits `0` when apt/dpkg related processes are active.
 - Lock file path missing (non-fatal/no-lock):
   - Example: `/usr/bin/fuser: /var/cache/apt/archives/lock: No such file or directory`
 - Lock is in use (fatal):
