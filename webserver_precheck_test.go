@@ -273,7 +273,7 @@ func TestRunUpdateWithActorPrecheckFailureStopsBeforeAptUpdate(t *testing.T) {
 	}
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
-	runUpdateWithActor(server, "tester", "127.0.0.1")
+	runUpdateWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 
 	mu.Lock()
 	finalStatus := statusMap[server.Name].Status

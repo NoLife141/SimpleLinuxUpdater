@@ -473,7 +473,9 @@ func isRetryableMessage(msg string) bool {
 		"knownhosts",
 		"missing password or ssh key",
 		"fingerprint mismatch",
-		"invalid",
+		"invalid credentials",
+		"invalid key",
+		"invalid private key",
 	}
 	for _, hint := range nonRetryableHints {
 		if strings.Contains(normalized, hint) {
@@ -545,6 +547,9 @@ func computeRetryDelay(policy RetryPolicy, failedAttempt int, jitterRand float64
 		jitterFactor := (jitterRand*2 - 1) * (float64(policy.JitterPct) / 100.0)
 		delay = delay * (1 + jitterFactor)
 	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
 	if delay < float64(time.Millisecond) {
 		delay = float64(time.Millisecond)
 	}
@@ -606,6 +611,72 @@ func reconnectSSHClient(server Server, config *ssh.ClientConfig, clientRef *sshC
 		conn.Close()
 	}
 	return nil
+}
+
+func appendStatusRetryLog(serverName string, format string, args ...any) {
+	mu.Lock()
+	if status := statusMap[serverName]; status != nil {
+		status.Logs += fmt.Sprintf(format, args...)
+	}
+	mu.Unlock()
+}
+
+func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolicy, opName string, attemptsUsed *int) (sshConnection, error) {
+	var client sshConnection
+	err := runWithRetry(policy, opName, func() error {
+		if attemptsUsed != nil {
+			*attemptsUsed += 1
+		}
+		c, dialErr := dialSSHConnection(server, config)
+		if dialErr == nil {
+			client = c
+		}
+		return dialErr
+	}, func(attempt int, wait time.Duration, retryErr error) {
+		appendStatusRetryLog(
+			server.Name,
+			"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
+			attempt,
+			policy.MaxAttempts,
+			retryErr,
+			wait.Round(time.Millisecond),
+		)
+	})
+	return client, err
+}
+
+func runSSHOperationWithRetry(
+	server Server,
+	config *ssh.ClientConfig,
+	clientRef *sshConnection,
+	policy RetryPolicy,
+	opName string,
+	retryLogFormat string,
+	attemptsUsed *int,
+	operation func() error,
+) error {
+	attempt := 0
+	return runWithRetry(policy, opName, func() error {
+		if attemptsUsed != nil {
+			*attemptsUsed += 1
+		}
+		attempt++
+		if attempt > 1 {
+			if reconnectErr := reconnectSSHClient(server, config, clientRef); reconnectErr != nil {
+				return reconnectErr
+			}
+		}
+		return operation()
+	}, func(retryAttempt int, wait time.Duration, retryErr error) {
+		appendStatusRetryLog(
+			server.Name,
+			retryLogFormat,
+			retryAttempt,
+			policy.MaxAttempts,
+			retryErr,
+			wait.Round(time.Millisecond),
+		)
+	})
 }
 
 func compactCommandOutput(stdout, stderr string) string {
@@ -1297,7 +1368,6 @@ func basicAuthFromEnv() (string, string, bool, error) {
 }
 
 func init() {
-	mathrand.Seed(time.Now().UnixNano())
 	loadServers()
 	for _, s := range servers {
 		statusMap[s.Name] = &ServerStatus{
@@ -1316,12 +1386,15 @@ func init() {
 }
 
 func runUpdate(server Server) {
-	runUpdateWithActor(server, "system", "")
+	retryPolicy := loadRetryPolicyFromEnv()
+	runUpdateWithActor(server, "system", "", retryPolicy)
 }
 
-func runUpdateWithActor(server Server, actor, clientIP string) {
-	policy := loadRetryPolicyFromEnv()
-	attemptsUsed := 0
+func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	sshDialAttempts := 0
+	aptUpdateAttempts := 0
+	listUpgradableAttempts := 0
+	aptUpgradeAttempts := 0
 	lastErrClass := "none"
 	retryExhausted := false
 	prechecksPassed := false
@@ -1338,13 +1411,17 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 		mu.Unlock()
 		outcome := updateCompletionOutcome(finalStatus)
 		auditWithActor(actor, clientIP, "update.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":           finalStatus,
-			"attempts_used":    attemptsUsed,
-			"last_error_class": lastErrClass,
-			"retry_exhausted":  retryExhausted,
-			"prechecks_passed": prechecksPassed,
-			"precheck_failed":  precheckFailed,
-			"precheck_results": precheckResults,
+			"status":                        finalStatus,
+			"ssh_dial_attempts_used":        sshDialAttempts,
+			"apt_update_attempts_used":      aptUpdateAttempts,
+			"list_upgradable_attempts_used": listUpgradableAttempts,
+			"apt_upgrade_attempts_used":     aptUpgradeAttempts,
+			"total_attempts_used":           sshDialAttempts + aptUpdateAttempts + listUpgradableAttempts + aptUpgradeAttempts,
+			"last_error_class":              lastErrClass,
+			"retry_exhausted":               retryExhausted,
+			"prechecks_passed":              prechecksPassed,
+			"precheck_failed":               precheckFailed,
+			"precheck_results":              precheckResults,
 		})
 	}()
 	mu.Lock()
@@ -1389,27 +1466,7 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 		Timeout:         sshConnectTimeout,
 	}
 
-	var client sshConnection
-	err = runWithRetry(policy, "update.ssh_dial", func() error {
-		attemptsUsed++
-		c, dialErr := dialSSHConnection(server, config)
-		if dialErr == nil {
-			client = c
-		}
-		return dialErr
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+	client, err := dialSSHWithRetry(server, config, policy, "update.ssh_dial", &sshDialAttempts)
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -1472,39 +1529,28 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 
 	// Run apt update
 	var stdout, stderr bytes.Buffer
-	aptUpdateAttempt := 0
-	err = runWithRetry(policy, "update.apt_update", func() error {
-		attemptsUsed++
-		aptUpdateAttempt++
-		if aptUpdateAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"update.apt_update",
+		"\napt update attempt %d/%d failed: %v; retrying in %s",
+		&aptUpdateAttempts,
+		func() error {
+			session, sessionErr := client.NewSession()
+			if sessionErr != nil {
+				return sessionErr
 			}
-		}
-		session, sessionErr := client.NewSession()
-		if sessionErr != nil {
-			return sessionErr
-		}
-		defer session.Close()
-		stdout.Reset()
-		stderr.Reset()
-		session.SetStdout(&stdout)
-		session.SetStderr(&stderr)
-		runErr := session.Run("sudo apt update")
-		return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\napt update attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			defer session.Close()
+			stdout.Reset()
+			stderr.Reset()
+			session.SetStdout(&stdout)
+			session.SetStderr(&stderr)
+			runErr := session.Run("sudo apt update")
+			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+		},
+	)
 	logs := logPrefix + stdout.String() + stderr.String()
 	if err != nil {
 		if isRetryableError(err) {
@@ -1523,33 +1569,22 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 
 	// Get upgradable
 	var upgradable []string
-	listUpgradableAttempt := 0
-	err = runWithRetry(policy, "update.list_upgradable", func() error {
-		attemptsUsed++
-		listUpgradableAttempt++
-		if listUpgradableAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"update.list_upgradable",
+		"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
+		&listUpgradableAttempts,
+		func() error {
+			items, listErr := getUpgradable(client)
+			if listErr == nil {
+				upgradable = items
 			}
-		}
-		items, listErr := getUpgradable(client)
-		if listErr == nil {
-			upgradable = items
-		}
-		return listErr
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			return listErr
+		},
+	)
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -1580,6 +1615,8 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 	mu.Unlock()
 
 	// Wait for approval
+	approvalTimeout := 30 * time.Minute
+	approvalDeadline := time.Now().Add(approvalTimeout)
 	for {
 		time.Sleep(1 * time.Second)
 		mu.Lock()
@@ -1588,6 +1625,13 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 			break
 		}
 		if status.Status == "cancelled" {
+			status.Status = "idle"
+			status.Logs = ""
+			status.Upgradable = nil
+			mu.Unlock()
+			return
+		}
+		if time.Now().After(approvalDeadline) {
 			status.Status = "idle"
 			status.Logs = ""
 			status.Upgradable = nil
@@ -1605,39 +1649,28 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 
 	stdout.Reset()
 	stderr.Reset()
-	aptUpgradeAttempt := 0
-	err = runWithRetry(policy, "update.apt_upgrade", func() error {
-		attemptsUsed++
-		aptUpgradeAttempt++
-		if aptUpgradeAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"update.apt_upgrade",
+		"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
+		&aptUpgradeAttempts,
+		func() error {
+			session, sessionErr := client.NewSession()
+			if sessionErr != nil {
+				return sessionErr
 			}
-		}
-		session, sessionErr := client.NewSession()
-		if sessionErr != nil {
-			return sessionErr
-		}
-		defer session.Close()
-		stdout.Reset()
-		stderr.Reset()
-		session.SetStdout(&stdout)
-		session.SetStderr(&stderr)
-		runErr := session.Run("sudo apt upgrade -y")
-		return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			defer session.Close()
+			stdout.Reset()
+			stderr.Reset()
+			session.SetStdout(&stdout)
+			session.SetStderr(&stderr)
+			runErr := session.Run("sudo apt upgrade -y")
+			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+		},
+	)
 	mu.Lock()
 	currentLogs := status.Logs
 	mu.Unlock()
@@ -1664,12 +1697,13 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 }
 
 func runSudoersBootstrap(server Server, sudoPassword string) {
-	runSudoersBootstrapWithActor(server, sudoPassword, "system", "")
+	retryPolicy := loadRetryPolicyFromEnv()
+	runSudoersBootstrapWithActor(server, sudoPassword, "system", "", retryPolicy)
 }
 
-func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string) {
-	policy := loadRetryPolicyFromEnv()
-	attemptsUsed := 0
+func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	sshDialAttempts := 0
+	commandAttempts := 0
 	lastErrClass := "none"
 	retryExhausted := false
 
@@ -1685,10 +1719,12 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 			outcome = "success"
 		}
 		auditWithActor(actor, clientIP, "sudoers.enable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":           finalStatus,
-			"attempts_used":    attemptsUsed,
-			"last_error_class": lastErrClass,
-			"retry_exhausted":  retryExhausted,
+			"status":                 finalStatus,
+			"ssh_dial_attempts_used": sshDialAttempts,
+			"command_attempts_used":  commandAttempts,
+			"total_attempts_used":    sshDialAttempts + commandAttempts,
+			"last_error_class":       lastErrClass,
+			"retry_exhausted":        retryExhausted,
 		})
 	}()
 	mu.Lock()
@@ -1735,27 +1771,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 		Timeout:         sshConnectTimeout,
 	}
 
-	var client sshConnection
-	err = runWithRetry(policy, "sudoers.enable.ssh_dial", func() error {
-		attemptsUsed++
-		c, dialErr := dialSSHConnection(server, config)
-		if dialErr == nil {
-			client = c
-		}
-		return dialErr
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+	client, err := dialSSHWithRetry(server, config, policy, "sudoers.enable.ssh_dial", &sshDialAttempts)
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -1780,39 +1796,28 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 	cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
 	var stdout, stderr bytes.Buffer
-	enableAttempt := 0
-	err = runWithRetry(policy, "sudoers.enable.command", func() error {
-		attemptsUsed++
-		enableAttempt++
-		if enableAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"sudoers.enable.command",
+		"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
+		&commandAttempts,
+		func() error {
+			session, sessionErr := client.NewSession()
+			if sessionErr != nil {
+				return sessionErr
 			}
-		}
-		session, sessionErr := client.NewSession()
-		if sessionErr != nil {
-			return sessionErr
-		}
-		defer session.Close()
-		stdout.Reset()
-		stderr.Reset()
-		session.SetStdout(&stdout)
-		session.SetStderr(&stderr)
-		session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-		return session.Run(cmd)
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			defer session.Close()
+			stdout.Reset()
+			stderr.Reset()
+			session.SetStdout(&stdout)
+			session.SetStderr(&stderr)
+			session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+			return session.Run(cmd)
+		},
+	)
 	mu.Lock()
 	currentLogs := status.Logs
 	mu.Unlock()
@@ -1839,12 +1844,13 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 }
 
 func runSudoersDisable(server Server, sudoPassword string) {
-	runSudoersDisableWithActor(server, sudoPassword, "system", "")
+	retryPolicy := loadRetryPolicyFromEnv()
+	runSudoersDisableWithActor(server, sudoPassword, "system", "", retryPolicy)
 }
 
-func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string) {
-	policy := loadRetryPolicyFromEnv()
-	attemptsUsed := 0
+func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	sshDialAttempts := 0
+	commandAttempts := 0
 	lastErrClass := "none"
 	retryExhausted := false
 
@@ -1860,10 +1866,12 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 			outcome = "success"
 		}
 		auditWithActor(actor, clientIP, "sudoers.disable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":           finalStatus,
-			"attempts_used":    attemptsUsed,
-			"last_error_class": lastErrClass,
-			"retry_exhausted":  retryExhausted,
+			"status":                 finalStatus,
+			"ssh_dial_attempts_used": sshDialAttempts,
+			"command_attempts_used":  commandAttempts,
+			"total_attempts_used":    sshDialAttempts + commandAttempts,
+			"last_error_class":       lastErrClass,
+			"retry_exhausted":        retryExhausted,
 		})
 	}()
 	mu.Lock()
@@ -1910,27 +1918,7 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 		Timeout:         sshConnectTimeout,
 	}
 
-	var client sshConnection
-	err = runWithRetry(policy, "sudoers.disable.ssh_dial", func() error {
-		attemptsUsed++
-		c, dialErr := dialSSHConnection(server, config)
-		if dialErr == nil {
-			client = c
-		}
-		return dialErr
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+	client, err := dialSSHWithRetry(server, config, policy, "sudoers.disable.ssh_dial", &sshDialAttempts)
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -1953,39 +1941,28 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 	cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
 	var stdout, stderr bytes.Buffer
-	disableAttempt := 0
-	err = runWithRetry(policy, "sudoers.disable.command", func() error {
-		attemptsUsed++
-		disableAttempt++
-		if disableAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"sudoers.disable.command",
+		"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
+		&commandAttempts,
+		func() error {
+			session, sessionErr := client.NewSession()
+			if sessionErr != nil {
+				return sessionErr
 			}
-		}
-		session, sessionErr := client.NewSession()
-		if sessionErr != nil {
-			return sessionErr
-		}
-		defer session.Close()
-		stdout.Reset()
-		stderr.Reset()
-		session.SetStdout(&stdout)
-		session.SetStderr(&stderr)
-		session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-		return session.Run(cmd)
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			defer session.Close()
+			stdout.Reset()
+			stderr.Reset()
+			session.SetStdout(&stdout)
+			session.SetStderr(&stderr)
+			session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+			return session.Run(cmd)
+		},
+	)
 	mu.Lock()
 	currentLogs := status.Logs
 	mu.Unlock()
@@ -2012,12 +1989,13 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 }
 
 func runAutoremove(server Server) {
-	runAutoremoveWithActor(server, "system", "")
+	retryPolicy := loadRetryPolicyFromEnv()
+	runAutoremoveWithActor(server, "system", "", retryPolicy)
 }
 
-func runAutoremoveWithActor(server Server, actor, clientIP string) {
-	policy := loadRetryPolicyFromEnv()
-	attemptsUsed := 0
+func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	sshDialAttempts := 0
+	commandAttempts := 0
 	lastErrClass := "none"
 	retryExhausted := false
 
@@ -2033,10 +2011,12 @@ func runAutoremoveWithActor(server Server, actor, clientIP string) {
 			outcome = "success"
 		}
 		auditWithActor(actor, clientIP, "autoremove.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":           finalStatus,
-			"attempts_used":    attemptsUsed,
-			"last_error_class": lastErrClass,
-			"retry_exhausted":  retryExhausted,
+			"status":                 finalStatus,
+			"ssh_dial_attempts_used": sshDialAttempts,
+			"command_attempts_used":  commandAttempts,
+			"total_attempts_used":    sshDialAttempts + commandAttempts,
+			"last_error_class":       lastErrClass,
+			"retry_exhausted":        retryExhausted,
 		})
 	}()
 	mu.Lock()
@@ -2083,27 +2063,7 @@ func runAutoremoveWithActor(server Server, actor, clientIP string) {
 		Timeout:         sshConnectTimeout,
 	}
 
-	var client sshConnection
-	err = runWithRetry(policy, "autoremove.ssh_dial", func() error {
-		attemptsUsed++
-		c, dialErr := dialSSHConnection(server, config)
-		if dialErr == nil {
-			client = c
-		}
-		return dialErr
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nSSH dial attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+	client, err := dialSSHWithRetry(server, config, policy, "autoremove.ssh_dial", &sshDialAttempts)
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -2124,39 +2084,28 @@ func runAutoremoveWithActor(server Server, actor, clientIP string) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	autoremoveAttempt := 0
-	err = runWithRetry(policy, "autoremove.command", func() error {
-		attemptsUsed++
-		autoremoveAttempt++
-		if autoremoveAttempt > 1 {
-			if reconnectErr := reconnectSSHClient(server, config, &client); reconnectErr != nil {
-				return reconnectErr
+	err = runSSHOperationWithRetry(
+		server,
+		config,
+		&client,
+		policy,
+		"autoremove.command",
+		"\nautoremove attempt %d/%d failed: %v; retrying in %s",
+		&commandAttempts,
+		func() error {
+			session, sessionErr := client.NewSession()
+			if sessionErr != nil {
+				return sessionErr
 			}
-		}
-		session, sessionErr := client.NewSession()
-		if sessionErr != nil {
-			return sessionErr
-		}
-		defer session.Close()
-		stdout.Reset()
-		stderr.Reset()
-		session.SetStdout(&stdout)
-		session.SetStderr(&stderr)
-		runErr := session.Run("sudo apt autoremove -y")
-		return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
-	}, func(attempt int, wait time.Duration, retryErr error) {
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += fmt.Sprintf(
-				"\nautoremove attempt %d/%d failed: %v; retrying in %s",
-				attempt,
-				policy.MaxAttempts,
-				retryErr,
-				wait.Round(time.Millisecond),
-			)
-		}
-		mu.Unlock()
-	})
+			defer session.Close()
+			stdout.Reset()
+			stderr.Reset()
+			session.SetStdout(&stdout)
+			session.SetStderr(&stderr)
+			runErr := session.Run("sudo apt autoremove -y")
+			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+		},
+	)
 	mu.Lock()
 	currentLogs := status.Logs
 	mu.Unlock()
@@ -3135,12 +3084,12 @@ func main() {
 		ip := clientIPFromContext(c)
 		retryPolicy := loadRetryPolicyFromEnv()
 		retryMeta := map[string]any{
-			"max_attempts":    retryPolicy.MaxAttempts,
-			"base_delay_ms":   int(retryPolicy.BaseDelay / time.Millisecond),
-			"max_delay_ms":    int(retryPolicy.MaxDelay / time.Millisecond),
-			"jitter_pct":      retryPolicy.JitterPct,
-			"attempts_used":   0,
-			"retry_exhausted": false,
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
 		}
 		server, err := beginServerAction(name, "updating")
 		if err != nil {
@@ -3159,7 +3108,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		go runUpdateWithActor(server, actor, ip)
+		go runUpdateWithActor(server, actor, ip, retryPolicy)
 		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
 	})
@@ -3170,12 +3119,12 @@ func main() {
 		ip := clientIPFromContext(c)
 		retryPolicy := loadRetryPolicyFromEnv()
 		retryMeta := map[string]any{
-			"max_attempts":    retryPolicy.MaxAttempts,
-			"base_delay_ms":   int(retryPolicy.BaseDelay / time.Millisecond),
-			"max_delay_ms":    int(retryPolicy.MaxDelay / time.Millisecond),
-			"jitter_pct":      retryPolicy.JitterPct,
-			"attempts_used":   0,
-			"retry_exhausted": false,
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
 		}
 		server, err := beginServerAction(name, "autoremove")
 		if err != nil {
@@ -3194,7 +3143,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
 			return
 		}
-		go runAutoremoveWithActor(server, actor, ip)
+		go runAutoremoveWithActor(server, actor, ip, retryPolicy)
 		audit(c, "autoremove.start", "server", name, "started", "Autoremove started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started"})
 	})
@@ -3205,12 +3154,12 @@ func main() {
 		ip := clientIPFromContext(c)
 		retryPolicy := loadRetryPolicyFromEnv()
 		retryMeta := map[string]any{
-			"max_attempts":    retryPolicy.MaxAttempts,
-			"base_delay_ms":   int(retryPolicy.BaseDelay / time.Millisecond),
-			"max_delay_ms":    int(retryPolicy.MaxDelay / time.Millisecond),
-			"jitter_pct":      retryPolicy.JitterPct,
-			"attempts_used":   0,
-			"retry_exhausted": false,
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
 		}
 		var req struct {
 			Password string `json:"password"`
@@ -3242,7 +3191,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
 			return
 		}
-		go runSudoersBootstrapWithActor(server, req.Password, actor, ip)
+		go runSudoersBootstrapWithActor(server, req.Password, actor, ip, retryPolicy)
 		audit(c, "sudoers.enable.start", "server", name, "started", "Sudoers setup started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started"})
 	})
@@ -3253,12 +3202,12 @@ func main() {
 		ip := clientIPFromContext(c)
 		retryPolicy := loadRetryPolicyFromEnv()
 		retryMeta := map[string]any{
-			"max_attempts":    retryPolicy.MaxAttempts,
-			"base_delay_ms":   int(retryPolicy.BaseDelay / time.Millisecond),
-			"max_delay_ms":    int(retryPolicy.MaxDelay / time.Millisecond),
-			"jitter_pct":      retryPolicy.JitterPct,
-			"attempts_used":   0,
-			"retry_exhausted": false,
+			"max_attempts":        retryPolicy.MaxAttempts,
+			"base_delay_ms":       int(retryPolicy.BaseDelay / time.Millisecond),
+			"max_delay_ms":        int(retryPolicy.MaxDelay / time.Millisecond),
+			"jitter_pct":          retryPolicy.JitterPct,
+			"total_attempts_used": 0,
+			"retry_exhausted":     false,
 		}
 		var req struct {
 			Password string `json:"password"`
@@ -3290,7 +3239,7 @@ func main() {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
 			return
 		}
-		go runSudoersDisableWithActor(server, req.Password, actor, ip)
+		go runSudoersDisableWithActor(server, req.Password, actor, ip, retryPolicy)
 		audit(c, "sudoers.disable.start", "server", name, "started", "Sudoers disable started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started"})
 	})
