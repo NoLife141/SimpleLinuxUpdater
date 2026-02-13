@@ -978,9 +978,148 @@ func sanitizeAuditMeta(meta map[string]any) string {
 		return "{}"
 	}
 	if len(raw) > auditMetaMaxLen {
-		return "{}"
+		log.Printf("Warning: audit metadata truncated from %d bytes across %d fields", len(raw), len(redacted))
+		truncated := map[string]any{
+			"_truncated":      true,
+			"original_length": len(raw),
+			"fields":          len(redacted),
+			"preview":         "",
+		}
+		previewRunes := []rune(string(raw))
+		lo := 0
+		hi := len(previewRunes)
+		best := `{"_truncated":true}`
+		for lo <= hi {
+			mid := (lo + hi) / 2
+			preview := string(previewRunes[:mid])
+			if mid < len(previewRunes) {
+				preview += "..."
+			}
+			truncated["preview"] = preview
+			candidate, marshalErr := json.Marshal(truncated)
+			if marshalErr != nil {
+				hi = mid - 1
+				continue
+			}
+			if len(candidate) <= auditMetaMaxLen {
+				best = string(candidate)
+				lo = mid + 1
+				continue
+			}
+			hi = mid - 1
+		}
+		return best
 	}
 	return string(raw)
+}
+
+func handleAuditEvents(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if page < 1 {
+		page = 1
+	}
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
+	if pageSize < 1 {
+		pageSize = 50
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+	targetName := strings.TrimSpace(c.Query("target_name"))
+	action := strings.TrimSpace(c.Query("action"))
+	status := strings.TrimSpace(c.Query("status"))
+	from := strings.TrimSpace(c.Query("from"))
+	to := strings.TrimSpace(c.Query("to"))
+	offset := (page - 1) * pageSize
+
+	var whereParts []string
+	var args []any
+	if targetName != "" {
+		whereParts = append(whereParts, "target_name = ?")
+		args = append(args, targetName)
+	}
+	if action != "" {
+		whereParts = append(whereParts, "action = ?")
+		args = append(args, action)
+	}
+	if status != "" {
+		whereParts = append(whereParts, "status = ?")
+		args = append(args, status)
+	}
+	if from != "" {
+		normalizedFrom, err := normalizeAuditFilterTimestamp(from)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from timestamp; expected RFC3339"})
+			return
+		}
+		whereParts = append(whereParts, "created_at >= ?")
+		args = append(args, normalizedFrom)
+	}
+	if to != "" {
+		normalizedTo, err := normalizeAuditFilterTimestamp(to)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to timestamp; expected RFC3339"})
+			return
+		}
+		whereParts = append(whereParts, "created_at <= ?")
+		args = append(args, normalizedTo)
+	}
+
+	whereClause := ""
+	if len(whereParts) > 0 {
+		whereClause = " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	db := getDB()
+	countQuery := "SELECT COUNT(*) FROM audit_events" + whereClause
+	var total int
+	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count audit events"})
+		return
+	}
+
+	query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
+			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	queryArgs := append(append([]any{}, args...), pageSize, offset)
+	rows, err := db.Query(query, queryArgs...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
+		return
+	}
+	defer rows.Close()
+
+	items := make([]AuditEvent, 0, pageSize)
+	for rows.Next() {
+		var evt AuditEvent
+		if err := rows.Scan(
+			&evt.ID,
+			&evt.CreatedAt,
+			&evt.Actor,
+			&evt.Action,
+			&evt.TargetType,
+			&evt.TargetName,
+			&evt.Status,
+			&evt.Message,
+			&evt.MetaJSON,
+			&evt.RequestID,
+			&evt.ClientIP,
+		); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
+			return
+		}
+		items = append(items, evt)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to iterate audit events"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":     items,
+		"page":      page,
+		"page_size": pageSize,
+		"total":     total,
+	})
 }
 
 func actorFromContext(c *gin.Context) string {
@@ -1819,7 +1958,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 		"sudoers.enable.ssh_dial",
 		func(r *withActorRunner) {
 			line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", r.server.User)
-			escapedLine := shellEscapeDoubleQuotes(line)
+			escapedLine := shellEscapeSingleQuotes(line)
 			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
 			var stdout, stderr bytes.Buffer
@@ -2774,114 +2913,7 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"has_key": true})
 	})
 
-	r.GET("/api/audit-events", func(c *gin.Context) {
-		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		if page < 1 {
-			page = 1
-		}
-		pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-		if pageSize < 1 {
-			pageSize = 50
-		}
-		if pageSize > 200 {
-			pageSize = 200
-		}
-		targetName := strings.TrimSpace(c.Query("target_name"))
-		action := strings.TrimSpace(c.Query("action"))
-		status := strings.TrimSpace(c.Query("status"))
-		from := strings.TrimSpace(c.Query("from"))
-		to := strings.TrimSpace(c.Query("to"))
-		offset := (page - 1) * pageSize
-
-		var whereParts []string
-		var args []any
-		if targetName != "" {
-			whereParts = append(whereParts, "target_name = ?")
-			args = append(args, targetName)
-		}
-		if action != "" {
-			whereParts = append(whereParts, "action = ?")
-			args = append(args, action)
-		}
-		if status != "" {
-			whereParts = append(whereParts, "status = ?")
-			args = append(args, status)
-		}
-		if from != "" {
-			normalizedFrom, err := normalizeAuditFilterTimestamp(from)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from timestamp; expected RFC3339"})
-				return
-			}
-			whereParts = append(whereParts, "created_at >= ?")
-			args = append(args, normalizedFrom)
-		}
-		if to != "" {
-			normalizedTo, err := normalizeAuditFilterTimestamp(to)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to timestamp; expected RFC3339"})
-				return
-			}
-			whereParts = append(whereParts, "created_at <= ?")
-			args = append(args, normalizedTo)
-		}
-
-		whereClause := ""
-		if len(whereParts) > 0 {
-			whereClause = " WHERE " + strings.Join(whereParts, " AND ")
-		}
-
-		db := getDB()
-		countQuery := "SELECT COUNT(*) FROM audit_events" + whereClause
-		var total int
-		if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count audit events"})
-			return
-		}
-
-		query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
-			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
-		queryArgs := append(append([]any{}, args...), pageSize, offset)
-		rows, err := db.Query(query, queryArgs...)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
-			return
-		}
-		defer rows.Close()
-
-		items := make([]AuditEvent, 0, pageSize)
-		for rows.Next() {
-			var evt AuditEvent
-			if err := rows.Scan(
-				&evt.ID,
-				&evt.CreatedAt,
-				&evt.Actor,
-				&evt.Action,
-				&evt.TargetType,
-				&evt.TargetName,
-				&evt.Status,
-				&evt.Message,
-				&evt.MetaJSON,
-				&evt.RequestID,
-				&evt.ClientIP,
-			); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
-				return
-			}
-			items = append(items, evt)
-		}
-		if err := rows.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to iterate audit events"})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"items":     items,
-			"page":      page,
-			"page_size": pageSize,
-			"total":     total,
-		})
-	})
+	r.GET("/api/audit-events", handleAuditEvents)
 
 	r.POST("/api/audit-events/prune", func(c *gin.Context) {
 		if err := pruneAuditEvents(auditRetentionDays); err != nil {

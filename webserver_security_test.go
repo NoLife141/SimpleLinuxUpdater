@@ -42,15 +42,19 @@ func preserveServerState(t *testing.T) {
 func preserveDBState(t *testing.T) {
 	t.Helper()
 	origDB := db
-	origOnce := dbOnce
+	origOncePtr := &dbOnce
+	origOnceDone := origDB != nil
 	db = nil
-	dbOnce = sync.Once{}
+	*origOncePtr = sync.Once{}
 	t.Cleanup(func() {
 		if db != nil {
 			_ = db.Close()
 		}
 		db = origDB
-		dbOnce = origOnce
+		*origOncePtr = sync.Once{}
+		if origOnceDone {
+			origOncePtr.Do(func() {})
+		}
 	})
 }
 
@@ -494,6 +498,28 @@ func TestSanitizeAuditMetaDoesNotOverRedactPassSubstrings(t *testing.T) {
 	}
 }
 
+func TestSanitizeAuditMetaAddsTruncationMarker(t *testing.T) {
+	huge := strings.Repeat("x", auditMetaMaxLen*2)
+	raw := sanitizeAuditMeta(map[string]any{
+		"host": "srv-1",
+		"blob": huge,
+	})
+	if len(raw) > auditMetaMaxLen {
+		t.Fatalf("sanitizeAuditMeta() len = %d, want <= %d", len(raw), auditMetaMaxLen)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		t.Fatalf("sanitizeAuditMeta() returned invalid JSON: %v", err)
+	}
+	flag, ok := decoded["_truncated"].(bool)
+	if !ok || !flag {
+		t.Fatalf("sanitizeAuditMeta() missing _truncated marker: %s", raw)
+	}
+	if _, ok := decoded["original_length"]; !ok {
+		t.Fatalf("sanitizeAuditMeta() missing original_length: %s", raw)
+	}
+}
+
 func TestWriteAuditEventAndPrune(t *testing.T) {
 	preserveDBState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit.db"))
@@ -553,11 +579,14 @@ func TestWriteAuditEventAndPrune(t *testing.T) {
 func TestAuditEventsAPIFiltering(t *testing.T) {
 	preserveDBState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit_api.db"))
-	testDB := getDB()
+	_ = getDB()
 
+	base := time.Date(2026, 2, 10, 10, 0, 0, 0, time.UTC)
 	seed := []AuditEvent{
-		{CreatedAt: time.Now().UTC().Add(-time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "alpha", Status: "success", Message: "ok", MetaJSON: "{}"},
-		{CreatedAt: time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "nope", MetaJSON: "{}"},
+		{CreatedAt: base.Add(-3 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "alpha", Status: "success", Message: "alpha-ok", MetaJSON: "{}"},
+		{CreatedAt: base.Add(-2 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "beta-fail-1", MetaJSON: "{}"},
+		{CreatedAt: base.Add(-1 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "beta-fail-2", MetaJSON: "{}"},
+		{CreatedAt: base.Add(-30 * time.Minute).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "success", Message: "beta-ok", MetaJSON: "{}"},
 	}
 	for _, evt := range seed {
 		if err := writeAuditEvent(evt); err != nil {
@@ -567,40 +596,58 @@ func TestAuditEventsAPIFiltering(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.GET("/api/audit-events", func(c *gin.Context) {
-		targetName := strings.TrimSpace(c.Query("target_name"))
-		status := strings.TrimSpace(c.Query("status"))
-		rows, err := testDB.Query("SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip FROM audit_events WHERE target_name = ? AND status = ? ORDER BY id DESC", targetName, status)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		defer rows.Close()
-		var items []AuditEvent
-		for rows.Next() {
-			var evt AuditEvent
-			if err := rows.Scan(&evt.ID, &evt.CreatedAt, &evt.Actor, &evt.Action, &evt.TargetType, &evt.TargetName, &evt.Status, &evt.Message, &evt.MetaJSON, &evt.RequestID, &evt.ClientIP); err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				return
-			}
-			items = append(items, evt)
-		}
-		c.JSON(http.StatusOK, gin.H{"items": items})
-	})
+	r.GET("/api/audit-events", handleAuditEvents)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/audit-events?target_name=beta&status=failure", nil)
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/audit-events?target_name=beta&action=server.update&status=failure&from=2026-02-10T07:30:00Z&to=2026-02-10T09:30:00Z&page=1&page_size=1",
+		nil,
+	)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	var payload struct {
-		Items []AuditEvent `json:"items"`
+		Items    []AuditEvent `json:"items"`
+		Page     int          `json:"page"`
+		PageSize int          `json:"page_size"`
+		Total    int          `json:"total"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("json unmarshal error = %v", err)
 	}
-	if len(payload.Items) != 1 || payload.Items[0].Action != "server.update" {
-		t.Fatalf("unexpected filtered items: %+v", payload.Items)
+	if payload.Total != 2 {
+		t.Fatalf("filtered total = %d, want 2", payload.Total)
+	}
+	if payload.Page != 1 || payload.PageSize != 1 {
+		t.Fatalf("unexpected pagination: page=%d page_size=%d", payload.Page, payload.PageSize)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Message != "beta-fail-2" {
+		t.Fatalf("unexpected first page items: %+v", payload.Items)
+	}
+
+	req = httptest.NewRequest(
+		http.MethodGet,
+		"/api/audit-events?target_name=beta&action=server.update&status=failure&from=2026-02-10T07:30:00Z&to=2026-02-10T09:30:00Z&page=2&page_size=1",
+		nil,
+	)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second page status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("second page json unmarshal error = %v", err)
+	}
+	if payload.Total != 2 || len(payload.Items) != 1 || payload.Items[0].Message != "beta-fail-1" {
+		t.Fatalf("unexpected second page payload: %+v", payload)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/audit-events?from=invalid", nil)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid from status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
