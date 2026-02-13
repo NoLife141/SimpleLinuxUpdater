@@ -955,7 +955,15 @@ func sanitizeAuditMeta(meta map[string]any) string {
 		if (strings.Contains(key, "pass") || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
 			continue
 		}
-		if strings.Contains(key, "key") && !isPrecheckField {
+		if !isPrecheckField && (key == "api_key" ||
+			key == "access_key" ||
+			key == "secret_key" ||
+			key == "private_key" ||
+			key == "ssh_key" ||
+			key == "key" ||
+			strings.HasPrefix(key, "key_") ||
+			strings.HasSuffix(key, "_key") ||
+			strings.HasSuffix(key, "_secret")) {
 			continue
 		}
 		redacted[k] = v
@@ -1390,310 +1398,387 @@ func runUpdate(server Server) {
 	runUpdateWithActor(server, "system", "", retryPolicy)
 }
 
-func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
-	sshDialAttempts := 0
-	aptUpdateAttempts := 0
-	listUpgradableAttempts := 0
-	aptUpgradeAttempts := 0
-	lastErrClass := "none"
-	retryExhausted := false
-	prechecksPassed := false
-	precheckFailed := ""
-	precheckResults := []updatePrecheckResult{}
-	logPrefix := ""
+type withActorRunner struct {
+	server   Server
+	actor    string
+	clientIP string
+	policy   RetryPolicy
 
-	defer func() {
-		mu.Lock()
-		finalStatus := "unknown"
-		if s := statusMap[server.Name]; s != nil {
-			finalStatus = s.Status
-		}
-		mu.Unlock()
-		outcome := updateCompletionOutcome(finalStatus)
-		auditWithActor(actor, clientIP, "update.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":                        finalStatus,
-			"ssh_dial_attempts_used":        sshDialAttempts,
-			"apt_update_attempts_used":      aptUpdateAttempts,
-			"list_upgradable_attempts_used": listUpgradableAttempts,
-			"apt_upgrade_attempts_used":     aptUpgradeAttempts,
-			"total_attempts_used":           sshDialAttempts + aptUpdateAttempts + listUpgradableAttempts + aptUpgradeAttempts,
-			"last_error_class":              lastErrClass,
-			"retry_exhausted":               retryExhausted,
-			"prechecks_passed":              prechecksPassed,
-			"precheck_failed":               precheckFailed,
-			"precheck_results":              precheckResults,
-		})
-	}()
+	config *ssh.ClientConfig
+	client sshConnection
+
+	sshDialAttempts        int
+	aptUpdateAttempts      int
+	listUpgradableAttempts int
+	aptUpgradeAttempts     int
+	commandAttempts        int
+
+	retryExhausted bool
+	lastErrClass   string
+
+	prechecksPassed bool
+	precheckFailed  string
+	precheckResults []updatePrecheckResult
+}
+
+func (r *withActorRunner) withStatus(update func(*ServerStatus)) bool {
 	mu.Lock()
-	status := statusMap[server.Name]
+	defer mu.Unlock()
+	status := statusMap[r.server.Name]
 	if status == nil {
-		mu.Unlock()
+		return false
+	}
+	update(status)
+	return true
+}
+
+func (r *withActorRunner) appendStatusLog(line string) {
+	_ = r.withStatus(func(status *ServerStatus) {
+		status.Logs += line
+	})
+}
+
+func (r *withActorRunner) setErrorLogs(logs string) {
+	_ = r.withStatus(func(status *ServerStatus) {
+		status.Status = "error"
+		status.Logs = logs
+	})
+}
+
+func (r *withActorRunner) currentLogs() string {
+	mu.Lock()
+	defer mu.Unlock()
+	if status := statusMap[r.server.Name]; status != nil {
+		return status.Logs
+	}
+	return ""
+}
+
+func (r *withActorRunner) markErrorClass(err error) {
+	if isRetryableError(err) {
+		r.lastErrClass = "transient"
+		r.retryExhausted = true
 		return
 	}
-	status.Status = "updating"
-	status.Upgradable = nil
-	status.Logs = fmt.Sprintf(
-		"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
-		policy.MaxAttempts,
-		policy.BaseDelay,
-		policy.MaxDelay,
-		policy.JitterPct,
-	)
-	mu.Unlock()
+	r.lastErrClass = "permanent"
+}
 
-	authMethods, err := buildAuthMethods(server)
+func (r *withActorRunner) setupSSH(dialOpName string) bool {
+	authMethods, err := buildAuthMethods(r.server)
 	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
+		r.lastErrClass = "permanent"
+		r.setErrorLogs(fmt.Sprintf("Auth setup failed: %v", err))
+		return false
 	}
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
+		r.lastErrClass = "permanent"
+		r.setErrorLogs(fmt.Sprintf("Host key verification setup failed: %v", err))
+		return false
 	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
+	r.config = &ssh.ClientConfig{
+		User:            r.server.User,
 		Auth:            authMethods,
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         sshConnectTimeout,
 	}
-
-	client, err := dialSSHWithRetry(server, config, policy, "update.ssh_dial", &sshDialAttempts)
+	client, err := dialSSHWithRetry(r.server, r.config, r.policy, dialOpName, &r.sshDialAttempts)
 	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
+		r.markErrorClass(err)
+		r.setErrorLogs(fmt.Sprintf("SSH connection failed: %v", err))
+		return false
+	}
+	r.client = client
+	return true
+}
+
+func runWithActorShared(
+	server Server,
+	actor, clientIP string,
+	policy RetryPolicy,
+	auditAction string,
+	initStatus func(*ServerStatus, RetryPolicy),
+	auditMeta func(*withActorRunner, string) map[string]any,
+	outcomeForStatus func(string) string,
+	dialOpName string,
+	runSteps func(*withActorRunner),
+) {
+	runner := &withActorRunner{
+		server:       server,
+		actor:        actor,
+		clientIP:     clientIP,
+		policy:       policy,
+		lastErrClass: "none",
+	}
+	if auditMeta == nil {
+		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
+	}
+	if outcomeForStatus == nil {
+		outcomeForStatus = updateCompletionOutcome
+	}
+
+	defer func() {
 		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
+		finalStatus := "unknown"
+		if status := statusMap[server.Name]; status != nil {
+			finalStatus = status.Status
+		}
 		mu.Unlock()
+		outcome := outcomeForStatus(finalStatus)
+		auditWithActor(
+			actor,
+			clientIP,
+			auditAction,
+			"server",
+			server.Name,
+			outcome,
+			fmt.Sprintf("Final status: %s", finalStatus),
+			auditMeta(runner, finalStatus),
+		)
+	}()
+
+	if !runner.withStatus(func(status *ServerStatus) {
+		initStatus(status, policy)
+	}) {
+		return
+	}
+
+	if !runner.setupSSH(dialOpName) {
 		return
 	}
 	defer func() {
-		if client != nil {
-			_ = client.Close()
+		if runner.client != nil {
+			_ = runner.client.Close()
 		}
 	}()
 
-	mu.Lock()
-	if status := statusMap[server.Name]; status != nil {
-		status.Logs += "\nRunning pre-checks..."
-	}
-	mu.Unlock()
-	precheckSummary := runUpdatePrechecks(client)
-	precheckResults = precheckSummary.Results
-	for _, result := range precheckSummary.Results {
-		state := "PASS"
-		if !result.Passed {
-			state = "FAIL"
-		}
-		line := fmt.Sprintf("\nPre-check %s [%s]: %s", result.Name, state, result.Details)
-		if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
-			line += fmt.Sprintf(" Output: %s", trimmed)
-		}
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Logs += line
-		}
-		mu.Unlock()
-	}
-	if !precheckSummary.AllPassed {
-		lastErrClass = "permanent"
-		precheckFailed = precheckSummary.FailedCheck
-		mu.Lock()
-		if status := statusMap[server.Name]; status != nil {
-			status.Status = "error"
-			status.Logs += fmt.Sprintf("\nPre-check failed (%s). Update aborted before apt update.", precheckSummary.FailedCheck)
-		}
-		mu.Unlock()
-		return
-	}
-	prechecksPassed = true
-	mu.Lock()
-	if status := statusMap[server.Name]; status != nil {
-		status.Logs += "\nPre-checks passed.\nRunning apt update..."
-		logPrefix = status.Logs + "\n"
-	}
-	mu.Unlock()
+	runSteps(runner)
+}
 
-	// Run apt update
-	var stdout, stderr bytes.Buffer
-	err = runSSHOperationWithRetry(
+func doneOnlyOutcome(finalStatus string) string {
+	if finalStatus == "done" {
+		return "success"
+	}
+	return "failure"
+}
+
+func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
+	return map[string]any{
+		"status":                        finalStatus,
+		"ssh_dial_attempts_used":        r.sshDialAttempts,
+		"apt_update_attempts_used":      r.aptUpdateAttempts,
+		"list_upgradable_attempts_used": r.listUpgradableAttempts,
+		"apt_upgrade_attempts_used":     r.aptUpgradeAttempts,
+		"total_attempts_used":           r.sshDialAttempts + r.aptUpdateAttempts + r.listUpgradableAttempts + r.aptUpgradeAttempts,
+		"last_error_class":              r.lastErrClass,
+		"retry_exhausted":               r.retryExhausted,
+		"prechecks_passed":              r.prechecksPassed,
+		"precheck_failed":               r.precheckFailed,
+		"precheck_results":              r.precheckResults,
+	}
+}
+
+func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
+	return map[string]any{
+		"status":                 finalStatus,
+		"ssh_dial_attempts_used": r.sshDialAttempts,
+		"command_attempts_used":  r.commandAttempts,
+		"total_attempts_used":    r.sshDialAttempts + r.commandAttempts,
+		"last_error_class":       r.lastErrClass,
+		"retry_exhausted":        r.retryExhausted,
+	}
+}
+
+func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	runWithActorShared(
 		server,
-		config,
-		&client,
+		actor,
+		clientIP,
 		policy,
-		"update.apt_update",
-		"\napt update attempt %d/%d failed: %v; retrying in %s",
-		&aptUpdateAttempts,
-		func() error {
-			session, sessionErr := client.NewSession()
-			if sessionErr != nil {
-				return sessionErr
+		"update.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "updating"
+			status.Upgradable = nil
+			status.Logs = fmt.Sprintf(
+				"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		updateRunnerAuditMeta,
+		updateCompletionOutcome,
+		"update.ssh_dial",
+		func(r *withActorRunner) {
+			logPrefix := ""
+			r.appendStatusLog("\nRunning pre-checks...")
+
+			precheckSummary := runUpdatePrechecks(r.client)
+			r.precheckResults = precheckSummary.Results
+			for _, result := range precheckSummary.Results {
+				state := "PASS"
+				if !result.Passed {
+					state = "FAIL"
+				}
+				line := fmt.Sprintf("\nPre-check %s [%s]: %s", result.Name, state, result.Details)
+				if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
+					line += fmt.Sprintf(" Output: %s", trimmed)
+				}
+				r.appendStatusLog(line)
 			}
-			defer session.Close()
+			if !precheckSummary.AllPassed {
+				r.lastErrClass = "permanent"
+				r.precheckFailed = precheckSummary.FailedCheck
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "error"
+					status.Logs += fmt.Sprintf("\nPre-check failed (%s). Update aborted before apt update.", precheckSummary.FailedCheck)
+				})
+				return
+			}
+			r.prechecksPassed = true
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Logs += "\nPre-checks passed.\nRunning apt update..."
+				logPrefix = status.Logs + "\n"
+			})
+
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.apt_update",
+				"\napt update attempt %d/%d failed: %v; retrying in %s",
+				&r.aptUpdateAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt update")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs := logPrefix + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+
+			var upgradable []string
+			err = runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.list_upgradable",
+				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
+				&r.listUpgradableAttempts,
+				func() error {
+					items, listErr := getUpgradable(r.client)
+					if listErr == nil {
+						upgradable = items
+					}
+					return listErr
+				},
+			)
+			if err != nil {
+				r.markErrorClass(err)
+				r.setErrorLogs(logs + fmt.Sprintf("\nError listing upgradable: %v", err))
+				return
+			}
+
+			if len(upgradable) == 0 {
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "done"
+					status.Logs = logs + "\nNo packages to upgrade."
+				})
+				return
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "pending_approval"
+				status.Upgradable = upgradable
+				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
+			})
+
+			approvalDeadline := time.Now().Add(30 * time.Minute)
+			for {
+				time.Sleep(1 * time.Second)
+				approved := false
+				cancelledOrTimeout := false
+				mu.Lock()
+				status := statusMap[r.server.Name]
+				if status != nil {
+					if status.Status == "approved" {
+						approved = true
+					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
+						status.Status = "idle"
+						status.Logs = ""
+						status.Upgradable = nil
+						cancelledOrTimeout = true
+					}
+				}
+				mu.Unlock()
+				if approved {
+					break
+				}
+				if cancelledOrTimeout {
+					return
+				}
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "upgrading"
+				status.Logs += "\nRunning apt upgrade..."
+			})
+
 			stdout.Reset()
 			stderr.Reset()
-			session.SetStdout(&stdout)
-			session.SetStderr(&stderr)
-			runErr := session.Run("sudo apt update")
-			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
-		},
-	)
-	logs := logPrefix + stdout.String() + stderr.String()
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	// Get upgradable
-	var upgradable []string
-	err = runSSHOperationWithRetry(
-		server,
-		config,
-		&client,
-		policy,
-		"update.list_upgradable",
-		"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
-		&listUpgradableAttempts,
-		func() error {
-			items, listErr := getUpgradable(client)
-			if listErr == nil {
-				upgradable = items
+			err = runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"update.apt_upgrade",
+				"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
+				&r.aptUpgradeAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt upgrade -y")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs = r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
 			}
-			return listErr
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nUpgrade completed."
+			})
 		},
 	)
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs + fmt.Sprintf("\nError listing upgradable: %v", err)
-		mu.Unlock()
-		return
-	}
-
-	if len(upgradable) == 0 {
-		mu.Lock()
-		status.Status = "done"
-		status.Logs = logs + "\nNo packages to upgrade."
-		mu.Unlock()
-		return
-	}
-
-	// Set pending approval
-	mu.Lock()
-	status.Status = "pending_approval"
-	status.Upgradable = upgradable
-	status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
-	mu.Unlock()
-
-	// Wait for approval
-	approvalTimeout := 30 * time.Minute
-	approvalDeadline := time.Now().Add(approvalTimeout)
-	for {
-		time.Sleep(1 * time.Second)
-		mu.Lock()
-		if status.Status == "approved" {
-			mu.Unlock()
-			break
-		}
-		if status.Status == "cancelled" {
-			status.Status = "idle"
-			status.Logs = ""
-			status.Upgradable = nil
-			mu.Unlock()
-			return
-		}
-		if time.Now().After(approvalDeadline) {
-			status.Status = "idle"
-			status.Logs = ""
-			status.Upgradable = nil
-			mu.Unlock()
-			return
-		}
-		mu.Unlock()
-	}
-
-	// Proceed with upgrade
-	mu.Lock()
-	status.Status = "upgrading"
-	status.Logs += "\nRunning apt upgrade..."
-	mu.Unlock()
-
-	stdout.Reset()
-	stderr.Reset()
-	err = runSSHOperationWithRetry(
-		server,
-		config,
-		&client,
-		policy,
-		"update.apt_upgrade",
-		"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
-		&aptUpgradeAttempts,
-		func() error {
-			session, sessionErr := client.NewSession()
-			if sessionErr != nil {
-				return sessionErr
-			}
-			defer session.Close()
-			stdout.Reset()
-			stderr.Reset()
-			session.SetStdout(&stdout)
-			session.SetStderr(&stderr)
-			runErr := session.Run("sudo apt upgrade -y")
-			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
-		},
-	)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs = currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nUpgrade completed."
-	mu.Unlock()
 }
 
 func runSudoersBootstrap(server Server, sudoPassword string) {
@@ -1702,145 +1787,69 @@ func runSudoersBootstrap(server Server, sudoPassword string) {
 }
 
 func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
-	sshDialAttempts := 0
-	commandAttempts := 0
-	lastErrClass := "none"
-	retryExhausted := false
-
-	defer func() {
-		mu.Lock()
-		finalStatus := "unknown"
-		if s := statusMap[server.Name]; s != nil {
-			finalStatus = s.Status
-		}
-		mu.Unlock()
-		outcome := "failure"
-		if finalStatus == "done" {
-			outcome = "success"
-		}
-		auditWithActor(actor, clientIP, "sudoers.enable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":                 finalStatus,
-			"ssh_dial_attempts_used": sshDialAttempts,
-			"command_attempts_used":  commandAttempts,
-			"total_attempts_used":    sshDialAttempts + commandAttempts,
-			"last_error_class":       lastErrClass,
-			"retry_exhausted":        retryExhausted,
-		})
-	}()
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "sudoers"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += fmt.Sprintf(
-		"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nConfiguring passwordless apt sudoers...",
-		policy.MaxAttempts,
-		policy.BaseDelay,
-		policy.MaxDelay,
-		policy.JitterPct,
-	)
-	mu.Unlock()
-
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
-
-	client, err := dialSSHWithRetry(server, config, policy, "sudoers.enable.ssh_dial", &sshDialAttempts)
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer func() {
-		if client != nil {
-			_ = client.Close()
-		}
-	}()
-
-	line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", server.User)
-	escapedLine := shellEscapeSingleQuotes(line)
-	cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
-
-	var stdout, stderr bytes.Buffer
-	err = runSSHOperationWithRetry(
+	runWithActorShared(
 		server,
-		config,
-		&client,
+		actor,
+		clientIP,
 		policy,
-		"sudoers.enable.command",
-		"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
-		&commandAttempts,
-		func() error {
-			session, sessionErr := client.NewSession()
-			if sessionErr != nil {
-				return sessionErr
+		"sudoers.enable.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "sudoers"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
 			}
-			defer session.Close()
-			stdout.Reset()
-			stderr.Reset()
-			session.SetStdout(&stdout)
-			session.SetStderr(&stderr)
-			session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-			return session.Run(cmd)
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nConfiguring passwordless apt sudoers...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"sudoers.enable.ssh_dial",
+		func(r *withActorRunner) {
+			line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", r.server.User)
+			escapedLine := shellEscapeSingleQuotes(line)
+			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
+
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"sudoers.enable.command",
+				"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+					return session.Run(cmd)
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nPasswordless apt sudoers enabled."
+			})
 		},
 	)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nPasswordless apt sudoers enabled."
-	mu.Unlock()
 }
 
 func runSudoersDisable(server Server, sudoPassword string) {
@@ -1849,143 +1858,67 @@ func runSudoersDisable(server Server, sudoPassword string) {
 }
 
 func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
-	sshDialAttempts := 0
-	commandAttempts := 0
-	lastErrClass := "none"
-	retryExhausted := false
-
-	defer func() {
-		mu.Lock()
-		finalStatus := "unknown"
-		if s := statusMap[server.Name]; s != nil {
-			finalStatus = s.Status
-		}
-		mu.Unlock()
-		outcome := "failure"
-		if finalStatus == "done" {
-			outcome = "success"
-		}
-		auditWithActor(actor, clientIP, "sudoers.disable.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":                 finalStatus,
-			"ssh_dial_attempts_used": sshDialAttempts,
-			"command_attempts_used":  commandAttempts,
-			"total_attempts_used":    sshDialAttempts + commandAttempts,
-			"last_error_class":       lastErrClass,
-			"retry_exhausted":        retryExhausted,
-		})
-	}()
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "sudoers"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += fmt.Sprintf(
-		"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nDisabling passwordless apt sudoers...",
-		policy.MaxAttempts,
-		policy.BaseDelay,
-		policy.MaxDelay,
-		policy.JitterPct,
-	)
-	mu.Unlock()
-
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
-
-	client, err := dialSSHWithRetry(server, config, policy, "sudoers.disable.ssh_dial", &sshDialAttempts)
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer func() {
-		if client != nil {
-			_ = client.Close()
-		}
-	}()
-
-	cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
-
-	var stdout, stderr bytes.Buffer
-	err = runSSHOperationWithRetry(
+	runWithActorShared(
 		server,
-		config,
-		&client,
+		actor,
+		clientIP,
 		policy,
-		"sudoers.disable.command",
-		"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
-		&commandAttempts,
-		func() error {
-			session, sessionErr := client.NewSession()
-			if sessionErr != nil {
-				return sessionErr
+		"sudoers.disable.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "sudoers"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
 			}
-			defer session.Close()
-			stdout.Reset()
-			stderr.Reset()
-			session.SetStdout(&stdout)
-			session.SetStderr(&stderr)
-			session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-			return session.Run(cmd)
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nDisabling passwordless apt sudoers...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"sudoers.disable.ssh_dial",
+		func(r *withActorRunner) {
+			cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
+
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"sudoers.disable.command",
+				"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
+					return session.Run(cmd)
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nPasswordless apt sudoers disabled."
+			})
 		},
 	)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nPasswordless apt sudoers disabled."
-	mu.Unlock()
 }
 
 func runAutoremove(server Server) {
@@ -1994,141 +1927,65 @@ func runAutoremove(server Server) {
 }
 
 func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
-	sshDialAttempts := 0
-	commandAttempts := 0
-	lastErrClass := "none"
-	retryExhausted := false
-
-	defer func() {
-		mu.Lock()
-		finalStatus := "unknown"
-		if s := statusMap[server.Name]; s != nil {
-			finalStatus = s.Status
-		}
-		mu.Unlock()
-		outcome := "failure"
-		if finalStatus == "done" {
-			outcome = "success"
-		}
-		auditWithActor(actor, clientIP, "autoremove.complete", "server", server.Name, outcome, fmt.Sprintf("Final status: %s", finalStatus), map[string]any{
-			"status":                 finalStatus,
-			"ssh_dial_attempts_used": sshDialAttempts,
-			"command_attempts_used":  commandAttempts,
-			"total_attempts_used":    sshDialAttempts + commandAttempts,
-			"last_error_class":       lastErrClass,
-			"retry_exhausted":        retryExhausted,
-		})
-	}()
-	mu.Lock()
-	status := statusMap[server.Name]
-	if status == nil {
-		mu.Unlock()
-		return
-	}
-	status.Status = "autoremove"
-	if strings.TrimSpace(status.Logs) == "" {
-		status.Logs = "Starting Linux Updater..."
-	}
-	status.Logs += fmt.Sprintf(
-		"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nRunning apt autoremove...",
-		policy.MaxAttempts,
-		policy.BaseDelay,
-		policy.MaxDelay,
-		policy.JitterPct,
-	)
-	mu.Unlock()
-
-	authMethods, err := buildAuthMethods(server)
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Auth setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	hostKeyCallback, err := getHostKeyCallback()
-	if err != nil {
-		lastErrClass = "permanent"
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("Host key verification setup failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	config := &ssh.ClientConfig{
-		User:            server.User,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         sshConnectTimeout,
-	}
-
-	client, err := dialSSHWithRetry(server, config, policy, "autoremove.ssh_dial", &sshDialAttempts)
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = fmt.Sprintf("SSH connection failed: %v", err)
-		mu.Unlock()
-		return
-	}
-	defer func() {
-		if client != nil {
-			_ = client.Close()
-		}
-	}()
-
-	var stdout, stderr bytes.Buffer
-	err = runSSHOperationWithRetry(
+	runWithActorShared(
 		server,
-		config,
-		&client,
+		actor,
+		clientIP,
 		policy,
-		"autoremove.command",
-		"\nautoremove attempt %d/%d failed: %v; retrying in %s",
-		&commandAttempts,
-		func() error {
-			session, sessionErr := client.NewSession()
-			if sessionErr != nil {
-				return sessionErr
+		"autoremove.complete",
+		func(status *ServerStatus, policy RetryPolicy) {
+			status.Status = "autoremove"
+			if strings.TrimSpace(status.Logs) == "" {
+				status.Logs = "Starting Linux Updater..."
 			}
-			defer session.Close()
-			stdout.Reset()
-			stderr.Reset()
-			session.SetStdout(&stdout)
-			session.SetStderr(&stderr)
-			runErr := session.Run("sudo apt autoremove -y")
-			return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+			status.Logs += fmt.Sprintf(
+				"\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nRunning apt autoremove...",
+				policy.MaxAttempts,
+				policy.BaseDelay,
+				policy.MaxDelay,
+				policy.JitterPct,
+			)
+		},
+		commandRunnerAuditMeta,
+		doneOnlyOutcome,
+		"autoremove.ssh_dial",
+		func(r *withActorRunner) {
+			var stdout, stderr bytes.Buffer
+			err := runSSHOperationWithRetry(
+				r.server,
+				r.config,
+				&r.client,
+				r.policy,
+				"autoremove.command",
+				"\nautoremove attempt %d/%d failed: %v; retrying in %s",
+				&r.commandAttempts,
+				func() error {
+					session, sessionErr := r.client.NewSession()
+					if sessionErr != nil {
+						return sessionErr
+					}
+					defer session.Close()
+					stdout.Reset()
+					stderr.Reset()
+					session.SetStdout(&stdout)
+					session.SetStderr(&stderr)
+					runErr := session.Run("sudo apt autoremove -y")
+					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+				},
+			)
+			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			if err != nil {
+				r.markErrorClass(err)
+				logs += fmt.Sprintf("\nError: %v", err)
+				r.setErrorLogs(logs)
+				return
+			}
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "done"
+				status.Logs = logs + "\nAutoremove completed."
+			})
 		},
 	)
-	mu.Lock()
-	currentLogs := status.Logs
-	mu.Unlock()
-	logs := currentLogs + "\n" + stdout.String() + stderr.String()
-	if err != nil {
-		if isRetryableError(err) {
-			lastErrClass = "transient"
-			retryExhausted = true
-		} else {
-			lastErrClass = "permanent"
-		}
-		logs += fmt.Sprintf("\nError: %v", err)
-		mu.Lock()
-		status.Status = "error"
-		status.Logs = logs
-		mu.Unlock()
-		return
-	}
-
-	mu.Lock()
-	status.Status = "done"
-	status.Logs = logs + "\nAutoremove completed."
-	mu.Unlock()
 }
 
 func getUpgradable(client sshConnection) ([]string, error) {
@@ -2156,7 +2013,6 @@ func getUpgradable(client sshConnection) ([]string, error) {
 
 func getGlobalKey() string {
 	db := getDB()
-	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
@@ -2167,7 +2023,6 @@ func getGlobalKey() string {
 			return ""
 		}
 		if err != nil {
-			lastErr = err
 			if strings.Contains(strings.ToLower(err.Error()), "database is locked") && attempt < 3 {
 				time.Sleep(75 * time.Millisecond)
 				continue
@@ -2197,13 +2052,7 @@ func getGlobalKey() string {
 		globalKeyMu.Unlock()
 		return key
 	}
-	if lastErr != nil {
-		log.Printf("Failed to load global SSH key after retries: %v", lastErr)
-	}
-	globalKeyMu.RLock()
-	cached := globalKey
-	globalKeyMu.RUnlock()
-	return cached
+	return ""
 }
 
 func setGlobalKey(key string) error {
