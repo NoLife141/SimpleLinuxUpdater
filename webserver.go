@@ -1355,7 +1355,7 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 	}
 	status.Status = "updating"
 	status.Logs = fmt.Sprintf(
-		"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%\nRunning apt update...",
+		"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
 		policy.MaxAttempts,
 		policy.BaseDelay,
 		policy.MaxDelay,
@@ -1422,7 +1422,11 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 		mu.Unlock()
 		return
 	}
-	defer client.Close()
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
 	mu.Lock()
 	if status := statusMap[server.Name]; status != nil {
@@ -1460,7 +1464,7 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 	prechecksPassed = true
 	mu.Lock()
 	if status := statusMap[server.Name]; status != nil {
-		status.Logs += "\nPre-checks passed."
+		status.Logs += "\nPre-checks passed.\nRunning apt update..."
 		logPrefix = status.Logs + "\n"
 	}
 	mu.Unlock()
@@ -1764,7 +1768,11 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 		mu.Unlock()
 		return
 	}
-	defer client.Close()
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
 	line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", server.User)
 	escapedLine := shellEscapeSingleQuotes(line)
@@ -1935,7 +1943,11 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 		mu.Unlock()
 		return
 	}
-	defer client.Close()
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
 	cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
@@ -2104,7 +2116,11 @@ func runAutoremoveWithActor(server Server, actor, clientIP string) {
 		mu.Unlock()
 		return
 	}
-	defer client.Close()
+	defer func() {
+		if client != nil {
+			_ = client.Close()
+		}
+	}()
 
 	var stdout, stderr bytes.Buffer
 	autoremoveAttempt := 0

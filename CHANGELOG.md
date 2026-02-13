@@ -6,8 +6,6 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
-### Changed
-
 ## [v0.1.3] - 2026-02-13
 
 ### Added

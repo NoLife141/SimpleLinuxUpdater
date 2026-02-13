@@ -981,7 +981,8 @@
                 });
             }
             const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
-            document.getElementById('audit-page-info').textContent = `Page ${auditPage} of ${totalPages} (${auditTotal} events)`;
+            const currentPage = Math.min(auditPage, totalPages);
+            document.getElementById('audit-page-info').textContent = `Page ${currentPage} of ${totalPages} (${auditTotal} events)`;
         }
 
         async function fetchAuditEvents() {
@@ -1004,6 +1005,12 @@
             const data = await res.json();
             auditEvents = data.items || [];
             auditTotal = Number(data.total || 0);
+            const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
+            if (auditPage > totalPages) {
+                auditPage = totalPages;
+                await fetchAuditEvents();
+                return;
+            }
             renderAuditTable();
         }
 

@@ -245,19 +245,22 @@ Optional DB path override:
    ```
 
 3. Copy env template and set your credentials:
-   ```
+
+   ```bash
    cp .env-template .env
    ```
 
 4. Run the container:
-   ```
+
+   ```bash
    docker run --env-file .env -p 8080:8080 debian-updater-web
    ```
 
 5. Access the web interface at http://localhost:8080
 
 6. To persist server configurations, use a named volume:
-   ```
+
+   ```bash
    docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
    ```
 
