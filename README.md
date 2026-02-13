@@ -37,10 +37,10 @@ sudo visudo -f /etc/sudoers.d/apt-nopasswd
 Add this line:
 
 ```
-<user> ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get
+<user> ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser
 ```
 
-This allows non-interactive sudo for apt commands only. The app writes this rule under `/etc/sudoers.d/`. Test on a non-critical host first; optional hardening is to validate with `visudo -c` after changes. If you prefer broader access, adjust accordingly.
+This allows non-interactive sudo for update and pre-check commands. The app writes this rule under `/etc/sudoers.d/`. Test on a non-critical host first; optional hardening is to validate with `visudo -c` after changes. If you prefer broader access, adjust accordingly.
 
 ## Building
 
@@ -158,6 +158,31 @@ Validation rules:
 - `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `>= DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (otherwise base/max delay fall back to defaults)
 
 If a retry env value is invalid, the app logs a warning and uses defaults.
+
+### Update Pre-Checks (Fail Fast)
+
+Before `apt update` starts, update actions now run mandatory pre-checks over SSH:
+
+- Disk space: checks free space on `/var` and `/` and requires at least `1 GiB` (`1048576 KB`).
+- Lock files: checks apt/dpkg lock contention with `sudo /usr/bin/fuser` and fails immediately if locks are in use.
+- APT health: runs `sudo dpkg --audit` and `sudo apt-get check`.
+
+Lock check behavior:
+
+- If `/usr/bin/fuser` is missing on the remote host, the pre-check fails (install `psmisc`).
+- If a probed lock file path does not exist, this is treated as a no-lock state (non-fatal).
+
+Troubleshooting lock pre-check:
+
+- Missing `fuser` (fatal):
+  - Example: `sudo: /usr/bin/fuser: command not found`
+  - Example: `sudo: unable to execute /usr/bin/fuser: No such file or directory`
+- Lock file path missing (non-fatal/no-lock):
+  - Example: `/usr/bin/fuser: /var/cache/apt/archives/lock: No such file or directory`
+- Lock is in use (fatal):
+  - `fuser` exits `0` and reports one or more PIDs holding lock files.
+
+If any pre-check fails, the update stops before entering the normal update/approval flow, status becomes `error`, and logs/audit metadata include the failed check and details.
 
 ### Tests and Release
 

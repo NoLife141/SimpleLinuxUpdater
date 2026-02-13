@@ -62,7 +62,7 @@ var db *sql.DB
 var dbOnce sync.Once
 var keyOnce sync.Once
 var encryptionKey []byte
-var globalKeyOnce sync.Once
+var globalKeyMu sync.RWMutex
 var globalKey string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
@@ -84,6 +84,12 @@ const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
 const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
+const updatePrecheckMinFreeKB int64 = 1024 * 1024
+const precheckOutputMaxLen = 240
+const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
+const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+const precheckDpkgAuditCmd = "sudo dpkg --audit"
+const precheckAptCheckCmd = "sudo apt-get check"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -109,6 +115,19 @@ type RetryPolicy struct {
 	BaseDelay   time.Duration
 	MaxDelay    time.Duration
 	JitterPct   int
+}
+
+type updatePrecheckResult struct {
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Details string `json:"details"`
+	Output  string `json:"output,omitempty"`
+}
+
+type updatePrecheckSummary struct {
+	AllPassed   bool                   `json:"all_passed"`
+	FailedCheck string                 `json:"failed_check,omitempty"`
+	Results     []updatePrecheckResult `json:"results"`
 }
 
 type retryableTaggedError struct {
@@ -589,6 +608,271 @@ func reconnectSSHClient(server Server, config *ssh.ClientConfig, clientRef *sshC
 	return nil
 }
 
+func compactCommandOutput(stdout, stderr string) string {
+	combined := strings.TrimSpace(strings.TrimSpace(stdout) + "\n" + strings.TrimSpace(stderr))
+	if combined == "" {
+		return ""
+	}
+	return truncateString(combined, precheckOutputMaxLen)
+}
+
+func kbToGiB(kb int64) float64 {
+	return float64(kb) / (1024.0 * 1024.0)
+}
+
+func isSudoPolicyOrPasswordError(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(normalized, "a password is required") ||
+		strings.Contains(normalized, "not allowed to run sudo") ||
+		strings.Contains(normalized, "is not in the sudoers file")
+}
+
+func isCommandNotFoundError(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	return strings.Contains(normalized, "/usr/bin/fuser: command not found") ||
+		strings.Contains(normalized, "/usr/bin/fuser: not found") ||
+		strings.Contains(normalized, "unable to execute /usr/bin/fuser") ||
+		strings.Contains(normalized, "sudo: /usr/bin/fuser: no such file or directory") ||
+		(strings.Contains(normalized, "command not found") && strings.Contains(normalized, "fuser"))
+}
+
+func isBenignNoLockStateOutput(msg string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(msg))
+	if normalized == "" {
+		return true
+	}
+	if strings.Contains(normalized, "no process found") {
+		return true
+	}
+	lockPathMentioned := strings.Contains(normalized, "/var/lib/dpkg/lock-frontend") ||
+		strings.Contains(normalized, "/var/lib/dpkg/lock") ||
+		strings.Contains(normalized, "/var/cache/apt/archives/lock")
+	if lockPathMentioned && (strings.Contains(normalized, "does not exist") || strings.Contains(normalized, "no such file or directory")) {
+		return true
+	}
+	return false
+}
+
+func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+	if client == nil {
+		return "", "", errors.New("missing SSH connection")
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer session.Close()
+	var stdout, stderr bytes.Buffer
+	session.SetStdout(&stdout)
+	session.SetStderr(&stderr)
+	if stdin != nil {
+		session.SetStdin(stdin)
+	}
+	err = session.Run(cmd)
+	return stdout.String(), stderr.String(), err
+}
+
+func sshExitCode(err error) (int, bool) {
+	if err == nil {
+		return 0, true
+	}
+	var exitStatusErr interface{ ExitStatus() int }
+	if errors.As(err, &exitStatusErr) {
+		return exitStatusErr.ExitStatus(), true
+	}
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitStatus(), true
+	}
+	return 0, false
+}
+
+func checkDiskSpace(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, precheckDiskSpaceCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err != nil {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: fmt.Sprintf("Failed to read free disk space: %v", err),
+			Output:  output,
+		}
+	}
+	fields := strings.Fields(stdout)
+	if len(fields) == 0 {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: "Could not parse free disk space output.",
+			Output:  output,
+		}
+	}
+	minFreeKB := int64(-1)
+	for _, field := range fields {
+		value, convErr := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
+		if convErr != nil {
+			return updatePrecheckResult{
+				Name:    "disk_space",
+				Passed:  false,
+				Details: fmt.Sprintf("Invalid free space value %q.", field),
+				Output:  output,
+			}
+		}
+		if minFreeKB == -1 || value < minFreeKB {
+			minFreeKB = value
+		}
+	}
+	if minFreeKB < updatePrecheckMinFreeKB {
+		return updatePrecheckResult{
+			Name:    "disk_space",
+			Passed:  false,
+			Details: fmt.Sprintf("Insufficient disk space: %.2f GiB free (minimum %.2f GiB).", kbToGiB(minFreeKB), kbToGiB(updatePrecheckMinFreeKB)),
+			Output:  "",
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "disk_space",
+		Passed:  true,
+		Details: fmt.Sprintf("Disk space OK: %.2f GiB free (minimum %.2f GiB).", kbToGiB(minFreeKB), kbToGiB(updatePrecheckMinFreeKB)),
+		Output:  "",
+	}
+}
+
+func checkAptLocks(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, precheckLocksCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err == nil {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "APT/DPKG lock files are currently in use.",
+			Output:  output,
+		}
+	}
+	if isSudoPolicyOrPasswordError(output + "\n" + err.Error()) {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock pre-check requires passwordless sudo for `/usr/bin/fuser`. Click \"Enable passwordless apt\" for this server, then retry.",
+			Output:  output,
+		}
+	}
+	if isCommandNotFoundError(output + "\n" + err.Error()) {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  output,
+		}
+	}
+	if exitCode, ok := sshExitCode(err); ok && exitCode == 1 {
+		trimmedOutput := strings.TrimSpace(output)
+		if !isBenignNoLockStateOutput(trimmedOutput) {
+			return updatePrecheckResult{
+				Name:    "apt_locks",
+				Passed:  false,
+				Details: "Could not determine apt/dpkg lock state from lock check output.",
+				Output:  output,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  true,
+			Details: "No apt/dpkg lock contention detected.",
+			Output:  output,
+		}
+	}
+	if exitCode, ok := sshExitCode(err); ok && exitCode == 127 {
+		return updatePrecheckResult{
+			Name:    "apt_locks",
+			Passed:  false,
+			Details: "Lock check command not found on remote host. Install package `psmisc` (provides /usr/bin/fuser).",
+			Output:  output,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "apt_locks",
+		Passed:  false,
+		Details: fmt.Sprintf("Failed to evaluate apt/dpkg lock state: %v", err),
+		Output:  output,
+	}
+}
+
+func checkAptHealth(client sshConnection) updatePrecheckResult {
+	dpkgStdout, dpkgStderr, dpkgErr := runSSHCommand(client, precheckDpkgAuditCmd, nil)
+	dpkgOutput := compactCommandOutput(dpkgStdout, dpkgStderr)
+	if dpkgErr != nil {
+		if isSudoPolicyOrPasswordError(dpkgOutput + "\n" + dpkgErr.Error()) {
+			return updatePrecheckResult{
+				Name:    "apt_health",
+				Passed:  false,
+				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/dpkg`. Click \"Enable passwordless apt\" for this server, then retry.",
+				Output:  dpkgOutput,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: fmt.Sprintf("dpkg audit failed: %v", dpkgErr),
+			Output:  dpkgOutput,
+		}
+	}
+	if strings.TrimSpace(dpkgStdout+dpkgStderr) != "" {
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: "dpkg audit reported package state issues.",
+			Output:  dpkgOutput,
+		}
+	}
+	aptStdout, aptStderr, aptErr := runSSHCommand(client, precheckAptCheckCmd, nil)
+	aptOutput := compactCommandOutput(aptStdout, aptStderr)
+	if aptErr != nil {
+		if isSudoPolicyOrPasswordError(aptOutput + "\n" + aptErr.Error()) {
+			return updatePrecheckResult{
+				Name:    "apt_health",
+				Passed:  false,
+				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/apt-get`. Click \"Enable passwordless apt\" for this server, then retry.",
+				Output:  aptOutput,
+			}
+		}
+		return updatePrecheckResult{
+			Name:    "apt_health",
+			Passed:  false,
+			Details: fmt.Sprintf("apt-get check failed: %v", aptErr),
+			Output:  aptOutput,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    "apt_health",
+		Passed:  true,
+		Details: "APT health checks passed.",
+		Output:  compactCommandOutput(dpkgOutput, aptOutput),
+	}
+}
+
+func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
+	checks := []func(sshConnection) updatePrecheckResult{
+		checkDiskSpace,
+		checkAptLocks,
+		checkAptHealth,
+	}
+	summary := updatePrecheckSummary{
+		AllPassed: true,
+		Results:   make([]updatePrecheckResult, 0, len(checks)),
+	}
+	for _, check := range checks {
+		result := check(client)
+		summary.Results = append(summary.Results, result)
+		if !result.Passed {
+			summary.AllPassed = false
+			summary.FailedCheck = result.Name
+			return summary
+		}
+	}
+	return summary
+}
+
 func sanitizeAuditMeta(meta map[string]any) string {
 	if meta == nil {
 		return "{}"
@@ -596,7 +880,11 @@ func sanitizeAuditMeta(meta map[string]any) string {
 	redacted := make(map[string]any, len(meta))
 	for k, v := range meta {
 		key := strings.ToLower(strings.TrimSpace(k))
-		if strings.Contains(key, "pass") || strings.Contains(key, "password") || strings.Contains(key, "key") || strings.Contains(key, "secret") || strings.Contains(key, "token") {
+		isPrecheckField := strings.HasPrefix(key, "precheck")
+		if (strings.Contains(key, "pass") || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
+			continue
+		}
+		if strings.Contains(key, "key") && !isPrecheckField {
 			continue
 		}
 		redacted[k] = v
@@ -1036,6 +1324,10 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 	attemptsUsed := 0
 	lastErrClass := "none"
 	retryExhausted := false
+	prechecksPassed := false
+	precheckFailed := ""
+	precheckResults := []updatePrecheckResult{}
+	logPrefix := ""
 
 	defer func() {
 		mu.Lock()
@@ -1050,6 +1342,9 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 			"attempts_used":    attemptsUsed,
 			"last_error_class": lastErrClass,
 			"retry_exhausted":  retryExhausted,
+			"prechecks_passed": prechecksPassed,
+			"precheck_failed":  precheckFailed,
+			"precheck_results": precheckResults,
 		})
 	}()
 	mu.Lock()
@@ -1129,6 +1424,47 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 	}
 	defer client.Close()
 
+	mu.Lock()
+	if status := statusMap[server.Name]; status != nil {
+		status.Logs += "\nRunning pre-checks..."
+	}
+	mu.Unlock()
+	precheckSummary := runUpdatePrechecks(client)
+	precheckResults = precheckSummary.Results
+	for _, result := range precheckSummary.Results {
+		state := "PASS"
+		if !result.Passed {
+			state = "FAIL"
+		}
+		line := fmt.Sprintf("\nPre-check %s [%s]: %s", result.Name, state, result.Details)
+		if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
+			line += fmt.Sprintf(" Output: %s", trimmed)
+		}
+		mu.Lock()
+		if status := statusMap[server.Name]; status != nil {
+			status.Logs += line
+		}
+		mu.Unlock()
+	}
+	if !precheckSummary.AllPassed {
+		lastErrClass = "permanent"
+		precheckFailed = precheckSummary.FailedCheck
+		mu.Lock()
+		if status := statusMap[server.Name]; status != nil {
+			status.Status = "error"
+			status.Logs += fmt.Sprintf("\nPre-check failed (%s). Update aborted before apt update.", precheckSummary.FailedCheck)
+		}
+		mu.Unlock()
+		return
+	}
+	prechecksPassed = true
+	mu.Lock()
+	if status := statusMap[server.Name]; status != nil {
+		status.Logs += "\nPre-checks passed."
+		logPrefix = status.Logs + "\n"
+	}
+	mu.Unlock()
+
 	// Run apt update
 	var stdout, stderr bytes.Buffer
 	aptUpdateAttempt := 0
@@ -1164,7 +1500,7 @@ func runUpdateWithActor(server Server, actor, clientIP string) {
 		}
 		mu.Unlock()
 	})
-	logs := stdout.String() + stderr.String()
+	logs := logPrefix + stdout.String() + stderr.String()
 	if err != nil {
 		if isRetryableError(err) {
 			lastErrClass = "transient"
@@ -1430,7 +1766,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 	}
 	defer client.Close()
 
-	line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get", server.User)
+	line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", server.User)
 	escapedLine := shellEscapeSingleQuotes(line)
 	cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
@@ -1853,28 +2189,55 @@ func getUpgradable(client sshConnection) ([]string, error) {
 }
 
 func getGlobalKey() string {
-	globalKeyOnce.Do(func() {
-		db := getDB()
+	db := getDB()
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
 		if err == sql.ErrNoRows {
+			globalKeyMu.Lock()
 			globalKey = ""
-			return
+			globalKeyMu.Unlock()
+			return ""
 		}
 		if err != nil {
+			lastErr = err
+			if strings.Contains(strings.ToLower(err.Error()), "database is locked") && attempt < 3 {
+				time.Sleep(75 * time.Millisecond)
+				continue
+			}
+			globalKeyMu.RLock()
+			cached := globalKey
+			globalKeyMu.RUnlock()
 			log.Printf("Failed to load global SSH key: %v", err)
-			globalKey = ""
-			return
+			if strings.TrimSpace(cached) != "" {
+				log.Printf("Using cached global SSH key due to read failure")
+			}
+			return cached
 		}
-		key, err := decryptSecret(enc)
-		if err != nil {
-			log.Printf("Failed to decrypt global SSH key: %v", err)
-			globalKey = ""
-			return
+		key, decErr := decryptSecret(enc)
+		if decErr != nil {
+			globalKeyMu.RLock()
+			cached := globalKey
+			globalKeyMu.RUnlock()
+			log.Printf("Failed to decrypt global SSH key: %v", decErr)
+			if strings.TrimSpace(cached) != "" {
+				log.Printf("Using cached global SSH key due to decrypt failure")
+			}
+			return cached
 		}
+		globalKeyMu.Lock()
 		globalKey = key
-	})
-	return globalKey
+		globalKeyMu.Unlock()
+		return key
+	}
+	if lastErr != nil {
+		log.Printf("Failed to load global SSH key after retries: %v", lastErr)
+	}
+	globalKeyMu.RLock()
+	cached := globalKey
+	globalKeyMu.RUnlock()
+	return cached
 }
 
 func setGlobalKey(key string) error {
@@ -1890,8 +2253,9 @@ func setGlobalKey(key string) error {
 	if err != nil {
 		return err
 	}
-	globalKeyOnce = sync.Once{}
+	globalKeyMu.Lock()
 	globalKey = key
+	globalKeyMu.Unlock()
 	return nil
 }
 
@@ -1900,8 +2264,9 @@ func clearGlobalKey() error {
 	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", globalKeySetting); err != nil {
 		return err
 	}
-	globalKeyOnce = sync.Once{}
+	globalKeyMu.Lock()
 	globalKey = ""
+	globalKeyMu.Unlock()
 	return nil
 }
 
