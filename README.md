@@ -1,6 +1,6 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.2
+Version: v0.1.3
 
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 

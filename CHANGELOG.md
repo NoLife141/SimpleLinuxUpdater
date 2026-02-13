@@ -8,6 +8,17 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ### Changed
 
+## [v0.1.3] - 2026-02-13
+
+### Added
+
+- Add update pre-checks before `apt update` for disk space, apt/dpkg lock contention, and APT package health.
+- Add targeted tests for pre-check behavior and early abort on pre-check failure.
+
+### Changed
+
+- Expand passwordless sudo bootstrap rule to include `/usr/bin/dpkg` and `/usr/bin/fuser` for new pre-check commands.
+- Improve global SSH key loading resilience with retry/cached fallback behavior when SQLite is temporarily locked.
 - Improve status logs UX and cancel behavior.
 - Clear and collapse logs on cancel (single + bulk).
 - Add fixed-height log panel with live auto-scroll handling.
