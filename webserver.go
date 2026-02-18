@@ -85,6 +85,11 @@ const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
 const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
+const postchecksEnabledEnv = "DEBIAN_UPDATER_POSTCHECKS_ENABLED"
+const postcheckBlockOnAptHealthEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH"
+const postcheckBlockOnFailedUnitsEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS"
+const postcheckRebootRequiredWarningEnv = "DEBIAN_UPDATER_POSTCHECK_REBOOT_REQUIRED_WARNING"
+const postcheckCustomCmdEnv = "DEBIAN_UPDATER_POSTCHECK_CMD"
 const updatePrecheckMinFreeKB int64 = 1024 * 1024
 const precheckOutputMaxLen = 240
 const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
@@ -92,6 +97,12 @@ const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/l
 const precheckLocksFallbackCmd = "sh -c \"pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x unattended-upgrade >/dev/null\""
 const precheckDpkgAuditCmd = "sudo dpkg --audit"
 const precheckAptCheckCmd = "sudo apt-get check"
+const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
+const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
+const postcheckNameAptHealth = "post_apt_health"
+const postcheckNameFailedUnits = "failed_units"
+const postcheckNameRebootRequired = "reboot_required"
+const postcheckNameCustomCmd = "custom_command"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -119,6 +130,14 @@ type RetryPolicy struct {
 	JitterPct   int
 }
 
+type PostUpdateCheckConfig struct {
+	Enabled               bool
+	BlockOnAptHealth      bool
+	BlockOnFailedUnits    bool
+	RebootRequiredWarning bool
+	CustomCommand         string
+}
+
 type updatePrecheckResult struct {
 	Name    string `json:"name"`
 	Passed  bool   `json:"passed"`
@@ -129,6 +148,13 @@ type updatePrecheckResult struct {
 type updatePrecheckSummary struct {
 	AllPassed   bool                   `json:"all_passed"`
 	FailedCheck string                 `json:"failed_check,omitempty"`
+	Results     []updatePrecheckResult `json:"results"`
+}
+
+type updatePostcheckSummary struct {
+	AllPassed   bool                   `json:"all_passed"`
+	FailedCheck string                 `json:"failed_check,omitempty"`
+	Warnings    int                    `json:"warnings"`
 	Results     []updatePrecheckResult `json:"results"`
 }
 
@@ -421,6 +447,19 @@ func parseIntEnvWithDefault(envKey string, defaultValue int) int {
 	return parsed
 }
 
+func parseBoolEnvWithDefault(envKey string, defaultValue bool) bool {
+	raw := strings.TrimSpace(os.Getenv(envKey))
+	if raw == "" {
+		return defaultValue
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, using default %t", envKey, raw, defaultValue)
+		return defaultValue
+	}
+	return parsed
+}
+
 func loadRetryPolicyFromEnv() RetryPolicy {
 	p := RetryPolicy{
 		MaxAttempts: 3,
@@ -458,6 +497,22 @@ func loadRetryPolicyFromEnv() RetryPolicy {
 		p.JitterPct = jitterPct
 	}
 	return p
+}
+
+func loadPostUpdateCheckConfigFromEnv() PostUpdateCheckConfig {
+	cfg := PostUpdateCheckConfig{
+		Enabled:               true,
+		BlockOnAptHealth:      true,
+		BlockOnFailedUnits:    true,
+		RebootRequiredWarning: true,
+		CustomCommand:         "",
+	}
+	cfg.Enabled = parseBoolEnvWithDefault(postchecksEnabledEnv, cfg.Enabled)
+	cfg.BlockOnAptHealth = parseBoolEnvWithDefault(postcheckBlockOnAptHealthEnv, cfg.BlockOnAptHealth)
+	cfg.BlockOnFailedUnits = parseBoolEnvWithDefault(postcheckBlockOnFailedUnitsEnv, cfg.BlockOnFailedUnits)
+	cfg.RebootRequiredWarning = parseBoolEnvWithDefault(postcheckRebootRequiredWarningEnv, cfg.RebootRequiredWarning)
+	cfg.CustomCommand = strings.TrimSpace(os.Getenv(postcheckCustomCmdEnv))
+	return cfg
 }
 
 func isRetryableMessage(msg string) bool {
@@ -912,20 +967,20 @@ func checkAptLocks(client sshConnection) updatePrecheckResult {
 	}
 }
 
-func checkAptHealth(client sshConnection) updatePrecheckResult {
+func runAptHealthCheck(client sshConnection, checkName string) updatePrecheckResult {
 	dpkgStdout, dpkgStderr, dpkgErr := runSSHCommand(client, precheckDpkgAuditCmd, nil)
 	dpkgOutput := compactCommandOutput(dpkgStdout, dpkgStderr)
 	if dpkgErr != nil {
 		if isSudoPolicyOrPasswordError(dpkgOutput + "\n" + dpkgErr.Error()) {
 			return updatePrecheckResult{
-				Name:    "apt_health",
+				Name:    checkName,
 				Passed:  false,
 				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/dpkg`. Click \"Enable passwordless apt\" for this server, then retry.",
 				Output:  dpkgOutput,
 			}
 		}
 		return updatePrecheckResult{
-			Name:    "apt_health",
+			Name:    checkName,
 			Passed:  false,
 			Details: fmt.Sprintf("dpkg audit failed: %v", dpkgErr),
 			Output:  dpkgOutput,
@@ -933,7 +988,7 @@ func checkAptHealth(client sshConnection) updatePrecheckResult {
 	}
 	if strings.TrimSpace(dpkgStdout+dpkgStderr) != "" {
 		return updatePrecheckResult{
-			Name:    "apt_health",
+			Name:    checkName,
 			Passed:  false,
 			Details: "dpkg audit reported package state issues.",
 			Output:  dpkgOutput,
@@ -944,25 +999,166 @@ func checkAptHealth(client sshConnection) updatePrecheckResult {
 	if aptErr != nil {
 		if isSudoPolicyOrPasswordError(aptOutput + "\n" + aptErr.Error()) {
 			return updatePrecheckResult{
-				Name:    "apt_health",
+				Name:    checkName,
 				Passed:  false,
 				Details: "APT health pre-check requires passwordless sudo for `/usr/bin/apt-get`. Click \"Enable passwordless apt\" for this server, then retry.",
 				Output:  aptOutput,
 			}
 		}
 		return updatePrecheckResult{
-			Name:    "apt_health",
+			Name:    checkName,
 			Passed:  false,
 			Details: fmt.Sprintf("apt-get check failed: %v", aptErr),
 			Output:  aptOutput,
 		}
 	}
 	return updatePrecheckResult{
-		Name:    "apt_health",
+		Name:    checkName,
 		Passed:  true,
 		Details: "APT health checks passed.",
 		Output:  compactCommandOutput(dpkgOutput, aptOutput),
 	}
+}
+
+func checkAptHealth(client sshConnection) updatePrecheckResult {
+	return runAptHealthCheck(client, "apt_health")
+}
+
+func checkPostAptHealth(client sshConnection) updatePrecheckResult {
+	result := runAptHealthCheck(client, postcheckNameAptHealth)
+	if strings.Contains(result.Details, "pre-check") {
+		result.Details = strings.Replace(result.Details, "pre-check", "post-check", 1)
+	}
+	return result
+}
+
+func checkFailedSystemdUnits(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, postcheckFailedUnitsCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if strings.TrimSpace(output) != "" {
+		return updatePrecheckResult{
+			Name:    postcheckNameFailedUnits,
+			Passed:  false,
+			Details: "systemd reports failed units after upgrade.",
+			Output:  output,
+		}
+	}
+	if err != nil {
+		return updatePrecheckResult{
+			Name:    postcheckNameFailedUnits,
+			Passed:  false,
+			Details: fmt.Sprintf("failed to evaluate systemd unit health: %v", err),
+			Output:  output,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    postcheckNameFailedUnits,
+		Passed:  true,
+		Details: "No failed systemd units detected.",
+		Output:  "",
+	}
+}
+
+func checkRebootRequired(client sshConnection) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, postcheckRebootRequiredCmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err != nil {
+		return updatePrecheckResult{
+			Name:    postcheckNameRebootRequired,
+			Passed:  false,
+			Details: fmt.Sprintf("failed to evaluate reboot-required state: %v", err),
+			Output:  output,
+		}
+	}
+	if strings.Contains(strings.ToLower(strings.TrimSpace(stdout)), "required") {
+		return updatePrecheckResult{
+			Name:    postcheckNameRebootRequired,
+			Passed:  false,
+			Details: "Reboot required to fully apply updates.",
+			Output:  output,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    postcheckNameRebootRequired,
+		Passed:  true,
+		Details: "No reboot requirement detected.",
+		Output:  "",
+	}
+}
+
+func checkCustomPostUpdateCommand(client sshConnection, cmd string) updatePrecheckResult {
+	stdout, stderr, err := runSSHCommand(client, cmd, nil)
+	output := compactCommandOutput(stdout, stderr)
+	if err != nil {
+		return updatePrecheckResult{
+			Name:    postcheckNameCustomCmd,
+			Passed:  false,
+			Details: fmt.Sprintf("custom post-check command failed: %v", err),
+			Output:  output,
+		}
+	}
+	return updatePrecheckResult{
+		Name:    postcheckNameCustomCmd,
+		Passed:  true,
+		Details: "Custom post-check command passed.",
+		Output:  output,
+	}
+}
+
+func isPostcheckFailureBlocking(name string, cfg PostUpdateCheckConfig) bool {
+	switch name {
+	case postcheckNameAptHealth:
+		return cfg.BlockOnAptHealth
+	case postcheckNameFailedUnits:
+		return cfg.BlockOnFailedUnits
+	case postcheckNameRebootRequired:
+		return false
+	case postcheckNameCustomCmd:
+		// Custom command runs only when configured and is blocking by design.
+		return strings.TrimSpace(cfg.CustomCommand) != ""
+	default:
+		return true
+	}
+}
+
+func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig) updatePostcheckSummary {
+	summary := updatePostcheckSummary{
+		AllPassed: true,
+		Results:   make([]updatePrecheckResult, 0, 4),
+	}
+	if !cfg.Enabled {
+		return summary
+	}
+	checks := []func(sshConnection) updatePrecheckResult{checkPostAptHealth, checkFailedSystemdUnits}
+	if cfg.RebootRequiredWarning {
+		checks = append(checks, checkRebootRequired)
+	}
+	for _, check := range checks {
+		result := check(client)
+		summary.Results = append(summary.Results, result)
+		if result.Passed {
+			continue
+		}
+		if isPostcheckFailureBlocking(result.Name, cfg) {
+			summary.AllPassed = false
+			if summary.FailedCheck == "" {
+				summary.FailedCheck = result.Name
+			}
+			continue
+		}
+		summary.Warnings++
+	}
+	if strings.TrimSpace(cfg.CustomCommand) != "" {
+		result := checkCustomPostUpdateCommand(client, cfg.CustomCommand)
+		summary.Results = append(summary.Results, result)
+		if !result.Passed {
+			summary.AllPassed = false
+			if summary.FailedCheck == "" {
+				summary.FailedCheck = result.Name
+			}
+		}
+	}
+	return summary
 }
 
 func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
@@ -1607,6 +1803,13 @@ type withActorRunner struct {
 	prechecksPassed bool
 	precheckFailed  string
 	precheckResults []updatePrecheckResult
+
+	postchecksEnabled bool
+	postchecksPassed  bool
+	postcheckFailed   string
+	postcheckWarnings int
+	postcheckResults  []updatePrecheckResult
+	upgradeCompleted  bool
 }
 
 func (r *withActorRunner) withStatus(update func(*ServerStatus)) bool {
@@ -1763,6 +1966,12 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"prechecks_passed":              r.prechecksPassed,
 		"precheck_failed":               r.precheckFailed,
 		"precheck_results":              r.precheckResults,
+		"postchecks_enabled":            r.postchecksEnabled,
+		"postchecks_passed":             r.postchecksPassed,
+		"postcheck_failed":              r.postcheckFailed,
+		"postcheck_warnings":            r.postcheckWarnings,
+		"postcheck_results":             r.postcheckResults,
+		"upgrade_completed":             r.upgradeCompleted,
 	}
 }
 
@@ -1778,6 +1987,7 @@ func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]a
 }
 
 func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	postcheckCfg := loadPostUpdateCheckConfigFromEnv()
 	runWithActorShared(
 		server,
 		actor,
@@ -1799,6 +2009,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		updateCompletionOutcome,
 		"update.ssh_dial",
 		func(r *withActorRunner) {
+			r.postchecksEnabled = postcheckCfg.Enabled
 			r.appendStatusLog("\nRunning pre-checks...")
 
 			precheckSummary := runUpdatePrechecks(r.client)
@@ -1958,10 +2169,64 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				r.setErrorLogs(logs)
 				return
 			}
+			r.upgradeCompleted = true
+
+			if !postcheckCfg.Enabled {
+				r.postchecksPassed = true
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "done"
+					status.Logs = logs + "\nUpgrade completed."
+				})
+				return
+			}
+
+			_ = r.withStatus(func(status *ServerStatus) {
+				status.Status = "upgrading"
+				status.Logs = logs + "\nUpgrade completed.\nRunning post-update health checks..."
+			})
+
+			postcheckSummary := runPostUpdateHealthChecks(r.client, postcheckCfg)
+			r.postcheckResults = postcheckSummary.Results
+			r.postcheckWarnings = postcheckSummary.Warnings
+			for _, result := range postcheckSummary.Results {
+				state := "PASS"
+				if !result.Passed {
+					if isPostcheckFailureBlocking(result.Name, postcheckCfg) {
+						state = "FAIL"
+					} else {
+						state = "WARN"
+					}
+				}
+				line := fmt.Sprintf("\nPost-check %s [%s]: %s", result.Name, state, result.Details)
+				if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
+					line += fmt.Sprintf(" Output: %s", trimmed)
+				}
+				r.appendStatusLog(line)
+			}
+			if !postcheckSummary.AllPassed {
+				r.lastErrClass = "permanent"
+				r.postcheckFailed = postcheckSummary.FailedCheck
+				r.postchecksPassed = false
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "error"
+					status.Logs += fmt.Sprintf("\nUpgrade completed but post-check failed (%s).", postcheckSummary.FailedCheck)
+				})
+				return
+			}
+
+			r.postchecksPassed = true
+			finalLogs := r.currentLogs()
+			if postcheckSummary.Warnings > 0 {
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "done"
+					status.Logs = finalLogs + fmt.Sprintf("\nUpgrade completed with %d post-check warning(s).", postcheckSummary.Warnings)
+				})
+				return
+			}
 
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "done"
-				status.Logs = logs + "\nUpgrade completed."
+				status.Logs = finalLogs + "\nUpgrade completed.\nPost-update health checks passed."
 			})
 		},
 	)

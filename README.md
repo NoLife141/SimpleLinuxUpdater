@@ -186,6 +186,28 @@ Troubleshooting lock pre-check:
 
 If any pre-check fails, the update stops before entering the normal update/approval flow, status becomes `error`, and logs/audit metadata include the failed check and details.
 
+### Post-Update Health Checks
+
+After a successful `apt upgrade`, the updater runs post-update health checks to validate host health before finalizing update status.
+
+- APT/DPKG health (`sudo dpkg --audit` and `sudo apt-get check`) - blocking by default
+- Failed systemd units (`systemctl --failed --no-legend --plain`) - blocking by default
+- Reboot required marker (`/var/run/reboot-required`) - warning only
+- Optional custom check command (`DEBIAN_UPDATER_POSTCHECK_CMD`) - blocking when configured
+
+Defaults:
+
+- `DEBIAN_UPDATER_POSTCHECKS_ENABLED=true`
+- `DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH=true`
+- `DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS=true`
+- `DEBIAN_UPDATER_POSTCHECK_REBOOT_REQUIRED_WARNING=true`
+- `DEBIAN_UPDATER_POSTCHECK_CMD=` (empty by default)
+
+Outcome behavior:
+
+- If any blocking post-check fails, final status is `error` and logs include `Upgrade completed but post-check failed (...)`.
+- If only warning checks fail (for example reboot required), final status remains `done` with warning details in logs and audit metadata.
+
 ### Tests and Release
 
 Local test run:
