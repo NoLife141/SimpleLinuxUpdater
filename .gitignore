@@ -16,3 +16,7 @@ servers.json
 *.key
 *.pem
 id_rsa*
+
+# local artifacts
+debian-updater
+telemetry-id
