@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Debian Updater - Observability</title>
+    <style>
+        :root {
+            --bg: #0b1220;
+            --card: #111a2b;
+            --card-alt: #17243b;
+            --text: #e7edf7;
+            --subtle: #94a3b8;
+            --success: #34d399;
+            --danger: #f87171;
+            --accent: #38bdf8;
+            --border: rgba(148, 163, 184, 0.2);
+            --shadow: 0 10px 30px rgba(2, 8, 23, 0.35);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: radial-gradient(1200px 700px at 80% -20%, rgba(56, 189, 248, 0.18), transparent 60%), var(--bg);
+            color: var(--text);
+        }
+
+        .page {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .hero, .card {
+            background: linear-gradient(180deg, var(--card-alt), var(--card));
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            box-shadow: var(--shadow);
+        }
+
+        .hero {
+            padding: 22px;
+            margin-bottom: 18px;
+        }
+
+        h1 { margin: 0; font-size: 30px; }
+        h2 { margin: 0 0 12px; font-size: 22px; }
+        h3 { margin: 0 0 8px; font-size: 16px; color: var(--subtle); font-weight: 600; }
+        .subtle { color: var(--subtle); }
+
+        .nav {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+
+        .btn-link, button, select {
+            appearance: none;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            border-radius: 10px;
+            padding: 9px 12px;
+            font-size: 14px;
+            text-decoration: none;
+        }
+
+        button:hover, .btn-link:hover, select:hover {
+            border-color: rgba(56, 189, 248, 0.55);
+        }
+
+        .card {
+            padding: 18px;
+            margin-top: 16px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+        }
+
+        .kpi {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 12px;
+            background: rgba(15, 23, 42, 0.45);
+        }
+
+        .kpi-value {
+            font-size: 30px;
+            font-weight: 700;
+            line-height: 1.2;
+            margin: 6px 0 0;
+        }
+
+        .ok { color: var(--success); }
+        .bad { color: var(--danger); }
+        .accent { color: var(--accent); }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 6px;
+        }
+
+        th, td {
+            border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+            text-align: left;
+            padding: 8px 10px;
+            font-size: 14px;
+        }
+
+        th { color: var(--subtle); font-weight: 600; }
+
+        .error-banner {
+            display: none;
+            margin-top: 10px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(248, 113, 113, 0.4);
+            background: rgba(127, 29, 29, 0.35);
+            color: #fecaca;
+        }
+
+        @media (max-width: 720px) {
+            .page { padding: 14px; }
+            h1 { font-size: 25px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <header class="hero">
+            <h1>Observability Dashboard</h1>
+            <p class="subtle">Update success rate, average duration, and failure causes over time.</p>
+            <div class="nav">
+                <a class="btn-link" href="/">View Status</a>
+                <a class="btn-link" href="/manage">Manage Servers</a>
+            </div>
+        </header>
+
+        <section class="card">
+            <h2>Update Metrics</h2>
+            <div class="controls">
+                <label for="window-select" class="subtle">Time Window:</label>
+                <select id="window-select">
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d" selected>Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                </select>
+                <button id="refresh-btn">Refresh</button>
+                <span id="range-label" class="subtle"></span>
+            </div>
+            <div id="error-banner" class="error-banner"></div>
+
+            <div class="kpi-grid">
+                <div class="kpi">
+                    <h3>Success Rate</h3>
+                    <div id="kpi-success-rate" class="kpi-value accent">0%</div>
+                </div>
+                <div class="kpi">
+                    <h3>Total Update Runs</h3>
+                    <div id="kpi-total" class="kpi-value">0</div>
+                </div>
+                <div class="kpi">
+                    <h3>Average Duration</h3>
+                    <div id="kpi-duration" class="kpi-value">0 ms</div>
+                    <div id="kpi-duration-samples" class="subtle"></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Failure Causes</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Cause</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody id="failure-causes-body">
+                    <tr><td colspan="2" class="subtle">No failure data in selected window.</td></tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>Status Breakdown</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody id="status-breakdown-body"></tbody>
+            </table>
+        </section>
+    </div>
+
+    <script>
+        const windowSelect = document.getElementById('window-select');
+        const refreshBtn = document.getElementById('refresh-btn');
+        const errorBanner = document.getElementById('error-banner');
+        const rangeLabel = document.getElementById('range-label');
+
+        function showError(message) {
+            errorBanner.style.display = 'block';
+            errorBanner.textContent = message;
+        }
+
+        function clearError() {
+            errorBanner.style.display = 'none';
+            errorBanner.textContent = '';
+        }
+
+        function formatDuration(avgMs) {
+            if (!Number.isFinite(avgMs) || avgMs <= 0) return '0 ms';
+            if (avgMs >= 1000) {
+                return `${(avgMs / 1000).toFixed(2)} s`;
+            }
+            return `${avgMs.toFixed(0)} ms`;
+        }
+
+        function renderTableRows(body, rows, emptyText, rowMapper) {
+            body.innerHTML = '';
+            if (!Array.isArray(rows) || rows.length === 0) {
+                body.innerHTML = `<tr><td colspan="2" class="subtle">${emptyText}</td></tr>`;
+                return;
+            }
+            rows.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = rowMapper(row);
+                body.appendChild(tr);
+            });
+        }
+
+        async function fetchObservabilitySummary() {
+            const window = windowSelect.value || '7d';
+            try {
+                const res = await fetch(`/api/observability/summary?window=${encodeURIComponent(window)}`);
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                clearError();
+                renderSummary(data);
+            } catch (err) {
+                showError(`Unable to refresh observability data: ${err.message}`);
+            }
+        }
+
+        function renderSummary(summary) {
+            const totals = summary?.totals || {};
+            const duration = summary?.duration || {};
+            const successRate = Number(totals.success_rate_pct || 0);
+            const totalRuns = Number(totals.updates_total || 0);
+            const avgMs = Number(duration.avg_ms || 0);
+            const withDuration = Number(duration.samples_with_duration || 0);
+            const withoutDuration = Number(duration.samples_without_duration || 0);
+
+            document.getElementById('kpi-success-rate').textContent = `${successRate.toFixed(2)}%`;
+            document.getElementById('kpi-total').textContent = String(totalRuns);
+            document.getElementById('kpi-duration').textContent = formatDuration(avgMs);
+            document.getElementById('kpi-duration-samples').textContent =
+                `Duration samples: ${withDuration} with data, ${withoutDuration} without data`;
+            rangeLabel.textContent = `Range: ${summary?.from || '-'} to ${summary?.to || '-'}`;
+
+            renderTableRows(
+                document.getElementById('failure-causes-body'),
+                summary?.failure_causes,
+                'No failure data in selected window.',
+                (row) => `<td>${row.cause || 'unknown'}</td><td class="bad">${row.count || 0}</td>`
+            );
+            renderTableRows(
+                document.getElementById('status-breakdown-body'),
+                summary?.status_breakdown,
+                'No status data in selected window.',
+                (row) => {
+                    const status = (row.status || '').toLowerCase();
+                    const css = status === 'success' ? 'ok' : (status === 'failure' ? 'bad' : '');
+                    return `<td>${row.status || 'unknown'}</td><td class="${css}">${row.count || 0}</td>`;
+                }
+            );
+        }
+
+        refreshBtn.addEventListener('click', fetchObservabilitySummary);
+        windowSelect.addEventListener('change', fetchObservabilitySummary);
+
+        fetchObservabilitySummary();
+        setInterval(fetchObservabilitySummary, 15000);
+    </script>
+</body>
+</html>
