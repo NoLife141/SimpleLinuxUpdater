@@ -1509,7 +1509,10 @@ func metaDurationMS(meta map[string]any) (float64, bool) {
 	if meta == nil {
 		return 0, false
 	}
-	raw, ok := meta["duration_ms"]
+	raw, ok := meta["execution_duration_ms"]
+	if !ok {
+		raw, ok = meta["duration_ms"]
+	}
 	if !ok {
 		return 0, false
 	}
@@ -1597,10 +1600,14 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 		summary.Totals.UpdatesTotal++
 		if normalizedStatus == "success" {
 			summary.Totals.UpdatesSuccess++
-			summary.StatusBreakdown[0].Count++
 		} else {
 			summary.Totals.UpdatesFailure++
-			summary.StatusBreakdown[1].Count++
+		}
+		for i := range summary.StatusBreakdown {
+			if summary.StatusBreakdown[i].Status == normalizedStatus {
+				summary.StatusBreakdown[i].Count++
+				break
+			}
 		}
 
 		meta := map[string]any{}
@@ -2152,11 +2159,12 @@ func runUpdate(server Server) {
 }
 
 type withActorRunner struct {
-	server    Server
-	actor     string
-	clientIP  string
-	policy    RetryPolicy
-	startedAt time.Time
+	server     Server
+	actor      string
+	clientIP   string
+	policy     RetryPolicy
+	startedAt  time.Time
+	approvedAt time.Time
 
 	config *ssh.ClientConfig
 	client sshConnection
@@ -2348,7 +2356,10 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"pre_update_failed_units":       r.preUpdateFailedUnits,
 	}
 	if !r.startedAt.IsZero() {
-		meta["duration_ms"] = time.Since(r.startedAt).Milliseconds()
+		meta["total_elapsed_ms"] = time.Since(r.startedAt).Milliseconds()
+	}
+	if !r.approvedAt.IsZero() {
+		meta["execution_duration_ms"] = time.Since(r.approvedAt).Milliseconds()
 	}
 	return meta
 }
@@ -2518,6 +2529,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 				mu.Unlock()
 				if approved {
+					r.approvedAt = time.Now().UTC()
 					break
 				}
 				if cancelledOrTimeout {

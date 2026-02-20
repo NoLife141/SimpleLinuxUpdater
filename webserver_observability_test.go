@@ -191,6 +191,45 @@ func TestHandleObservabilitySummaryInvalidWindow(t *testing.T) {
 	}
 }
 
+func TestHandleObservabilitySummaryValidWindow(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "observability-handler.db"))
+	_ = getDB()
+
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/api/observability/summary", handleObservabilitySummary)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/observability/summary?window=7d", nil)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v; body=%q", err, rec.Body.String())
+	}
+
+	if got["window"] != "7d" {
+		t.Fatalf("window = %v, want 7d", got["window"])
+	}
+	if _, ok := got["totals"].(map[string]any); !ok {
+		t.Fatalf("totals missing or invalid type: %T", got["totals"])
+	}
+	if _, ok := got["duration"].(map[string]any); !ok {
+		t.Fatalf("duration missing or invalid type: %T", got["duration"])
+	}
+	if _, ok := got["failure_causes"].([]any); !ok {
+		t.Fatalf("failure_causes missing or invalid type: %T", got["failure_causes"])
+	}
+	if _, ok := got["status_breakdown"].([]any); !ok {
+		t.Fatalf("status_breakdown missing or invalid type: %T", got["status_breakdown"])
+	}
+}
+
 func TestHandleMetricsIncludesExpectedSeries(t *testing.T) {
 	preserveDBState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "metrics.db"))

@@ -218,6 +218,7 @@
         const refreshBtn = document.getElementById('refresh-btn');
         const errorBanner = document.getElementById('error-banner');
         const rangeLabel = document.getElementById('range-label');
+        let refreshIntervalId = null;
 
         function showError(message) {
             errorBanner.style.display = 'block';
@@ -313,11 +314,36 @@
             );
         }
 
+        function startAutoRefresh() {
+            if (refreshIntervalId !== null) {
+                return;
+            }
+            refreshIntervalId = setInterval(fetchObservabilitySummary, 15000);
+        }
+
+        function stopAutoRefresh() {
+            if (refreshIntervalId === null) {
+                return;
+            }
+            clearInterval(refreshIntervalId);
+            refreshIntervalId = null;
+        }
+
         refreshBtn.addEventListener('click', fetchObservabilitySummary);
         windowSelect.addEventListener('change', fetchObservabilitySummary);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                stopAutoRefresh();
+                return;
+            }
+            fetchObservabilitySummary();
+            startAutoRefresh();
+        });
 
-        fetchObservabilitySummary();
-        setInterval(fetchObservabilitySummary, 15000);
+        if (!document.hidden) {
+            fetchObservabilitySummary();
+            startAutoRefresh();
+        }
     </script>
 </body>
 </html>
