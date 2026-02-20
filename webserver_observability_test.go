@@ -144,9 +144,13 @@ func TestBuildObservabilitySummaryAggregates(t *testing.T) {
 		"unknown":                1,
 	}
 	for cause, want := range wantCauses {
-		if gotCauses[cause] != want {
-			t.Fatalf("failure cause %q = %d, want %d (all=%v)", cause, gotCauses[cause], want, gotCauses)
-		}
+		cause := cause
+		want := want
+		t.Run(cause, func(t *testing.T) {
+			if gotCauses[cause] != want {
+				t.Fatalf("failure cause %q = %d, want %d (all=%v)", cause, gotCauses[cause], want, gotCauses)
+			}
+		})
 	}
 }
 
@@ -168,6 +172,12 @@ func TestBuildObservabilitySummaryEmpty(t *testing.T) {
 	}
 	if summary.Duration.AvgMS != 0 {
 		t.Fatalf("AvgMS = %.2f, want 0", summary.Duration.AvgMS)
+	}
+	if summary.Duration.SamplesWithDuration != 0 {
+		t.Fatalf("SamplesWithDuration = %d, want 0", summary.Duration.SamplesWithDuration)
+	}
+	if summary.Duration.SamplesWithoutDuration != 0 {
+		t.Fatalf("SamplesWithoutDuration = %d, want 0", summary.Duration.SamplesWithoutDuration)
 	}
 	if summary.FailureCauses == nil {
 		t.Fatalf("FailureCauses is nil, want empty non-nil slice")
@@ -273,11 +283,11 @@ func TestHandleMetricsIncludesExpectedSeries(t *testing.T) {
 	}
 	body := rec.Body.String()
 	for _, expected := range []string{
-		"simplelinuxupdater_update_runs_total",
+		"simplelinuxupdater_update_runs",
 		"simplelinuxupdater_update_success_rate_percent",
 		"simplelinuxupdater_update_duration_avg_milliseconds",
-		"simplelinuxupdater_update_duration_samples_total",
-		"simplelinuxupdater_update_failures_by_cause_total",
+		"simplelinuxupdater_update_duration_samples",
+		"simplelinuxupdater_update_failures_by_cause",
 	} {
 		expected := expected
 		t.Run(expected, func(t *testing.T) {

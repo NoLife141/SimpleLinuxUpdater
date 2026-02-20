@@ -1561,10 +1561,9 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 	from := to.Add(-span)
 
 	summary := observabilitySummaryResponse{
-		Window:        window,
-		From:          from.Format(time.RFC3339),
-		To:            to.Format(time.RFC3339),
-		FailureCauses: make([]observabilityCountItem, 0),
+		Window: window,
+		From:   from.Format(time.RFC3339),
+		To:     to.Format(time.RFC3339),
 	}
 	summary.StatusBreakdown = []observabilityCountItem{
 		{Status: "success", Count: 0},
@@ -1696,11 +1695,11 @@ func handleMetrics(c *gin.Context) {
 
 	var b strings.Builder
 
-	b.WriteString("# HELP simplelinuxupdater_update_runs_total Number of completed update runs by status in the selected window.\n")
-	b.WriteString("# TYPE simplelinuxupdater_update_runs_total gauge\n")
+	b.WriteString("# HELP simplelinuxupdater_update_runs Number of completed update runs by status in the selected window.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_runs gauge\n")
 	for _, summary := range summaries {
-		fmt.Fprintf(&b, "simplelinuxupdater_update_runs_total{window=%q,status=%q} %d\n", summary.Window, "success", summary.Totals.UpdatesSuccess)
-		fmt.Fprintf(&b, "simplelinuxupdater_update_runs_total{window=%q,status=%q} %d\n", summary.Window, "failure", summary.Totals.UpdatesFailure)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_runs{window=%q,status=%q} %d\n", summary.Window, "success", summary.Totals.UpdatesSuccess)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_runs{window=%q,status=%q} %d\n", summary.Window, "failure", summary.Totals.UpdatesFailure)
 	}
 
 	b.WriteString("# HELP simplelinuxupdater_update_success_rate_percent Update success rate percentage in the selected window.\n")
@@ -1715,18 +1714,18 @@ func handleMetrics(c *gin.Context) {
 		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_avg_milliseconds{window=%q} %.4f\n", summary.Window, summary.Duration.AvgMS)
 	}
 
-	b.WriteString("# HELP simplelinuxupdater_update_duration_samples_total Number of update samples with/without duration metadata.\n")
-	b.WriteString("# TYPE simplelinuxupdater_update_duration_samples_total gauge\n")
+	b.WriteString("# HELP simplelinuxupdater_update_duration_samples Number of update samples with/without duration metadata.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_duration_samples gauge\n")
 	for _, summary := range summaries {
-		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples_total{window=%q,kind=%q} %d\n", summary.Window, "with_duration", summary.Duration.SamplesWithDuration)
-		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples_total{window=%q,kind=%q} %d\n", summary.Window, "without_duration", summary.Duration.SamplesWithoutDuration)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples{window=%q,kind=%q} %d\n", summary.Window, "with_duration", summary.Duration.SamplesWithDuration)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples{window=%q,kind=%q} %d\n", summary.Window, "without_duration", summary.Duration.SamplesWithoutDuration)
 	}
 
-	b.WriteString("# HELP simplelinuxupdater_update_failures_by_cause_total Number of failed update runs grouped by failure cause.\n")
-	b.WriteString("# TYPE simplelinuxupdater_update_failures_by_cause_total gauge\n")
+	b.WriteString("# HELP simplelinuxupdater_update_failures_by_cause Number of failed update runs grouped by failure cause.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_failures_by_cause gauge\n")
 	for _, summary := range summaries {
 		for _, failure := range summary.FailureCauses {
-			fmt.Fprintf(&b, "simplelinuxupdater_update_failures_by_cause_total{window=%q,cause=\"%s\"} %d\n", summary.Window, prometheusEscapeLabel(failure.Cause), failure.Count)
+			fmt.Fprintf(&b, "simplelinuxupdater_update_failures_by_cause{window=%q,cause=\"%s\"} %d\n", summary.Window, prometheusEscapeLabel(failure.Cause), failure.Count)
 		}
 	}
 

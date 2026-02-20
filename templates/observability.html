@@ -250,7 +250,13 @@
         function renderTableRows(body, rows, emptyText, rowMapper) {
             body.innerHTML = '';
             if (!Array.isArray(rows) || rows.length === 0) {
-                body.innerHTML = `<tr><td colspan="2" class="subtle">${emptyText}</td></tr>`;
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = 2;
+                td.className = 'subtle';
+                td.textContent = emptyText;
+                tr.appendChild(td);
+                body.appendChild(tr);
                 return;
             }
             rows.forEach(row => {
