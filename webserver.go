@@ -1065,13 +1065,10 @@ func parseFailedSystemdUnits(output string) []string {
 func listFailedSystemdUnits(client sshConnection) ([]string, string, error) {
 	stdout, stderr, err := runSSHCommand(client, postcheckFailedUnitsCmd, nil)
 	output := compactCommandOutput(stdout, stderr)
-	units := parseFailedSystemdUnits(stdout + "\n" + stderr)
-	if len(units) > 0 {
-		return units, output, nil
-	}
 	if err != nil {
 		return nil, output, err
 	}
+	units := parseFailedSystemdUnits(stdout)
 	return units, output, nil
 }
 
