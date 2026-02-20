@@ -213,8 +213,11 @@ func TestHandleMetricsIncludesExpectedSeries(t *testing.T) {
 		"simplelinuxupdater_update_duration_samples_total",
 		"simplelinuxupdater_update_failures_by_cause_total",
 	} {
-		if !strings.Contains(body, expected) {
-			t.Fatalf("metrics body missing %q", expected)
-		}
+		expected := expected
+		t.Run(expected, func(t *testing.T) {
+			if !strings.Contains(body, expected) {
+				t.Fatalf("metrics body missing %q", expected)
+			}
+		})
 	}
 }

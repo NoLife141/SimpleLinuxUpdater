@@ -235,6 +235,15 @@
             return `${avgMs.toFixed(0)} ms`;
         }
 
+        function appendCell(tr, text, className = '') {
+            const td = document.createElement('td');
+            td.textContent = text;
+            if (className) {
+                td.className = className;
+            }
+            tr.appendChild(td);
+        }
+
         function renderTableRows(body, rows, emptyText, rowMapper) {
             body.innerHTML = '';
             if (!Array.isArray(rows) || rows.length === 0) {
@@ -243,7 +252,7 @@
             }
             rows.forEach(row => {
                 const tr = document.createElement('tr');
-                tr.innerHTML = rowMapper(row);
+                rowMapper(tr, row);
                 body.appendChild(tr);
             });
         }
@@ -283,16 +292,21 @@
                 document.getElementById('failure-causes-body'),
                 summary?.failure_causes,
                 'No failure data in selected window.',
-                (row) => `<td>${row.cause || 'unknown'}</td><td class="bad">${row.count || 0}</td>`
+                (tr, row) => {
+                    appendCell(tr, row?.cause || 'unknown');
+                    appendCell(tr, String(row?.count || 0), 'bad');
+                }
             );
             renderTableRows(
                 document.getElementById('status-breakdown-body'),
                 summary?.status_breakdown,
                 'No status data in selected window.',
-                (row) => {
-                    const status = (row.status || '').toLowerCase();
+                (tr, row) => {
+                    const statusRaw = row?.status || 'unknown';
+                    const status = String(statusRaw).toLowerCase();
                     const css = status === 'success' ? 'ok' : (status === 'failure' ? 'bad' : '');
-                    return `<td>${row.status || 'unknown'}</td><td class="${css}">${row.count || 0}</td>`;
+                    appendCell(tr, statusRaw);
+                    appendCell(tr, String(row?.count || 0), css);
                 }
             );
         }

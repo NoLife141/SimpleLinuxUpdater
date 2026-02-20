@@ -1649,12 +1649,14 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 }
 
 func handleObservabilitySummary(c *gin.Context) {
-	summary, err := buildObservabilitySummary(c.Query("window"), time.Now().UTC())
+	window := c.Query("window")
+	summary, err := buildObservabilitySummary(window, time.Now().UTC())
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "invalid window") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
 			return
 		}
+		log.Printf("handleObservabilitySummary: failed to build summary for window=%q: %v", window, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build observability summary"})
 		return
 	}
@@ -1675,6 +1677,7 @@ func handleMetrics(c *gin.Context) {
 	for _, window := range windows {
 		summary, err := buildObservabilitySummary(window, now)
 		if err != nil {
+			log.Printf("handleMetrics: failed to build summary for window=%q: %v", window, err)
 			c.String(http.StatusInternalServerError, "failed to build metrics\n")
 			return
 		}
@@ -1701,7 +1704,7 @@ func handleMetrics(c *gin.Context) {
 		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples_total{window=%q,kind=%q} %d\n", summary.Window, "with_duration", summary.Duration.SamplesWithDuration)
 		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples_total{window=%q,kind=%q} %d\n", summary.Window, "without_duration", summary.Duration.SamplesWithoutDuration)
 		for _, failure := range summary.FailureCauses {
-			fmt.Fprintf(&b, "simplelinuxupdater_update_failures_by_cause_total{window=%q,cause=%q} %d\n", summary.Window, prometheusEscapeLabel(failure.Cause), failure.Count)
+			fmt.Fprintf(&b, "simplelinuxupdater_update_failures_by_cause_total{window=%q,cause=\"%s\"} %d\n", summary.Window, prometheusEscapeLabel(failure.Cause), failure.Count)
 		}
 	}
 
