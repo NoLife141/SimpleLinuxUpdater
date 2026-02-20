@@ -150,6 +150,33 @@ func TestBuildObservabilitySummaryAggregates(t *testing.T) {
 	}
 }
 
+func TestBuildObservabilitySummaryEmpty(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "observability-empty.db"))
+	_ = getDB()
+
+	summary, err := buildObservabilitySummary("7d", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("buildObservabilitySummary() error = %v", err)
+	}
+
+	if summary.Totals.UpdatesTotal != 0 {
+		t.Fatalf("UpdatesTotal = %d, want 0", summary.Totals.UpdatesTotal)
+	}
+	if summary.Totals.SuccessRatePct != 0 {
+		t.Fatalf("SuccessRatePct = %.2f, want 0", summary.Totals.SuccessRatePct)
+	}
+	if summary.Duration.AvgMS != 0 {
+		t.Fatalf("AvgMS = %.2f, want 0", summary.Duration.AvgMS)
+	}
+	if summary.FailureCauses == nil {
+		t.Fatalf("FailureCauses is nil, want empty non-nil slice")
+	}
+	if len(summary.FailureCauses) != 0 {
+		t.Fatalf("len(FailureCauses) = %d, want 0", len(summary.FailureCauses))
+	}
+}
+
 func TestHandleObservabilitySummaryInvalidWindow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()

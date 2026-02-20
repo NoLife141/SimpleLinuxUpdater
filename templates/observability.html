@@ -206,7 +206,9 @@
                         <th>Count</th>
                     </tr>
                 </thead>
-                <tbody id="status-breakdown-body"></tbody>
+                <tbody id="status-breakdown-body">
+                    <tr><td colspan="2" class="subtle">No status data in selected window.</td></tr>
+                </tbody>
             </table>
         </section>
     </div>
@@ -258,9 +260,9 @@
         }
 
         async function fetchObservabilitySummary() {
-            const window = windowSelect.value || '7d';
+            const selectedWindow = windowSelect.value || '7d';
             try {
-                const res = await fetch(`/api/observability/summary?window=${encodeURIComponent(window)}`);
+                const res = await fetch(`/api/observability/summary?window=${encodeURIComponent(selectedWindow)}`);
                 if (!res.ok) {
                     throw new Error(`HTTP ${res.status}`);
                 }
