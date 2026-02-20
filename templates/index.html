@@ -613,8 +613,21 @@
             fetchInFlight = true;
             const pageScroll = saveWindowScroll();
             try {
-                const response = await fetch('/api/servers');
-                allServers = await response.json();
+                let parsedServers;
+                try {
+                    const response = await fetch('/api/servers');
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch servers: HTTP ${response.status}`);
+                    }
+                    parsedServers = await response.json();
+                    if (!Array.isArray(parsedServers)) {
+                        throw new Error('Invalid servers payload: expected an array');
+                    }
+                } catch (err) {
+                    console.error('Unable to refresh servers list:', err);
+                    return;
+                }
+                allServers = parsedServers;
                 if (!forceRender && isLogInteractionActive()) {
                     return;
                 }
@@ -884,6 +897,8 @@
         });
         window.addEventListener('blur', () => {
             interactingWithLogs = false;
+            markLogInteraction();
+            fetchServers(true);
         });
 
         document.querySelectorAll('#servers-table th.sortable').forEach(th => {

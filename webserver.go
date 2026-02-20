@@ -1109,7 +1109,13 @@ func checkFailedSystemdUnits(client sshConnection, preUpdateFailedUnits map[stri
 		Name:    postcheckNameFailedUnits,
 		Passed:  false,
 		Details: "systemd reports newly failed units after upgrade.",
-		Output:  truncateString(strings.Join(newlyFailed, "\n"), precheckOutputMaxLen),
+		Output: func() string {
+			fullOutput := strings.Join(newlyFailed, "\n")
+			if trimmed := strings.TrimSpace(output); trimmed != "" {
+				fullOutput += "\n\n" + trimmed
+			}
+			return truncateString(fullOutput, precheckOutputMaxLen)
+		}(),
 	}
 }
 
@@ -2529,8 +2535,7 @@ func getUpgradable(client sshConnection) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	combined := stdout.String() + "\n" + stderr.String()
-	lines := strings.Split(combined, "\n")
+	lines := strings.Split(stdout.String(), "\n")
 	var upgradable []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
