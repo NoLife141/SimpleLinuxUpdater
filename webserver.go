@@ -70,6 +70,8 @@ var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
 var auditPruneTickerOnce sync.Once
+var observabilityCacheMu sync.RWMutex
+var observabilityCache = make(map[string]observabilityCacheEntry)
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -82,6 +84,7 @@ const auditRetentionDays = 90
 const auditPruneInterval = 12 * time.Hour
 const auditMessageMaxLen = 512
 const auditMetaMaxLen = 2048
+const observabilityMetricsCacheTTL = 45 * time.Second
 const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
@@ -130,9 +133,13 @@ type AuditEvent struct {
 	ClientIP   string `json:"client_ip"`
 }
 
-type observabilityCountItem struct {
-	Status string `json:"status,omitempty"`
-	Cause  string `json:"cause,omitempty"`
+type observabilityFailureItem struct {
+	Cause string `json:"cause"`
+	Count int    `json:"count"`
+}
+
+type observabilityStatusItem struct {
+	Status string `json:"status"`
 	Count  int    `json:"count"`
 }
 
@@ -151,8 +158,13 @@ type observabilitySummaryResponse struct {
 		SamplesWithDuration    int     `json:"samples_with_duration"`
 		SamplesWithoutDuration int     `json:"samples_without_duration"`
 	} `json:"duration"`
-	FailureCauses   []observabilityCountItem `json:"failure_causes"`
-	StatusBreakdown []observabilityCountItem `json:"status_breakdown"`
+	FailureCauses   []observabilityFailureItem `json:"failure_causes"`
+	StatusBreakdown []observabilityStatusItem  `json:"status_breakdown"`
+}
+
+type observabilityCacheEntry struct {
+	summary  observabilitySummaryResponse
+	cachedAt time.Time
 }
 
 type RetryPolicy struct {
@@ -1565,7 +1577,7 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 		From:   from.Format(time.RFC3339),
 		To:     to.Format(time.RFC3339),
 	}
-	summary.StatusBreakdown = []observabilityCountItem{
+	summary.StatusBreakdown = []observabilityStatusItem{
 		{Status: "success", Count: 0},
 		{Status: "failure", Count: 0},
 	}
@@ -1640,9 +1652,9 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 		summary.Duration.AvgMS = durationTotal / float64(summary.Duration.SamplesWithDuration)
 	}
 
-	summary.FailureCauses = make([]observabilityCountItem, 0, len(failureCauseCounts))
+	summary.FailureCauses = make([]observabilityFailureItem, 0, len(failureCauseCounts))
 	for cause, count := range failureCauseCounts {
-		summary.FailureCauses = append(summary.FailureCauses, observabilityCountItem{
+		summary.FailureCauses = append(summary.FailureCauses, observabilityFailureItem{
 			Cause: cause,
 			Count: count,
 		})
@@ -1679,12 +1691,41 @@ func prometheusEscapeLabel(v string) string {
 	return value
 }
 
+func metricsSummaryCacheKey(window string) string {
+	return dbPath() + "|" + window
+}
+
+func getMetricsSummary(window string, now time.Time) (observabilitySummaryResponse, error) {
+	cacheKey := metricsSummaryCacheKey(window)
+
+	observabilityCacheMu.RLock()
+	if entry, ok := observabilityCache[cacheKey]; ok && now.Sub(entry.cachedAt) < observabilityMetricsCacheTTL {
+		observabilityCacheMu.RUnlock()
+		return entry.summary, nil
+	}
+	observabilityCacheMu.RUnlock()
+
+	summary, err := buildObservabilitySummary(window, now)
+	if err != nil {
+		return observabilitySummaryResponse{}, err
+	}
+
+	observabilityCacheMu.Lock()
+	observabilityCache[cacheKey] = observabilityCacheEntry{
+		summary:  summary,
+		cachedAt: now,
+	}
+	observabilityCacheMu.Unlock()
+
+	return summary, nil
+}
+
 func handleMetrics(c *gin.Context) {
 	windows := []string{"24h", "7d", "30d"}
 	summaries := make([]observabilitySummaryResponse, 0, len(windows))
 	now := time.Now().UTC()
 	for _, window := range windows {
-		summary, err := buildObservabilitySummary(window, now)
+		summary, err := getMetricsSummary(window, now)
 		if err != nil {
 			log.Printf("handleMetrics: failed to build summary for window=%q: %v", window, err)
 			c.String(http.StatusInternalServerError, "failed to build metrics\n")

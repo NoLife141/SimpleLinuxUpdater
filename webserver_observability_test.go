@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -122,6 +123,9 @@ func TestBuildObservabilitySummaryAggregates(t *testing.T) {
 	if summary.Totals.UpdatesFailure != 5 {
 		t.Fatalf("UpdatesFailure = %d, want 5", summary.Totals.UpdatesFailure)
 	}
+	if diff := math.Abs(summary.Totals.SuccessRatePct - (100.0 / 6.0)); diff > 0.0001 {
+		t.Fatalf("SuccessRatePct = %.6f, want %.6f", summary.Totals.SuccessRatePct, 100.0/6.0)
+	}
 	if summary.Duration.SamplesWithDuration != 2 {
 		t.Fatalf("SamplesWithDuration = %d, want 2", summary.Duration.SamplesWithDuration)
 	}
@@ -130,6 +134,16 @@ func TestBuildObservabilitySummaryAggregates(t *testing.T) {
 	}
 	if summary.Duration.AvgMS != 850 {
 		t.Fatalf("AvgMS = %.2f, want 850", summary.Duration.AvgMS)
+	}
+	gotStatusCounts := map[string]int{}
+	for _, item := range summary.StatusBreakdown {
+		gotStatusCounts[item.Status] = item.Count
+	}
+	if gotStatusCounts["success"] != 1 {
+		t.Fatalf("status success count = %d, want 1 (all=%v)", gotStatusCounts["success"], gotStatusCounts)
+	}
+	if gotStatusCounts["failure"] != 5 {
+		t.Fatalf("status failure count = %d, want 5 (all=%v)", gotStatusCounts["failure"], gotStatusCounts)
 	}
 
 	gotCauses := map[string]int{}
@@ -178,6 +192,17 @@ func TestBuildObservabilitySummaryEmpty(t *testing.T) {
 	}
 	if summary.Duration.SamplesWithoutDuration != 0 {
 		t.Fatalf("SamplesWithoutDuration = %d, want 0", summary.Duration.SamplesWithoutDuration)
+	}
+	if summary.StatusBreakdown == nil {
+		t.Fatalf("StatusBreakdown is nil, want initialized entries")
+	}
+	if len(summary.StatusBreakdown) != 2 {
+		t.Fatalf("len(StatusBreakdown) = %d, want 2", len(summary.StatusBreakdown))
+	}
+	for _, item := range summary.StatusBreakdown {
+		if item.Count != 0 {
+			t.Fatalf("StatusBreakdown[%q].Count = %d, want 0", item.Status, item.Count)
+		}
 	}
 	if summary.FailureCauses == nil {
 		t.Fatalf("FailureCauses is nil, want empty non-nil slice")
