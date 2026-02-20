@@ -33,9 +33,11 @@ type scriptedResponse struct {
 }
 
 type scriptedSSHConnection struct {
-	responses map[string]scriptedResponse
-	commands  []string
-	closed    bool
+	responses         map[string]scriptedResponse
+	sequenceResponses map[string][]scriptedResponse
+	commandCalls      map[string]int
+	commands          []string
+	closed            bool
 }
 
 func (c *scriptedSSHConnection) NewSession() (sshSessionRunner, error) {
@@ -61,6 +63,24 @@ func (s *scriptedSSHSession) SetStderr(w io.Writer) { s.stderr = w }
 
 func (s *scriptedSSHSession) Run(cmd string) error {
 	s.conn.commands = append(s.conn.commands, cmd)
+	if seq, ok := s.conn.sequenceResponses[cmd]; ok && len(seq) > 0 {
+		if s.conn.commandCalls == nil {
+			s.conn.commandCalls = make(map[string]int)
+		}
+		idx := s.conn.commandCalls[cmd]
+		s.conn.commandCalls[cmd] = idx + 1
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		resp := seq[idx]
+		if s.stdout != nil && resp.stdout != "" {
+			_, _ = io.WriteString(s.stdout, resp.stdout)
+		}
+		if s.stderr != nil && resp.stderr != "" {
+			_, _ = io.WriteString(s.stderr, resp.stderr)
+		}
+		return resp.err
+	}
 	resp, ok := s.conn.responses[cmd]
 	if !ok {
 		return errors.New("unexpected command: " + cmd)
@@ -292,7 +312,7 @@ func TestRunUpdateWithActorPrecheckFailureStopsBeforeAptUpdate(t *testing.T) {
 		t.Fatalf("missing pre-check failure log, got: %s", logs)
 	}
 	for _, cmd := range conn.commands {
-		if cmd == "sudo apt update" {
+		if cmd == aptUpdateCmd {
 			t.Fatalf("apt update executed despite pre-check failure")
 		}
 	}

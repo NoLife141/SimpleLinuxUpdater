@@ -97,6 +97,10 @@ const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/l
 const precheckLocksFallbackCmd = "sh -c \"pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x unattended-upgrade >/dev/null\""
 const precheckDpkgAuditCmd = "sudo dpkg --audit"
 const precheckAptCheckCmd = "sudo apt-get check"
+const aptUpdateCmd = "sudo apt-get update"
+const aptUpgradeCmd = "sudo apt-get -y upgrade"
+const aptAutoremoveCmd = "sudo apt-get -y autoremove"
+const aptListUpgradableCmd = "sudo apt-get -s upgrade"
 const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
 const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
 const postcheckNameAptHealth = "post_apt_health"
@@ -1032,17 +1036,47 @@ func checkPostAptHealth(client sshConnection) updatePrecheckResult {
 	return result
 }
 
-func checkFailedSystemdUnits(client sshConnection) updatePrecheckResult {
+func parseFailedSystemdUnits(output string) []string {
+	lines := strings.Split(output, "\n")
+	units := make([]string, 0, len(lines))
+	seen := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) == 0 {
+			continue
+		}
+		unit := strings.TrimSpace(fields[0])
+		if unit == "" {
+			continue
+		}
+		if _, exists := seen[unit]; exists {
+			continue
+		}
+		seen[unit] = struct{}{}
+		units = append(units, unit)
+	}
+	return units
+}
+
+func listFailedSystemdUnits(client sshConnection) ([]string, string, error) {
 	stdout, stderr, err := runSSHCommand(client, postcheckFailedUnitsCmd, nil)
 	output := compactCommandOutput(stdout, stderr)
-	if strings.TrimSpace(output) != "" {
-		return updatePrecheckResult{
-			Name:    postcheckNameFailedUnits,
-			Passed:  false,
-			Details: "systemd reports failed units after upgrade.",
-			Output:  output,
-		}
+	units := parseFailedSystemdUnits(stdout + "\n" + stderr)
+	if len(units) > 0 {
+		return units, output, nil
 	}
+	if err != nil {
+		return nil, output, err
+	}
+	return units, output, nil
+}
+
+func checkFailedSystemdUnits(client sshConnection, preUpdateFailedUnits map[string]struct{}) updatePrecheckResult {
+	units, output, err := listFailedSystemdUnits(client)
 	if err != nil {
 		return updatePrecheckResult{
 			Name:    postcheckNameFailedUnits,
@@ -1051,11 +1085,34 @@ func checkFailedSystemdUnits(client sshConnection) updatePrecheckResult {
 			Output:  output,
 		}
 	}
+	if len(units) == 0 {
+		return updatePrecheckResult{
+			Name:    postcheckNameFailedUnits,
+			Passed:  true,
+			Details: "No failed systemd units detected.",
+			Output:  "",
+		}
+	}
+	newlyFailed := make([]string, 0, len(units))
+	for _, unit := range units {
+		if _, existedBefore := preUpdateFailedUnits[unit]; existedBefore {
+			continue
+		}
+		newlyFailed = append(newlyFailed, unit)
+	}
+	if len(newlyFailed) == 0 {
+		return updatePrecheckResult{
+			Name:    postcheckNameFailedUnits,
+			Passed:  true,
+			Details: fmt.Sprintf("No new failed systemd units detected after upgrade (%d pre-existing).", len(units)),
+			Output:  output,
+		}
+	}
 	return updatePrecheckResult{
 		Name:    postcheckNameFailedUnits,
-		Passed:  true,
-		Details: "No failed systemd units detected.",
-		Output:  "",
+		Passed:  false,
+		Details: "systemd reports newly failed units after upgrade.",
+		Output:  truncateString(strings.Join(newlyFailed, "\n"), precheckOutputMaxLen),
 	}
 }
 
@@ -1121,7 +1178,7 @@ func isPostcheckFailureBlocking(name string, cfg PostUpdateCheckConfig) bool {
 	}
 }
 
-func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig) updatePostcheckSummary {
+func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig, preUpdateFailedUnits map[string]struct{}) updatePostcheckSummary {
 	summary := updatePostcheckSummary{
 		AllPassed: true,
 		Results:   make([]updatePrecheckResult, 0, 4),
@@ -1129,7 +1186,12 @@ func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig) 
 	if !cfg.Enabled {
 		return summary
 	}
-	checks := []func(sshConnection) updatePrecheckResult{checkPostAptHealth, checkFailedSystemdUnits}
+	checks := []func(sshConnection) updatePrecheckResult{
+		checkPostAptHealth,
+		func(client sshConnection) updatePrecheckResult {
+			return checkFailedSystemdUnits(client, preUpdateFailedUnits)
+		},
+	}
 	if cfg.RebootRequiredWarning {
 		checks = append(checks, checkRebootRequired)
 	}
@@ -1810,6 +1872,8 @@ type withActorRunner struct {
 	postcheckWarnings int
 	postcheckResults  []updatePrecheckResult
 	upgradeCompleted  bool
+
+	preUpdateFailedUnits []string
 }
 
 func (r *withActorRunner) withStatus(update func(*ServerStatus)) bool {
@@ -1972,6 +2036,7 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"postcheck_warnings":            r.postcheckWarnings,
 		"postcheck_results":             r.postcheckResults,
 		"upgrade_completed":             r.upgradeCompleted,
+		"pre_update_failed_units":       r.preUpdateFailedUnits,
 	}
 }
 
@@ -2039,6 +2104,20 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				status.Logs += "\nPre-checks passed.\nRunning apt update..."
 			})
 
+			preUpdateFailedUnitsMap := make(map[string]struct{})
+			preUpdateFailedUnits, _, preUnitsErr := listFailedSystemdUnits(r.client)
+			if preUnitsErr != nil {
+				r.appendStatusLog(fmt.Sprintf("\nBaseline failed-units snapshot unavailable: %v", preUnitsErr))
+			} else {
+				r.preUpdateFailedUnits = preUpdateFailedUnits
+				for _, unit := range preUpdateFailedUnits {
+					preUpdateFailedUnitsMap[unit] = struct{}{}
+				}
+				if len(preUpdateFailedUnits) > 0 {
+					r.appendStatusLog(fmt.Sprintf("\nDetected %d pre-existing failed systemd unit(s) before upgrade.", len(preUpdateFailedUnits)))
+				}
+			}
+
 			var stdout, stderr bytes.Buffer
 			err := runSSHOperationWithRetry(
 				r.server,
@@ -2058,7 +2137,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					stderr.Reset()
 					session.SetStdout(&stdout)
 					session.SetStderr(&stderr)
-					runErr := session.Run("sudo apt update")
+					runErr := session.Run(aptUpdateCmd)
 					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 				},
 			)
@@ -2158,7 +2237,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					stderr.Reset()
 					session.SetStdout(&stdout)
 					session.SetStderr(&stderr)
-					runErr := session.Run("sudo apt upgrade -y")
+					runErr := session.Run(aptUpgradeCmd)
 					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 				},
 			)
@@ -2185,7 +2264,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				status.Logs = logs + "\nUpgrade completed.\nRunning post-update health checks..."
 			})
 
-			postcheckSummary := runPostUpdateHealthChecks(r.client, postcheckCfg)
+			postcheckSummary := runPostUpdateHealthChecks(r.client, postcheckCfg, preUpdateFailedUnitsMap)
 			r.postcheckResults = postcheckSummary.Results
 			r.postcheckWarnings = postcheckSummary.Warnings
 			for _, result := range postcheckSummary.Results {
@@ -2199,7 +2278,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 				line := fmt.Sprintf("\nPost-check %s [%s]: %s", result.Name, state, result.Details)
 				if trimmed := strings.TrimSpace(result.Output); trimmed != "" {
-					line += fmt.Sprintf(" Output: %s", trimmed)
+					line += fmt.Sprintf("\nOutput:\n%s", trimmed)
 				}
 				r.appendStatusLog(line)
 			}
@@ -2420,7 +2499,7 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 					stderr.Reset()
 					session.SetStdout(&stdout)
 					session.SetStderr(&stderr)
-					runErr := session.Run("sudo apt autoremove -y")
+					runErr := session.Run(aptAutoremoveCmd)
 					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 				},
 			)
@@ -2446,17 +2525,23 @@ func getUpgradable(client sshConnection) ([]string, error) {
 	}
 	defer session.Close()
 	var stdout bytes.Buffer
+	var stderr bytes.Buffer
 	session.SetStdout(&stdout)
-	err = session.Run("apt list --upgradable")
+	session.SetStderr(&stderr)
+	err = session.Run(aptListUpgradableCmd)
 	if err != nil {
 		return nil, err
 	}
-	output := stdout.String()
-	lines := strings.Split(output, "\n")
+	combined := stdout.String() + "\n" + stderr.String()
+	lines := strings.Split(combined, "\n")
 	var upgradable []string
-	for _, line := range lines[1:] { // skip header
-		if strings.TrimSpace(line) != "" {
-			upgradable = append(upgradable, line)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "Inst ") {
+			entry := strings.TrimSpace(strings.TrimPrefix(trimmed, "Inst "))
+			if entry != "" {
+				upgradable = append(upgradable, entry)
+			}
 		}
 	}
 	return upgradable, nil

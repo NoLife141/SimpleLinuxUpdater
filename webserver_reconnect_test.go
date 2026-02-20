@@ -119,7 +119,7 @@ func TestRetryReconnectsSSHConnectionBeforeSecondAttempt(t *testing.T) {
 		stderr.Reset()
 		session.SetStdout(&stdout)
 		session.SetStderr(&stderr)
-		runErr := session.Run("sudo apt update")
+		runErr := session.Run(aptUpdateCmd)
 		return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 	}, nil, func(time.Duration) {})
 	if err != nil {

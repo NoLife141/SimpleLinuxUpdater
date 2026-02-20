@@ -517,6 +517,11 @@
         let expandedLogs = new Set();
         let selectedServers = new Set();
         let hoveredName = null;
+        let interactingWithLogs = false;
+        let lastLogInteractionAt = 0;
+        let fetchInFlight = false;
+        let fetchQueued = false;
+        let queuedForceRender = false;
         let passwordResolve = null;
         let passwordReject = null;
         const allowedStatuses = new Set([
@@ -552,8 +557,23 @@
             return (el.scrollHeight - el.scrollTop - el.clientHeight) <= LOG_BOTTOM_THRESHOLD;
         }
 
+        function markLogInteraction() {
+            lastLogInteractionAt = Date.now();
+        }
+
+        function isLogInteractionActive() {
+            return interactingWithLogs || (Date.now() - lastLogInteractionAt) < 900;
+        }
+
         function classifyLogLine(line) {
             const lower = line.toLowerCase();
+            const bracketState = String(line || "").match(/\[(PASS|WARN|FAIL)\]/i);
+            if (bracketState) {
+                const state = bracketState[1].toUpperCase();
+                if (state === "FAIL") return "error";
+                if (state === "WARN") return "warning";
+                if (state === "PASS") return "success";
+            }
             if (/(error|failed|fatal|denied|refused|panic|timeout|timed out)/.test(lower)) return "error";
             if (/(warn|warning|retry|deprecated)/.test(lower)) return "warning";
             if (/(done|completed|success|approved|enabled|disabled|cancelled)/.test(lower)) return "success";
@@ -584,21 +604,40 @@
             window.scrollTo(pos.x, pos.y);
         }
 
-        async function fetchServers() {
+        async function fetchServers(forceRender = false) {
+            if (fetchInFlight) {
+                fetchQueued = true;
+                queuedForceRender = queuedForceRender || forceRender;
+                return;
+            }
+            fetchInFlight = true;
             const pageScroll = saveWindowScroll();
-            const response = await fetch('/api/servers');
-            allServers = await response.json();
-            const tbody = document.querySelector('#servers-table tbody');
-            // Save scroll positions
-            tbody.querySelectorAll('.logs-block:not(.logs-collapsed) .logs').forEach(div => {
-                const name = div.dataset.name;
-                if (name) {
-                    scrollPositions[name] = div.scrollTop;
-                    followLogs[name] = isNearBottom(div);
+            try {
+                const response = await fetch('/api/servers');
+                allServers = await response.json();
+                if (!forceRender && isLogInteractionActive()) {
+                    return;
                 }
-            });
-            renderTable();
-            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+                const tbody = document.querySelector('#servers-table tbody');
+                // Save scroll positions
+                tbody.querySelectorAll('.logs-block:not(.logs-collapsed) .logs').forEach(div => {
+                    const name = div.dataset.name;
+                    if (name) {
+                        scrollPositions[name] = div.scrollTop;
+                        followLogs[name] = isNearBottom(div);
+                    }
+                });
+                renderTable();
+                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+            } finally {
+                fetchInFlight = false;
+                if (fetchQueued) {
+                    fetchQueued = false;
+                    const nextRender = queuedForceRender;
+                    queuedForceRender = false;
+                    fetchServers(nextRender);
+                }
+            }
         }
 
         function sortServers(servers) {
@@ -740,6 +779,7 @@
                 div.addEventListener('scroll', () => {
                     const name = div.dataset.name;
                     if (!name) return;
+                    markLogInteraction();
                     scrollPositions[name] = div.scrollTop;
                     followLogs[name] = isNearBottom(div);
                 });
@@ -815,6 +855,17 @@
         }
 
         const tbodyHover = document.querySelector('#servers-table tbody');
+        tbodyHover.addEventListener('pointerdown', (e) => {
+            if (e.target.closest('.logs')) {
+                interactingWithLogs = true;
+                markLogInteraction();
+            }
+        });
+        tbodyHover.addEventListener('wheel', (e) => {
+            if (e.target.closest('.logs')) {
+                markLogInteraction();
+            }
+        }, { passive: true });
         tbodyHover.addEventListener('mouseover', (e) => {
             const row = e.target.closest('tr[data-name]');
             if (!row) return;
@@ -824,6 +875,15 @@
         tbodyHover.addEventListener('mouseleave', () => {
             hoveredName = null;
             applyHoverClass();
+        });
+        window.addEventListener('pointerup', () => {
+            if (!interactingWithLogs) return;
+            interactingWithLogs = false;
+            markLogInteraction();
+            fetchServers(true);
+        });
+        window.addEventListener('blur', () => {
+            interactingWithLogs = false;
         });
 
         document.querySelectorAll('#servers-table th.sortable').forEach(th => {

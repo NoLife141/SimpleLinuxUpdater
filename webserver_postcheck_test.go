@@ -52,7 +52,7 @@ func TestRunPostUpdateHealthChecksWarningOnlyReboot(t *testing.T) {
 		BlockOnAptHealth:      true,
 		BlockOnFailedUnits:    true,
 		RebootRequiredWarning: true,
-	})
+	}, nil)
 	if !summary.AllPassed {
 		t.Fatalf("runPostUpdateHealthChecks() AllPassed = false, want true for warning-only reboot: %+v", summary)
 	}
@@ -77,12 +77,35 @@ func TestRunPostUpdateHealthChecksBlockingFailedUnits(t *testing.T) {
 		BlockOnAptHealth:      true,
 		BlockOnFailedUnits:    true,
 		RebootRequiredWarning: false,
-	})
+	}, nil)
 	if summary.AllPassed {
 		t.Fatalf("runPostUpdateHealthChecks() AllPassed = true, want false")
 	}
 	if summary.FailedCheck != postcheckNameFailedUnits {
 		t.Fatalf("FailedCheck = %q, want %q", summary.FailedCheck, postcheckNameFailedUnits)
+	}
+}
+
+func TestRunPostUpdateHealthChecksIgnoresPreExistingFailedUnits(t *testing.T) {
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDpkgAuditCmd:    {},
+			precheckAptCheckCmd:     {},
+			postcheckFailedUnitsCmd: {stdout: "postfix@-.service loaded failed failed Postfix Mail Transport Agent (instance -)\n"},
+		},
+	}
+	baseline := map[string]struct{}{"postfix@-.service": {}}
+	summary := runPostUpdateHealthChecks(conn, PostUpdateCheckConfig{
+		Enabled:               true,
+		BlockOnAptHealth:      true,
+		BlockOnFailedUnits:    true,
+		RebootRequiredWarning: false,
+	}, baseline)
+	if !summary.AllPassed {
+		t.Fatalf("runPostUpdateHealthChecks() AllPassed = false, want true when only pre-existing units fail: %+v", summary)
+	}
+	if summary.Warnings != 0 {
+		t.Fatalf("Warnings = %d, want 0", summary.Warnings)
 	}
 }
 
@@ -102,7 +125,7 @@ func TestRunPostUpdateHealthChecksBlockingCustomCommand(t *testing.T) {
 		BlockOnFailedUnits:    true,
 		RebootRequiredWarning: false,
 		CustomCommand:         customCmd,
-	})
+	}, nil)
 	if summary.AllPassed {
 		t.Fatalf("runPostUpdateHealthChecks() AllPassed = true, want false")
 	}
@@ -144,11 +167,16 @@ func TestRunUpdateWithActorPostcheckBlockingFailureSetsError(t *testing.T) {
 			precheckLocksCmd:           {err: fakeExitStatusError{code: 1, msg: "no process found"}},
 			precheckDpkgAuditCmd:       {},
 			precheckAptCheckCmd:        {},
-			"sudo apt update":          {},
-			"apt list --upgradable":    {stdout: "Listing...\npkg/stable 1.2 amd64 [upgradable from: 1.1]\n"},
-			"sudo apt upgrade -y":      {},
-			postcheckFailedUnitsCmd:    {stdout: "ssh.service loaded failed failed\n"},
+			aptUpdateCmd:               {},
+			aptListUpgradableCmd:       {stdout: "Inst pkg/stable [1.1] (1.2 Debian:13 [amd64])\n"},
+			aptUpgradeCmd:              {},
 			postcheckRebootRequiredCmd: {},
+		},
+		sequenceResponses: map[string][]scriptedResponse{
+			postcheckFailedUnitsCmd: {
+				{},
+				{stdout: "ssh.service loaded failed failed\n"},
+			},
 		},
 	}
 	origDial := dialSSHConnection
