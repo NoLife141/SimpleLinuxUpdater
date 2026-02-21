@@ -508,16 +508,25 @@
             text-overflow: ellipsis;
         }
         .logs-col { width: 48%; min-width: 380px; }
-        .actions-col { width: 170px; min-width: 170px; }
+        .actions-col { width: 170px; min-width: 170px; max-width: 170px; }
         .status-col { width: 190px; min-width: 190px; }
 
         td button { display: block; margin: 6px 0; width: 100%; }
         td .inline-btn { width: auto; display: inline-flex; }
 
+        td.actions-col button:not(.inline-btn) {
+            width: 146px;
+            min-width: 146px;
+            max-width: 146px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
         .action-row {
             display: grid;
-            grid-template-columns: repeat(2, minmax(120px, 1fr));
+            grid-template-columns: 1fr;
             gap: 6px;
+            justify-items: center;
         }
 
         .action-row button {
