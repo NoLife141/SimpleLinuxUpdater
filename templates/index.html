@@ -148,6 +148,25 @@
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
         }
 
+        input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            padding: 0;
+            margin: 0;
+            border: 0;
+            border-radius: 0;
+            background: transparent;
+            box-shadow: none;
+            accent-color: #22d3ee;
+            vertical-align: middle;
+            cursor: pointer;
+            flex: 0 0 auto;
+        }
+
+        input[type="checkbox"]:focus {
+            box-shadow: none;
+        }
+
         button {
             background: linear-gradient(135deg, #38bdf8, #22d3ee);
             border: none;
@@ -223,6 +242,12 @@
             margin-bottom: 12px;
         }
 
+        .bulk-actions label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
         .pagination {
             display: flex;
             align-items: center;
@@ -254,6 +279,14 @@
             padding: 12px 10px;
             text-align: left;
             border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .select-col {
+            width: 44px;
+            min-width: 44px;
+            text-align: center;
+            padding-left: 6px;
+            padding-right: 6px;
         }
 
         th {
@@ -606,7 +639,7 @@
                 <table id="servers-table">
                     <thead>
                         <tr>
-                            <th></th>
+                            <th class="select-col"></th>
                             <th class="sortable name-col" data-sort-key="name">Server</th>
                             <th class="sortable status-col" data-sort-key="status">Status</th>
                             <th class="actions-col">Actions</th>
@@ -979,7 +1012,7 @@
                             </div>
                           `;
                     row.innerHTML = `
-                        <td><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
+                        <td class="select-col"><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
                         <td class="name-cell" title="${safeNameHtml}">${safeNameHtml}</td>
                         <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="actions-col">${actionButtons}</td>
