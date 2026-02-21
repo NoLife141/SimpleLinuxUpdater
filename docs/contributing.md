@@ -4,18 +4,42 @@
 
 ## Table of contents
 
-- [Development setup](#development-setup)
+- [Who we need](#who-we-need)
+- [How to help](#how-to-help)
+- [If you want to code](#if-you-want-to-code)
 - [Build and test](#build-and-test)
-- [Project conventions](#project-conventions)
-- [Release process](#release-process)
 
-## Development setup
+## Who we need
 
-Requirements:
+If you run Linux servers (Debian/Ubuntu) or a homelab, your feedback is the most valuable input for this project. The goal is to make updates safer and more predictable in real environments.
 
-- Go 1.26+
+Examples of useful contributors:
 
-Clone the repo and run the server locally.
+- Homelab users running a few machines and willing to test upgrades
+- Linux admins managing multiple hosts and able to share operational expectations
+- Anyone who can provide clear bug reports and reproduction steps
+
+## How to help
+
+You do not need to write code to contribute.
+
+High-impact contributions:
+
+- File bug reports with:
+  - your OS (updater host + target host)
+  - what you clicked / what command you ran
+  - the relevant server logs from the UI
+- Suggest features or defaults (for example: health check blocking policies, retry behavior, approval workflow)
+- Share what you want to see in observability (which metrics and failure causes are actually useful)
+- Improve the docs (clarity, missing steps, safer deployment guidance)
+
+## If you want to code
+
+If you want to implement a fix or feature:
+
+- Open an issue first (or comment on an existing one) describing the change.
+- Keep changes focused and add tests when behavior changes.
+- Submit changes via a pull request.
 
 ## Build and test
 
@@ -31,34 +55,3 @@ Run tests:
 go test ./...
 go test -race -count=1 ./...
 ```
-
-Optional checks:
-
-```bash
-go vet ./...
-```
-
-## Project conventions
-
-- Use `gofmt` on Go files.
-- Prefer table-driven tests with `t.Run`.
-- Keep UI changes aligned with existing visual language.
-
-## Release process
-
-Releases are tag-driven (`vX.Y.Z`) via GitHub Actions.
-
-Release gate checks include:
-
-- `README.md` contains `Version: vX.Y.Z`
-- `templates/index.html` contains `Version vX.Y.Z`
-- `CHANGELOG.md` contains a `## [vX.Y.Z]` section
-
-The release workflow publishes:
-
-- GitHub release archives (Linux/macOS/Windows)
-- Docker image to GHCR
-
-Repository policy:
-
-- Submit changes through pull requests (do not push directly to `main`).

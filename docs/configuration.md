@@ -86,7 +86,7 @@ Environment variables:
 - `DEBIAN_UPDATER_POSTCHECK_REBOOT_REQUIRED_WARNING` (default `true`)
 - `DEBIAN_UPDATER_POSTCHECK_CMD` (optional custom command; blocking when configured)
 
-See `usage.md` for behavior details and interpretation of failures.
+See [usage.md](usage.md) for behavior details and interpretation of failures.
 
 ## Known hosts handling
 

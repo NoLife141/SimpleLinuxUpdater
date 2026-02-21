@@ -71,4 +71,4 @@ Docker convention:
 - `/data/config.json`: encryption key
 - `/data/known_hosts`: SSH known-hosts (default)
 
-If an attacker obtains both the SQLite DB and the encryption key file, stored secrets can be decrypted. See `security.md`.
+If an attacker obtains both the SQLite DB and the encryption key file, stored secrets can be decrypted. See [security.md](security.md).

@@ -63,7 +63,7 @@ Common reasons:
 - Failed systemd units after upgrade
 - APT/DPKG health failures after upgrade
 
-Blocking behavior is configurable; see `configuration.md`.
+Blocking behavior is configurable; see [configuration.md](configuration.md).
 
 ## CVE enrichment issues
 

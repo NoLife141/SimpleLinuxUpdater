@@ -78,12 +78,24 @@ cp .env-template .env
 
 ## Security
 
-This project can run apt commands via `sudo` on remote hosts and stores SSH credentials encrypted in SQLite. Do not expose the UI to the public internet. See `docs/security.md`.
+This project can run apt commands via `sudo` on remote hosts and stores SSH credentials encrypted in SQLite. Do not expose the UI to the public internet. See [docs/security.md](docs/security.md).
 
 ## Contributing
 
-See `docs/contributing.md`.
+See [docs/contributing.md](docs/contributing.md).
+
+### Looking for help (Linux servers and homelabs)
+
+If you have a Linux server, a homelab, or a small fleet of Debian/Ubuntu machines, your feedback and real-world testing is exactly what this project needs.
+
+Ways you can help:
+
+- Tell me what you want the tool to do next (feature requests and priorities)
+- Report bugs with a short description and the relevant logs
+- Share what hardware/OS you run (Debian/Ubuntu versions, VPS vs homelab) and what worked or did not
+- Suggest safer defaults for checks, approvals, and retries
+- Review the UI flow and propose improvements that reduce operational mistakes
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

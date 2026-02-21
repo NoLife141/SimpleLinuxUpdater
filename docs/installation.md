@@ -76,5 +76,5 @@ Transfer `webserver` and the `templates/` and `static/` directories to the host 
 
 ## Next steps
 
-- Configure Basic Auth and storage paths: `configuration.md`
-- Add servers and run updates: `usage.md`
+- Configure Basic Auth and storage paths: [configuration.md](configuration.md)
+- Add servers and run updates: [usage.md](usage.md)

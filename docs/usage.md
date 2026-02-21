@@ -66,7 +66,7 @@ After an upgrade completes, the updater can run post-update health checks:
 - Reboot required marker (`/var/run/reboot-required`, warning only by default)
 - Optional custom command (`DEBIAN_UPDATER_POSTCHECK_CMD`)
 
-Blocking behavior is configurable; see `configuration.md`.
+Blocking behavior is configurable; see [configuration.md](configuration.md).
 
 The failed-units post-check takes a baseline snapshot before upgrade and compares it with the post-upgrade state to avoid flagging pre-existing failures as newly introduced.
 
