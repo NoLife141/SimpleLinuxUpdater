@@ -4337,10 +4337,11 @@ func main() {
 		}
 		if approved {
 			audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
-		} else {
-			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+			c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
+			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
+		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 	})
 
 	r.POST("/api/approve-security/:name", func(c *gin.Context) {
@@ -4353,10 +4354,11 @@ func main() {
 		}
 		if approved {
 			audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
-		} else {
-			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+			c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
+			return
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
+		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 	})
 
 	r.POST("/api/cancel/:name", func(c *gin.Context) {

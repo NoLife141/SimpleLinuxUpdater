@@ -56,51 +56,146 @@ func TestParseUpgradableEntriesStructured(t *testing.T) {
 }
 
 func TestBuildSelectedUpgradeCmd(t *testing.T) {
-	got := buildSelectedUpgradeCmd([]string{"openssl", "python3.11", "libfoo'bar"})
-	want := "sudo apt-get -y install --only-upgrade -- 'openssl' 'python3.11' 'libfoo'\"'\"'bar'"
-	if got != want {
-		t.Fatalf("buildSelectedUpgradeCmd() = %q, want %q", got, want)
+	tests := []struct {
+		name  string
+		input []string
+		want  string
+	}{
+		{
+			name:  "multiple packages with escaping",
+			input: []string{"openssl", "python3.11", "libfoo'bar"},
+			want:  "sudo apt-get -y install --only-upgrade -- 'openssl' 'python3.11' 'libfoo'\"'\"'bar'",
+		},
+		{
+			name:  "nil input",
+			input: nil,
+			want:  "",
+		},
+		{
+			name:  "empty input",
+			input: []string{},
+			want:  "",
+		},
+		{
+			name:  "blank packages ignored",
+			input: []string{" ", "\t"},
+			want:  "",
+		},
 	}
 
-	if empty := buildSelectedUpgradeCmd(nil); empty != "" {
-		t.Fatalf("buildSelectedUpgradeCmd(nil) = %q, want empty", empty)
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildSelectedUpgradeCmd(tt.input)
+			if got != tt.want {
+				t.Fatalf("buildSelectedUpgradeCmd(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
 func TestApprovePendingUpdateScope(t *testing.T) {
 	preserveServerState(t)
-
-	mu.Lock()
-	statusMap = map[string]*ServerStatus{
-		"srv": {
-			Name:   "srv",
-			Status: "pending_approval",
+	tests := []struct {
+		name          string
+		initialStatus *ServerStatus
+		scope         string
+		wantExists    bool
+		wantApproved  bool
+		wantStatus    string
+		wantScope     string
+	}{
+		{
+			name: "approve security from pending",
+			initialStatus: &ServerStatus{
+				Name:   "srv",
+				Status: "pending_approval",
+			},
+			scope:        "security",
+			wantExists:   true,
+			wantApproved: true,
+			wantStatus:   "approved",
+			wantScope:    "security",
+		},
+		{
+			name: "approve all from pending",
+			initialStatus: &ServerStatus{
+				Name:   "srv",
+				Status: "pending_approval",
+			},
+			scope:        "all",
+			wantExists:   true,
+			wantApproved: true,
+			wantStatus:   "approved",
+			wantScope:    "all",
+		},
+		{
+			name: "server exists but not pending",
+			initialStatus: &ServerStatus{
+				Name:          "srv",
+				Status:        "idle",
+				ApprovalScope: "security",
+			},
+			scope:        "all",
+			wantExists:   true,
+			wantApproved: false,
+			wantStatus:   "idle",
+			wantScope:    "security",
+		},
+		{
+			name:          "server not found",
+			initialStatus: nil,
+			scope:         "security",
+			wantExists:    false,
+			wantApproved:  false,
+			wantStatus:    "",
+			wantScope:     "",
 		},
 	}
-	mu.Unlock()
 
-	exists, approved := approvePendingUpdate("srv", "security")
-	if !exists || !approved {
-		t.Fatalf("approvePendingUpdate(srv, security) = exists=%t approved=%t, want true/true", exists, approved)
-	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			mu.Lock()
+			if tt.initialStatus == nil {
+				statusMap = map[string]*ServerStatus{}
+			} else {
+				initial := *tt.initialStatus
+				statusMap = map[string]*ServerStatus{
+					"srv": &initial,
+				}
+			}
+			mu.Unlock()
 
-	mu.Lock()
-	gotStatus := statusMap["srv"].Status
-	gotScope := statusMap["srv"].ApprovalScope
-	mu.Unlock()
-	if gotStatus != "approved" {
-		t.Fatalf("status after approve = %q, want approved", gotStatus)
-	}
-	if gotScope != "security" {
-		t.Fatalf("approval scope after approve = %q, want security", gotScope)
-	}
+			exists, approved := approvePendingUpdate("srv", tt.scope)
+			if exists != tt.wantExists || approved != tt.wantApproved {
+				t.Fatalf(
+					"approvePendingUpdate(srv, %q) = exists=%t approved=%t, want exists=%t approved=%t",
+					tt.scope,
+					exists,
+					approved,
+					tt.wantExists,
+					tt.wantApproved,
+				)
+			}
 
-	mu.Lock()
-	statusMap["srv"].Status = "idle"
-	mu.Unlock()
-	exists, approved = approvePendingUpdate("srv", "all")
-	if !exists || approved {
-		t.Fatalf("approvePendingUpdate(srv, all) when idle = exists=%t approved=%t, want true/false", exists, approved)
+			if tt.wantStatus == "" {
+				return
+			}
+
+			mu.Lock()
+			got := statusMap["srv"]
+			mu.Unlock()
+			if got == nil {
+				t.Fatalf("statusMap[srv] = nil, want status=%q", tt.wantStatus)
+			}
+			if got.Status != tt.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			if got.ApprovalScope != tt.wantScope {
+				t.Fatalf("approval scope = %q, want %q", got.ApprovalScope, tt.wantScope)
+			}
+		})
 	}
 }
 
