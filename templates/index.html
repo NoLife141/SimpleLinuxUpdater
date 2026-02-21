@@ -34,9 +34,10 @@
         }
 
         .page {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 36px 20px 64px;
+            width: 100%;
+            max-width: none;
+            margin: 0;
+            padding: 36px clamp(12px, 2.2vw, 34px) 64px;
         }
 
         .hero {
@@ -346,6 +347,31 @@
             letter-spacing: 0.3px;
         }
 
+        .pending-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+            align-items: center;
+        }
+
+        .pending-summary details {
+            width: 100%;
+        }
+
+        .pending-summary summary {
+            cursor: pointer;
+            color: var(--accent);
+            font-size: 12px;
+            font-weight: 600;
+            user-select: none;
+            margin-bottom: 6px;
+        }
+
+        .pending-summary summary:hover {
+            text-decoration: underline;
+        }
+
         .pending-note {
             margin: 0 0 8px;
             color: var(--muted);
@@ -441,9 +467,9 @@
         .log-line-success { color: #86efac; }
         .log-line-info { color: #93c5fd; }
 
-        .logs-col { width: 60%; min-width: 520px; }
-        .actions-col { width: 140px; }
-        .status-col { width: 180px; min-width: 180px; }
+        .logs-col { width: 48%; min-width: 380px; }
+        .actions-col { width: 170px; min-width: 170px; }
+        .status-col { width: 190px; min-width: 190px; }
 
         td button { display: block; margin: 6px 0; width: 100%; }
         td .inline-btn { width: auto; display: inline-flex; }
@@ -503,6 +529,7 @@
         }
 
         @media (max-width: 720px) {
+            .page { padding: 22px 12px 56px; }
             .hero { padding: 22px; }
             h1 { font-size: 26px; }
             table { min-width: 460px; }
@@ -700,6 +727,12 @@
             if (updates.length === 0) return "";
 
             const hasPending = updates.some(u => String(u.cve_state || "").toLowerCase() === "pending");
+            const securityCount = updates.filter(u => !!u.security).length;
+            const stateCounts = updates.reduce((acc, update) => {
+                const state = String(update.cve_state || "").toLowerCase();
+                acc[state] = (acc[state] || 0) + 1;
+                return acc;
+            }, {});
             const rows = updates.map(update => {
                 const pkg = escapeHtml(update.package || "unknown");
                 const currentVersion = escapeHtml(update.current_version || "?");
@@ -738,19 +771,30 @@
             return `
                 <div class="pending-updates">
                     <h4>Pending updates (security first)</h4>
-                    ${hasPending ? `<p class="pending-note">CVE scan in progress; list will update automatically.</p>` : ""}
-                    <div class="table-wrap">
-                        <table class="pending-table">
-                            <thead>
-                                <tr>
-                                    <th>Package</th>
-                                    <th>Version</th>
-                                    <th>Risk</th>
-                                </tr>
-                            </thead>
-                            <tbody>${rows}</tbody>
-                        </table>
+                    <div class="pending-summary">
+                        <span class="pending-badge">${updates.length} package${updates.length > 1 ? "s" : ""}</span>
+                        <span class="pending-badge pending-badge-security">${securityCount} security</span>
+                        <span class="pending-badge">${stateCounts.ready || 0} ready</span>
+                        <span class="pending-badge">${stateCounts.pending || 0} scanning</span>
+                        <span class="pending-badge">${stateCounts.unavailable || 0} unavailable</span>
+                        <span class="pending-badge">${stateCounts.skipped || 0} skipped</span>
+                        <details>
+                            <summary>Show package details</summary>
+                            <div class="table-wrap">
+                                <table class="pending-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Package</th>
+                                            <th>Version</th>
+                                            <th>Risk</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>${rows}</tbody>
+                                </table>
+                            </div>
+                        </details>
                     </div>
+                    ${hasPending ? `<p class="pending-note">CVE scan in progress; list will update automatically.</p>` : ""}
                 </div>
             `;
         }
