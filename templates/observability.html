@@ -266,6 +266,24 @@
             });
         }
 
+        function describeFailureCause(cause) {
+            const raw = String(cause || 'unknown').trim();
+            if (!raw || raw === 'unknown') return 'Unknown failure cause';
+            if (raw === 'retry_exhausted') return 'Retries exhausted before recovery';
+            if (raw === 'error_class:permanent') return 'Permanent error (not retryable)';
+            if (raw === 'error_class:transient') return 'Transient error (temporary issue)';
+            if (raw.startsWith('error_class:')) {
+                return `Error class: ${raw.slice('error_class:'.length)}`;
+            }
+            if (raw.startsWith('precheck:')) {
+                return `Pre-check failed: ${raw.slice('precheck:'.length)}`;
+            }
+            if (raw.startsWith('postcheck:')) {
+                return `Post-check failed: ${raw.slice('postcheck:'.length)}`;
+            }
+            return raw;
+        }
+
         async function fetchObservabilitySummary() {
             const selectedWindow = windowSelect.value || '7d';
             try {
@@ -302,7 +320,11 @@
                 summary?.failure_causes,
                 'No failure data in selected window.',
                 (tr, row) => {
-                    appendCell(tr, row?.cause || 'unknown');
+                    const causeCell = document.createElement('td');
+                    const rawCause = String(row?.cause || 'unknown');
+                    causeCell.textContent = describeFailureCause(rawCause);
+                    causeCell.title = `Raw cause: ${rawCause}`;
+                    tr.appendChild(causeCell);
                     appendCell(tr, String(row?.count || 0), 'bad');
                 }
             );
