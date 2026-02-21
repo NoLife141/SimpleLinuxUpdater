@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -44,16 +45,28 @@ type Server struct {
 }
 
 type ServerStatus struct {
-	Name        string   `json:"name"`
-	Host        string   `json:"host"`
-	Port        int      `json:"port"`
-	User        string   `json:"user"`
-	Status      string   `json:"status"` // idle, updating, pending_approval, approved, cancelled, upgrading, autoremove, sudoers, done, error
-	Logs        string   `json:"logs"`
-	Upgradable  []string `json:"upgradable"`
-	HasPassword bool     `json:"has_password"`
-	HasKey      bool     `json:"has_key"`
-	Tags        []string `json:"tags"`
+	Name           string          `json:"name"`
+	Host           string          `json:"host"`
+	Port           int             `json:"port"`
+	User           string          `json:"user"`
+	Status         string          `json:"status"` // idle, updating, pending_approval, approved, cancelled, upgrading, autoremove, sudoers, done, error
+	Logs           string          `json:"logs"`
+	Upgradable     []string        `json:"upgradable"`
+	PendingUpdates []PendingUpdate `json:"pending_updates"`
+	HasPassword    bool            `json:"has_password"`
+	HasKey         bool            `json:"has_key"`
+	Tags           []string        `json:"tags"`
+}
+
+type PendingUpdate struct {
+	Package          string   `json:"package"`
+	CurrentVersion   string   `json:"current_version,omitempty"`
+	CandidateVersion string   `json:"candidate_version,omitempty"`
+	Source           string   `json:"source,omitempty"`
+	Security         bool     `json:"security"`
+	CVEs             []string `json:"cves"`
+	CVEState         string   `json:"cve_state"`
+	Raw              string   `json:"raw"`
 }
 
 var servers []Server
@@ -105,6 +118,8 @@ const aptUpdateCmd = "sudo apt-get update"
 const aptUpgradeCmd = "sudo apt-get -y upgrade"
 const aptAutoremoveCmd = "sudo apt-get -y autoremove"
 const aptListUpgradableCmd = "sudo apt-get -s upgrade"
+const cveLookupMaxPackages = 25
+const cveLookupMaxPerPackage = 12
 const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
 const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
 const postcheckNameAptHealth = "post_apt_health"
@@ -118,6 +133,7 @@ var errUploadedKeyEmpty = errors.New("empty key")
 var errActionInProgress = errors.New("action already in progress")
 var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
 var errInvalidWindow = errors.New("invalid observability window")
+var cveRegex = regexp.MustCompile(`CVE-[0-9]{4}-[0-9]+`)
 
 type AuditEvent struct {
 	ID         int64  `json:"id"`
@@ -2074,8 +2090,21 @@ func cloneStatusMap(src map[string]*ServerStatus) map[string]*ServerStatus {
 		}
 		copyStatus := *status
 		copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+		copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
 		copyStatus.Tags = append([]string(nil), status.Tags...)
 		dst[name] = &copyStatus
+	}
+	return dst
+}
+
+func clonePendingUpdates(src []PendingUpdate) []PendingUpdate {
+	if src == nil {
+		return nil
+	}
+	dst := make([]PendingUpdate, len(src))
+	for i, update := range src {
+		dst[i] = update
+		dst[i].CVEs = append([]string(nil), update.CVEs...)
 	}
 	return dst
 }
@@ -2426,6 +2455,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		func(status *ServerStatus, policy RetryPolicy) {
 			status.Status = "updating"
 			status.Upgradable = nil
+			status.PendingUpdates = nil
 			status.Logs = fmt.Sprintf(
 				"Starting Linux Updater...\nRetries enabled: max_attempts=%d base_delay=%s max_delay=%s jitter=%d%%",
 				policy.MaxAttempts,
@@ -2514,6 +2544,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			}
 
 			var upgradable []string
+			var pendingUpdates []PendingUpdate
 			err = runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2523,9 +2554,10 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
 				&r.listUpgradableAttempts,
 				func() error {
-					items, listErr := getUpgradable(r.client)
+					pending, items, listErr := getUpgradable(r.client)
 					if listErr == nil {
 						upgradable = items
+						pendingUpdates = pending
 					}
 					return listErr
 				},
@@ -2539,16 +2571,20 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			if len(upgradable) == 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.PendingUpdates = nil
 					status.Logs = logs + "\nNo packages to upgrade."
 				})
 				return
 			}
 
+			pendingUpdates = preparePendingUpdatesForCVE(pendingUpdates)
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "pending_approval"
 				status.Upgradable = upgradable
+				status.PendingUpdates = clonePendingUpdates(pendingUpdates)
 				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
 			})
+			startPendingUpdateCVEEnrichment(r.server, r.config, pendingUpdates)
 
 			approvalDeadline := time.Now().Add(30 * time.Minute)
 			for {
@@ -2564,6 +2600,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 						status.Status = "idle"
 						status.Logs = ""
 						status.Upgradable = nil
+						status.PendingUpdates = nil
 						cancelledOrTimeout = true
 					}
 				}
@@ -2579,6 +2616,8 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "upgrading"
+				status.Upgradable = nil
+				status.PendingUpdates = nil
 				status.Logs += "\nRunning apt upgrade..."
 			})
 
@@ -2619,6 +2658,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				r.postchecksPassed = true
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.PendingUpdates = nil
 					status.Logs = logs + "\nUpgrade completed."
 				})
 				return
@@ -2653,6 +2693,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				r.postchecksPassed = false
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "error"
+					status.PendingUpdates = nil
 					status.Logs += fmt.Sprintf("\nUpgrade completed but post-check failed (%s).", postcheckSummary.FailedCheck)
 				})
 				return
@@ -2663,6 +2704,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			if postcheckSummary.Warnings > 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.PendingUpdates = nil
 					status.Logs = finalLogs + fmt.Sprintf("\nUpgrade completed with %d post-check warning(s).", postcheckSummary.Warnings)
 				})
 				return
@@ -2670,6 +2712,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "done"
+				status.PendingUpdates = nil
 				status.Logs = finalLogs + "\nUpgrade completed.\nPost-update health checks passed."
 			})
 		},
@@ -2883,10 +2926,10 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 	)
 }
 
-func getUpgradable(client sshConnection) ([]string, error) {
+func getUpgradable(client sshConnection) ([]PendingUpdate, []string, error) {
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer session.Close()
 	var stdout bytes.Buffer
@@ -2895,20 +2938,226 @@ func getUpgradable(client sshConnection) ([]string, error) {
 	session.SetStderr(&stderr)
 	err = session.Run(aptListUpgradableCmd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	lines := strings.Split(stdout.String(), "\n")
-	var upgradable []string
+	return parseUpgradableEntries(stdout.String())
+}
+
+func parseUpgradableEntries(stdout string) ([]PendingUpdate, []string, error) {
+	lines := strings.Split(stdout, "\n")
+	pendingUpdates := make([]PendingUpdate, 0)
+	upgradable := make([]string, 0)
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "Inst ") {
-			entry := strings.TrimSpace(strings.TrimPrefix(trimmed, "Inst "))
-			if entry != "" {
-				upgradable = append(upgradable, entry)
-			}
+		if !strings.HasPrefix(trimmed, "Inst ") {
+			continue
+		}
+		entry := strings.TrimSpace(strings.TrimPrefix(trimmed, "Inst "))
+		if entry == "" {
+			continue
+		}
+		upgradable = append(upgradable, entry)
+		pendingUpdates = append(pendingUpdates, parsePendingUpdateEntry(entry))
+	}
+	return pendingUpdates, upgradable, nil
+}
+
+func parsePendingUpdateEntry(entry string) PendingUpdate {
+	parsed := PendingUpdate{
+		Raw:      entry,
+		CVEs:     []string{},
+		CVEState: "",
+	}
+	fields := strings.Fields(entry)
+	if len(fields) == 0 {
+		return parsed
+	}
+	parsed.Package = fields[0]
+	if len(fields) > 1 && strings.HasPrefix(fields[1], "[") && strings.HasSuffix(fields[1], "]") {
+		parsed.CurrentVersion = strings.Trim(fields[1], "[]")
+	}
+
+	openParen := strings.Index(entry, "(")
+	closeParen := strings.LastIndex(entry, ")")
+	if openParen >= 0 && closeParen > openParen+1 {
+		inside := strings.TrimSpace(entry[openParen+1 : closeParen])
+		insideParts := strings.Fields(inside)
+		if len(insideParts) > 0 {
+			parsed.CandidateVersion = insideParts[0]
+		}
+		if len(insideParts) > 1 {
+			parsed.Source = strings.Join(insideParts[1:], " ")
 		}
 	}
-	return upgradable, nil
+	parsed.Security = isSecurityUpdate(parsed.Raw, parsed.Source)
+	return parsed
+}
+
+func isSecurityUpdate(raw, source string) bool {
+	combined := strings.ToLower(strings.TrimSpace(raw + " " + source))
+	if combined == "" {
+		return false
+	}
+	securityMarkers := []string{
+		"security.debian.org",
+		"debian-security",
+		"-security",
+		"/security",
+		"ubuntuesm",
+		"esm-apps",
+		"esm-infra",
+		"ubuntu-security",
+	}
+	for _, marker := range securityMarkers {
+		if strings.Contains(combined, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sortPendingUpdates(updates []PendingUpdate) {
+	sort.Slice(updates, func(i, j int) bool {
+		if updates[i].Security != updates[j].Security {
+			return updates[i].Security && !updates[j].Security
+		}
+		if len(updates[i].CVEs) != len(updates[j].CVEs) {
+			return len(updates[i].CVEs) > len(updates[j].CVEs)
+		}
+		return updates[i].Package < updates[j].Package
+	})
+}
+
+func preparePendingUpdatesForCVE(updates []PendingUpdate) []PendingUpdate {
+	prepared := clonePendingUpdates(updates)
+	sortPendingUpdates(prepared)
+	for i := range prepared {
+		if prepared[i].CVEs == nil {
+			prepared[i].CVEs = []string{}
+		}
+		if i < cveLookupMaxPackages && strings.TrimSpace(prepared[i].Package) != "" {
+			prepared[i].CVEState = "pending"
+		} else {
+			prepared[i].CVEState = "skipped"
+		}
+	}
+	return prepared
+}
+
+func pendingCVEPackages(updates []PendingUpdate) []string {
+	pkgs := make([]string, 0)
+	for _, update := range updates {
+		if update.CVEState != "pending" {
+			continue
+		}
+		pkg := strings.TrimSpace(update.Package)
+		if pkg == "" {
+			continue
+		}
+		pkgs = append(pkgs, pkg)
+	}
+	return pkgs
+}
+
+func extractCVEsFromText(text string, max int) []string {
+	matches := cveRegex.FindAllString(strings.ToUpper(text), -1)
+	if len(matches) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(matches))
+	out := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if _, exists := seen[match]; exists {
+			continue
+		}
+		seen[match] = struct{}{}
+		out = append(out, match)
+	}
+	sort.Strings(out)
+	if max > 0 && len(out) > max {
+		out = out[:max]
+	}
+	return out
+}
+
+func queryPackageCVEs(client sshConnection, pkg string) ([]string, error) {
+	escapedPkg := shellEscapeSingleQuotes(pkg)
+	cmd := fmt.Sprintf(
+		"sh -c \"apt-get changelog '%s' 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | head -n %d\"",
+		escapedPkg,
+		cveLookupMaxPerPackage,
+	)
+	stdout, _, err := runSSHCommand(client, cmd, nil)
+	if err != nil {
+		return nil, err
+	}
+	return extractCVEsFromText(stdout, cveLookupMaxPerPackage), nil
+}
+
+func serverPendingApproval(serverName string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	status := statusMap[serverName]
+	return status != nil && status.Status == "pending_approval"
+}
+
+func updatePendingPackageCVEState(serverName, pkg, state string, cves []string) bool {
+	mu.Lock()
+	defer mu.Unlock()
+	status := statusMap[serverName]
+	if status == nil || status.Status != "pending_approval" {
+		return false
+	}
+	updated := false
+	for i := range status.PendingUpdates {
+		if status.PendingUpdates[i].Package != pkg {
+			continue
+		}
+		status.PendingUpdates[i].CVEState = state
+		status.PendingUpdates[i].CVEs = append([]string(nil), cves...)
+		updated = true
+	}
+	if updated {
+		sortPendingUpdates(status.PendingUpdates)
+	}
+	return true
+}
+
+func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, updates []PendingUpdate) {
+	packages := pendingCVEPackages(updates)
+	if len(packages) == 0 || config == nil {
+		return
+	}
+	configCopy := *config
+	configCopy.Auth = append([]ssh.AuthMethod(nil), config.Auth...)
+
+	go func() {
+		cveClient, err := dialSSHConnection(server, &configCopy)
+		if err != nil {
+			for _, pkg := range packages {
+				if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
+					return
+				}
+			}
+			return
+		}
+		defer func() { _ = cveClient.Close() }()
+
+		for _, pkg := range packages {
+			if !serverPendingApproval(server.Name) {
+				return
+			}
+			cves, queryErr := queryPackageCVEs(cveClient, pkg)
+			state := "ready"
+			if queryErr != nil {
+				state = "unavailable"
+				cves = []string{}
+			}
+			if !updatePendingPackageCVEState(server.Name, pkg, state, cves) {
+				return
+			}
+		}
+	}()
 }
 
 func getGlobalKey() string {
@@ -3327,7 +3576,11 @@ func main() {
 			status.HasPassword = s.Pass != ""
 			status.HasKey = s.Key != ""
 			status.Tags = s.Tags
-			statuses = append(statuses, *status)
+			copyStatus := *status
+			copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+			copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
+			copyStatus.Tags = append([]string(nil), status.Tags...)
+			statuses = append(statuses, copyStatus)
 		}
 		mu.Unlock()
 		c.JSON(http.StatusOK, statuses)
@@ -3960,6 +4213,7 @@ func main() {
 			status.Status = "cancelled"
 			status.Logs = ""
 			status.Upgradable = nil
+			status.PendingUpdates = nil
 			cancelled = true
 		}
 		mu.Unlock()

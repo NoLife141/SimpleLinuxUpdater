@@ -330,6 +330,85 @@
             white-space: nowrap;
         }
 
+        .pending-updates {
+            margin-top: 8px;
+            margin-bottom: 10px;
+            background: rgba(8, 12, 16, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        .pending-updates h4 {
+            margin: 0 0 6px;
+            font-size: 13px;
+            color: var(--muted);
+            letter-spacing: 0.3px;
+        }
+
+        .pending-note {
+            margin: 0 0 8px;
+            color: var(--muted);
+            font-size: 12px;
+        }
+
+        .pending-table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 0;
+        }
+
+        .pending-table th,
+        .pending-table td {
+            padding: 6px 4px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            font-size: 12px;
+            vertical-align: top;
+        }
+
+        .pending-table th {
+            color: var(--muted);
+            font-weight: 600;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+
+        .pending-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .pending-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+
+        .pending-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 6px;
+            border-radius: 999px;
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            font-size: 11px;
+            line-height: 1.3;
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .pending-badge-security {
+            color: #1a0a0a;
+            background: rgba(248, 113, 113, 0.95);
+            border-color: rgba(248, 113, 113, 0.8);
+            font-weight: 700;
+        }
+
+        .pending-badge-cve {
+            color: #051019;
+            background: rgba(56, 189, 248, 0.95);
+            border-color: rgba(56, 189, 248, 0.8);
+            font-weight: 700;
+        }
+
         .logs {
             background: rgba(8, 12, 16, 0.7);
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -606,6 +685,76 @@
             }).join("");
         }
 
+        function pendingStateBadge(state) {
+            const normalized = String(state || "").toLowerCase();
+            if (normalized === "pending") return `<span class="pending-badge">Scanning CVEs...</span>`;
+            if (normalized === "unavailable") return `<span class="pending-badge">CVE lookup unavailable</span>`;
+            if (normalized === "skipped") return `<span class="pending-badge">CVE lookup skipped</span>`;
+            if (normalized === "ready") return "";
+            return `<span class="pending-badge">Unknown state</span>`;
+        }
+
+        function renderPendingUpdatesHtml(server) {
+            if (server.status !== "pending_approval") return "";
+            const updates = Array.isArray(server.pending_updates) ? server.pending_updates : [];
+            if (updates.length === 0) return "";
+
+            const hasPending = updates.some(u => String(u.cve_state || "").toLowerCase() === "pending");
+            const rows = updates.map(update => {
+                const pkg = escapeHtml(update.package || "unknown");
+                const currentVersion = escapeHtml(update.current_version || "?");
+                const candidateVersion = escapeHtml(update.candidate_version || "?");
+                const source = escapeHtml(update.source || "");
+                const state = String(update.cve_state || "").toLowerCase();
+                const cves = Array.isArray(update.cves) ? update.cves : [];
+
+                const badges = [];
+                if (update.security) badges.push(`<span class="pending-badge pending-badge-security">Security</span>`);
+                if (state === "ready") {
+                    if (cves.length > 0) {
+                        badges.push(`<span class="pending-badge pending-badge-cve">${cves.length} CVE${cves.length > 1 ? "s" : ""}</span>`);
+                        cves.slice(0, 3).forEach(cve => {
+                            badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`);
+                        });
+                    } else {
+                        badges.push(`<span class="pending-badge">No CVE found</span>`);
+                    }
+                } else {
+                    badges.push(pendingStateBadge(state));
+                }
+
+                return `
+                    <tr>
+                        <td>
+                            <div>${pkg}</div>
+                            ${source ? `<div class="subtle">${source}</div>` : ""}
+                        </td>
+                        <td>${currentVersion} &rarr; ${candidateVersion}</td>
+                        <td><div class="pending-badges">${badges.join("")}</div></td>
+                    </tr>
+                `;
+            }).join("");
+
+            return `
+                <div class="pending-updates">
+                    <h4>Pending updates (security first)</h4>
+                    ${hasPending ? `<p class="pending-note">CVE scan in progress; list will update automatically.</p>` : ""}
+                    <div class="table-wrap">
+                        <table class="pending-table">
+                            <thead>
+                                <tr>
+                                    <th>Package</th>
+                                    <th>Version</th>
+                                    <th>Risk</th>
+                                </tr>
+                            </thead>
+                            <tbody>${rows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
         function saveWindowScroll() {
             return { x: window.scrollX, y: window.scrollY };
         }
@@ -755,6 +904,7 @@
                     const safeStatus = safeStatusClass(server.status);
                     const formattedLogs = formatLogsHtml(server.logs || "");
                     const safeDataName = escapeHtml(server.name);
+                    const pendingUpdatesHtml = renderPendingUpdatesHtml(server);
                     const actionButtons = server.status === 'pending_approval'
                         ? `
                             <button onclick="approveUpgrade('${safeNameJs}')">Approve Upgrade</button>
@@ -774,6 +924,7 @@
                         <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="actions-col">${actionButtons}</td>
                         <td class="logs-col">
+                            ${pendingUpdatesHtml}
                             <button class="btn-ghost inline-btn" onclick="toggleLogs('${safeNameJs}')">${isExpanded ? "Hide" : "Show"} logs</button>
                             <div class="logs-block ${isExpanded ? "" : "logs-collapsed"}">
                                 <div class="logs-toolbar">
