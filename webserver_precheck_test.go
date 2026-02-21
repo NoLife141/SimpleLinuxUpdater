@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
@@ -38,6 +39,7 @@ type scriptedSSHConnection struct {
 	commandCalls      map[string]int
 	commands          []string
 	closed            bool
+	mu                sync.Mutex
 }
 
 func (c *scriptedSSHConnection) NewSession() (sshSessionRunner, error) {
@@ -45,6 +47,8 @@ func (c *scriptedSSHConnection) NewSession() (sshSessionRunner, error) {
 }
 
 func (c *scriptedSSHConnection) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.closed = true
 	return nil
 }
@@ -62,6 +66,9 @@ func (s *scriptedSSHSession) SetStdout(w io.Writer) { s.stdout = w }
 func (s *scriptedSSHSession) SetStderr(w io.Writer) { s.stderr = w }
 
 func (s *scriptedSSHSession) Run(cmd string) error {
+	s.conn.mu.Lock()
+	defer s.conn.mu.Unlock()
+
 	s.conn.commands = append(s.conn.commands, cmd)
 	if seq, ok := s.conn.sequenceResponses[cmd]; ok && len(seq) > 0 {
 		if s.conn.commandCalls == nil {

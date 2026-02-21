@@ -3134,6 +3134,7 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 	go func() {
 		cveClient, err := dialSSHConnection(server, &configCopy)
 		if err != nil {
+			log.Printf("CVE enrichment dial failed for server %q: %v", server.Name, err)
 			for _, pkg := range packages {
 				if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
 					return
@@ -3150,6 +3151,7 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 			cves, queryErr := queryPackageCVEs(cveClient, pkg)
 			state := "ready"
 			if queryErr != nil {
+				log.Printf("CVE lookup failed for server %q package %q: %v", server.Name, pkg, queryErr)
 				state = "unavailable"
 				cves = []string{}
 			}
