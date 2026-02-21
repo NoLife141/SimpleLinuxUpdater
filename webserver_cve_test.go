@@ -55,6 +55,55 @@ func TestParseUpgradableEntriesStructured(t *testing.T) {
 	}
 }
 
+func TestBuildSelectedUpgradeCmd(t *testing.T) {
+	got := buildSelectedUpgradeCmd([]string{"openssl", "python3.11", "libfoo'bar"})
+	want := "sudo apt-get -y install --only-upgrade -- 'openssl' 'python3.11' 'libfoo'\"'\"'bar'"
+	if got != want {
+		t.Fatalf("buildSelectedUpgradeCmd() = %q, want %q", got, want)
+	}
+
+	if empty := buildSelectedUpgradeCmd(nil); empty != "" {
+		t.Fatalf("buildSelectedUpgradeCmd(nil) = %q, want empty", empty)
+	}
+}
+
+func TestApprovePendingUpdateScope(t *testing.T) {
+	preserveServerState(t)
+
+	mu.Lock()
+	statusMap = map[string]*ServerStatus{
+		"srv": {
+			Name:   "srv",
+			Status: "pending_approval",
+		},
+	}
+	mu.Unlock()
+
+	exists, approved := approvePendingUpdate("srv", "security")
+	if !exists || !approved {
+		t.Fatalf("approvePendingUpdate(srv, security) = exists=%t approved=%t, want true/true", exists, approved)
+	}
+
+	mu.Lock()
+	gotStatus := statusMap["srv"].Status
+	gotScope := statusMap["srv"].ApprovalScope
+	mu.Unlock()
+	if gotStatus != "approved" {
+		t.Fatalf("status after approve = %q, want approved", gotStatus)
+	}
+	if gotScope != "security" {
+		t.Fatalf("approval scope after approve = %q, want security", gotScope)
+	}
+
+	mu.Lock()
+	statusMap["srv"].Status = "idle"
+	mu.Unlock()
+	exists, approved = approvePendingUpdate("srv", "all")
+	if !exists || approved {
+		t.Fatalf("approvePendingUpdate(srv, all) when idle = exists=%t approved=%t, want true/false", exists, approved)
+	}
+}
+
 func TestSortPendingUpdatesSecurityFirstThenCVECount(t *testing.T) {
 	updates := []PendingUpdate{
 		{Package: "pkg-b", Security: false, CVEs: []string{"CVE-2026-0003"}},

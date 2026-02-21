@@ -50,6 +50,7 @@ type ServerStatus struct {
 	Port           int             `json:"port"`
 	User           string          `json:"user"`
 	Status         string          `json:"status"` // idle, updating, pending_approval, approved, cancelled, upgrading, autoremove, sudoers, done, error
+	ApprovalScope  string          `json:"-"`
 	Logs           string          `json:"logs"`
 	Upgradable     []string        `json:"upgradable"`
 	PendingUpdates []PendingUpdate `json:"pending_updates"`
@@ -116,6 +117,7 @@ const precheckDpkgAuditCmd = "sudo dpkg --audit"
 const precheckAptCheckCmd = "sudo apt-get check"
 const aptUpdateCmd = "sudo apt-get update"
 const aptUpgradeCmd = "sudo apt-get -y upgrade"
+const aptUpgradeSelectedPrefixCmd = "sudo apt-get -y install --only-upgrade --"
 const aptAutoremoveCmd = "sudo apt-get -y autoremove"
 const aptListUpgradableCmd = "sudo apt-get -s upgrade"
 const cveLookupMaxPackages = 25
@@ -2148,6 +2150,22 @@ func beginServerAction(name, newStatus string) (Server, error) {
 	return server, nil
 }
 
+func approvePendingUpdate(name, scope string) (exists bool, approved bool) {
+	normalizedScope := normalizeApprovalScope(scope)
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return exists, false
+	}
+	if status.Status != "pending_approval" {
+		return exists, false
+	}
+	status.ApprovalScope = normalizedScope
+	status.Status = "approved"
+	return exists, true
+}
+
 func readUploadedKeyData(r io.Reader) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxUploadedKeyBytes+1))
 	if err != nil {
@@ -2234,6 +2252,9 @@ type withActorRunner struct {
 	policy     RetryPolicy
 	startedAt  time.Time
 	approvedAt time.Time
+
+	approvalScope   string
+	approvedPackage []string
 
 	config *ssh.ClientConfig
 	client sshConnection
@@ -2404,6 +2425,10 @@ func doneOnlyOutcome(finalStatus string) string {
 }
 
 func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
+	approvalScope := "none"
+	if !r.approvedAt.IsZero() {
+		approvalScope = normalizeApprovalScope(r.approvalScope)
+	}
 	meta := map[string]any{
 		"status":                        finalStatus,
 		"ssh_dial_attempts_used":        r.sshDialAttempts,
@@ -2423,6 +2448,9 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"postcheck_results":             r.postcheckResults,
 		"upgrade_completed":             r.upgradeCompleted,
 		"pre_update_failed_units":       r.preUpdateFailedUnits,
+		"approval_scope":                approvalScope,
+		"approved_package_count":        len(r.approvedPackage),
+		"approved_packages":             append([]string(nil), r.approvedPackage...),
 	}
 	if !r.startedAt.IsZero() {
 		meta["total_elapsed_ms"] = time.Since(r.startedAt).Milliseconds()
@@ -2454,6 +2482,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		updateCompleteAction,
 		func(status *ServerStatus, policy RetryPolicy) {
 			status.Status = "updating"
+			status.ApprovalScope = ""
 			status.Upgradable = nil
 			status.PendingUpdates = nil
 			status.Logs = fmt.Sprintf(
@@ -2571,6 +2600,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			if len(upgradable) == 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.ApprovalScope = ""
 					status.PendingUpdates = nil
 					status.Logs = logs + "\nNo packages to upgrade."
 				})
@@ -2580,6 +2610,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			pendingUpdates = preparePendingUpdatesForCVE(pendingUpdates)
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "pending_approval"
+				status.ApprovalScope = ""
 				status.Upgradable = upgradable
 				status.PendingUpdates = clonePendingUpdates(pendingUpdates)
 				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
@@ -2595,9 +2626,16 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				status := statusMap[r.server.Name]
 				if status != nil {
 					if status.Status == "approved" {
+						r.approvalScope = normalizeApprovalScope(status.ApprovalScope)
+						if r.approvalScope == "security" {
+							r.approvedPackage = securityPackagesFromPendingUpdates(status.PendingUpdates)
+						} else {
+							r.approvedPackage = packageNamesFromPendingUpdates(status.PendingUpdates)
+						}
 						approved = true
 					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
 						status.Status = "idle"
+						status.ApprovalScope = ""
 						status.Logs = ""
 						status.Upgradable = nil
 						status.PendingUpdates = nil
@@ -2614,15 +2652,46 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			}
 
+			r.approvalScope = normalizeApprovalScope(r.approvalScope)
+			if r.approvalScope == "security" && len(r.approvedPackage) == 0 {
+				_ = r.withStatus(func(status *ServerStatus) {
+					status.Status = "done"
+					status.ApprovalScope = ""
+					status.Upgradable = nil
+					status.PendingUpdates = nil
+					status.Logs += "\nApproval received: security-only upgrade.\nNo security upgrades detected in pending package set; skipped upgrade."
+				})
+				return
+			}
+
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "upgrading"
+				status.ApprovalScope = ""
 				status.Upgradable = nil
 				status.PendingUpdates = nil
-				status.Logs += "\nRunning apt upgrade..."
+				switch r.approvalScope {
+				case "security":
+					status.Logs += fmt.Sprintf("\nApproval received: security-only upgrade (%d package(s)).", len(r.approvedPackage))
+				default:
+					status.Logs += "\nApproval received: all pending upgrades."
+				}
 			})
 
 			stdout.Reset()
 			stderr.Reset()
+			upgradeCmd := aptUpgradeCmd
+			if r.approvalScope == "security" {
+				selectedCmd := buildSelectedUpgradeCmd(r.approvedPackage)
+				if selectedCmd == "" {
+					r.lastErrClass = "permanent"
+					r.setErrorLogs(r.currentLogs() + "\nError: could not build security-only apt command from approved package set")
+					return
+				}
+				upgradeCmd = selectedCmd
+				r.appendStatusLog("\nRunning security-only apt upgrade...")
+			} else {
+				r.appendStatusLog("\nRunning apt upgrade...")
+			}
 			err = runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2641,7 +2710,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					stderr.Reset()
 					session.SetStdout(&stdout)
 					session.SetStderr(&stderr)
-					runErr := session.Run(aptUpgradeCmd)
+					runErr := session.Run(upgradeCmd)
 					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
 				},
 			)
@@ -2658,6 +2727,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				r.postchecksPassed = true
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.ApprovalScope = ""
 					status.PendingUpdates = nil
 					status.Logs = logs + "\nUpgrade completed."
 				})
@@ -2693,6 +2763,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				r.postchecksPassed = false
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "error"
+					status.ApprovalScope = ""
 					status.PendingUpdates = nil
 					status.Logs += fmt.Sprintf("\nUpgrade completed but post-check failed (%s).", postcheckSummary.FailedCheck)
 				})
@@ -2704,6 +2775,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			if postcheckSummary.Warnings > 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
+					status.ApprovalScope = ""
 					status.PendingUpdates = nil
 					status.Logs = finalLogs + fmt.Sprintf("\nUpgrade completed with %d post-check warning(s).", postcheckSummary.Warnings)
 				})
@@ -2712,6 +2784,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "done"
+				status.ApprovalScope = ""
 				status.PendingUpdates = nil
 				status.Logs = finalLogs + "\nUpgrade completed.\nPost-update health checks passed."
 			})
@@ -3026,6 +3099,77 @@ func sortPendingUpdates(updates []PendingUpdate) {
 		}
 		return updates[i].Package < updates[j].Package
 	})
+}
+
+func normalizeApprovalScope(scope string) string {
+	normalized := strings.ToLower(strings.TrimSpace(scope))
+	if normalized == "security" {
+		return "security"
+	}
+	return "all"
+}
+
+func securityPackagesFromPendingUpdates(updates []PendingUpdate) []string {
+	if len(updates) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(updates))
+	packages := make([]string, 0, len(updates))
+	for _, update := range updates {
+		if !update.Security {
+			continue
+		}
+		pkg := strings.TrimSpace(update.Package)
+		if pkg == "" {
+			continue
+		}
+		if _, exists := seen[pkg]; exists {
+			continue
+		}
+		seen[pkg] = struct{}{}
+		packages = append(packages, pkg)
+	}
+	sort.Strings(packages)
+	return packages
+}
+
+func packageNamesFromPendingUpdates(updates []PendingUpdate) []string {
+	if len(updates) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(updates))
+	packages := make([]string, 0, len(updates))
+	for _, update := range updates {
+		pkg := strings.TrimSpace(update.Package)
+		if pkg == "" {
+			continue
+		}
+		if _, exists := seen[pkg]; exists {
+			continue
+		}
+		seen[pkg] = struct{}{}
+		packages = append(packages, pkg)
+	}
+	sort.Strings(packages)
+	return packages
+}
+
+func buildSelectedUpgradeCmd(packages []string) string {
+	if len(packages) == 0 {
+		return ""
+	}
+	escaped := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		trimmed := strings.TrimSpace(pkg)
+		if trimmed == "" {
+			continue
+		}
+		escaped = append(escaped, fmt.Sprintf("'%s'", shellEscapeSingleQuotes(trimmed)))
+	}
+	if len(escaped) == 0 {
+		return ""
+	}
+	return aptUpgradeSelectedPrefixCmd + " " + strings.Join(escaped, " ")
 }
 
 func preparePendingUpdatesForCVE(updates []PendingUpdate) []PendingUpdate {
@@ -4185,25 +4329,34 @@ func main() {
 
 	r.POST("/api/approve/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		mu.Lock()
-		status, exists := statusMap[name]
-		approved := false
-		if exists && status.Status == "pending_approval" {
-			status.Status = "approved"
-			approved = true
-		}
-		mu.Unlock()
+		exists, approved := approvePendingUpdate(name, "all")
 		if !exists {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
 		if approved {
-			audit(c, "update.approve", "server", name, "success", "Upgrade approved", nil)
+			audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
 		} else {
-			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", nil)
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
 		}
-		c.JSON(http.StatusOK, gin.H{"message": "Upgrade approved"})
+		c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
+	})
+
+	r.POST("/api/approve-security/:name", func(c *gin.Context) {
+		name := c.Param("name")
+		exists, approved := approvePendingUpdate(name, "security")
+		if !exists {
+			audit(c, "update.approve", "server", name, "failure", "Server not found", map[string]any{"scope": "security"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+			return
+		}
+		if approved {
+			audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
+		} else {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
 	})
 
 	r.POST("/api/cancel/:name", func(c *gin.Context) {
@@ -4213,6 +4366,7 @@ func main() {
 		cancelled := false
 		if exists && status.Status == "pending_approval" {
 			status.Status = "cancelled"
+			status.ApprovalScope = ""
 			status.Logs = ""
 			status.Upgradable = nil
 			status.PendingUpdates = nil
