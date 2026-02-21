@@ -1,8 +1,8 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,15 +10,6 @@ import (
 
 	"golang.org/x/crypto/ssh"
 )
-
-func changelogCVECommand(pkg string) string {
-	escapedPkg := shellEscapeSingleQuotes(pkg)
-	return fmt.Sprintf(
-		"sh -c \"apt-get changelog '%s' 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | head -n %d\"",
-		escapedPkg,
-		cveLookupMaxPerPackage,
-	)
-}
 
 func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, message string) {
 	t.Helper()
@@ -269,18 +260,20 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 
 	updateConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			precheckDiskSpaceCmd: {stdout: "2048000\n2097152\n"},
-			precheckLocksCmd:     {err: fakeExitStatusError{code: 1, msg: "no process found"}},
-			precheckDpkgAuditCmd: {},
-			precheckAptCheckCmd:  {},
-			aptUpdateCmd:         {},
-			aptListUpgradableCmd: {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\nInst bash [5.2-1] (5.2-2 Debian:12 [amd64])\n"},
+			precheckDiskSpaceCmd:    {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:        {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd:    {},
+			precheckAptCheckCmd:     {},
+			postcheckFailedUnitsCmd: {},
+			aptUpdateCmd:            {},
+			aptListUpgradableCmd:    {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\nInst bash [5.2-1] (5.2-2 Debian:12 [amd64])\n"},
 		},
 	}
 	cveConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			changelogCVECommand("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
-			changelogCVECommand("bash"):    {},
+			postcheckFailedUnitsCmd:            {},
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
+			buildPackageCVEQueryCmd("bash"):    {},
 		},
 	}
 
@@ -345,6 +338,141 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 	}
 }
 
+func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	t.Setenv(postchecksEnabledEnv, "false")
+	dbFile := filepath.Join(t.TempDir(), "cve-security-approval.db")
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+
+	server := Server{Name: "srv-cve-approval-meta", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	securityUpgradeCmd := buildSelectedUpgradeCmd([]string{"openssl"})
+
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	updateConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDiskSpaceCmd:    {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:        {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd:    {},
+			precheckAptCheckCmd:     {},
+			postcheckFailedUnitsCmd: {},
+			aptUpdateCmd:            {},
+			aptListUpgradableCmd:    {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\nInst bash [5.2-1] (5.2-2 Debian:12 [amd64])\n"},
+			securityUpgradeCmd:      {},
+		},
+	}
+	cveConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			postcheckFailedUnitsCmd:            {},
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
+			buildPackageCVEQueryCmd("bash"):    {},
+		},
+	}
+
+	origDial := dialSSHConnection
+	dialCalls := 0
+	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		dialCalls++
+		if dialCalls == 1 {
+			return updateConn, nil
+		}
+		return cveConn, nil
+	}
+	t.Cleanup(func() { dialSSHConnection = origDial })
+
+	done := make(chan struct{})
+	go func() {
+		runUpdateWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv())
+		close(done)
+	}()
+
+	waitForCondition(t, 6*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		status := statusMap[server.Name]
+		return status != nil && status.Status == "pending_approval" && len(status.PendingUpdates) >= 2
+	}, "pending approval state before approval")
+
+	mu.Lock()
+	status := statusMap[server.Name]
+	if status != nil {
+		status.Status = "approved"
+		status.ApprovalScope = "security"
+	}
+	mu.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for update flow to finish")
+	}
+
+	mu.Lock()
+	final := statusMap[server.Name]
+	mu.Unlock()
+	if final == nil || final.Status != "done" {
+		if final == nil {
+			t.Fatalf("final status missing for %s", server.Name)
+		}
+		t.Fatalf("final status = %q, want done", final.Status)
+	}
+
+	updateConn.mu.Lock()
+	commands := append([]string(nil), updateConn.commands...)
+	updateConn.mu.Unlock()
+	sawSecurityCmd := false
+	for _, cmd := range commands {
+		if cmd == securityUpgradeCmd {
+			sawSecurityCmd = true
+			break
+		}
+	}
+	if !sawSecurityCmd {
+		t.Fatalf("expected security-only upgrade command %q, got commands=%v", securityUpgradeCmd, commands)
+	}
+
+	var metaJSON string
+	if err := db.QueryRow("SELECT meta_json FROM audit_events WHERE action = ? AND target_name = ? ORDER BY id DESC LIMIT 1", "update.complete", server.Name).Scan(&metaJSON); err != nil {
+		t.Fatalf("query audit metadata: %v", err)
+	}
+	meta := map[string]any{}
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		t.Fatalf("parse audit metadata: %v", err)
+	}
+
+	if got, ok := meta["approval_scope"].(string); !ok || got != "security" {
+		t.Fatalf("approval_scope = %v, want security", meta["approval_scope"])
+	}
+
+	if got, ok := meta["approved_package_count"].(float64); !ok || int(got) != 1 {
+		t.Fatalf("approved_package_count = %v, want 1", meta["approved_package_count"])
+	}
+
+	rawPackages, ok := meta["approved_packages"].([]any)
+	if !ok {
+		t.Fatalf("approved_packages type = %T, want []any", meta["approved_packages"])
+	}
+	if len(rawPackages) != 1 {
+		t.Fatalf("approved_packages len = %d, want 1 (all=%v)", len(rawPackages), rawPackages)
+	}
+	if pkg, ok := rawPackages[0].(string); !ok || pkg != "openssl" {
+		t.Fatalf("approved_packages[0] = %v, want openssl", rawPackages[0])
+	}
+}
+
 func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 	preserveServerState(t)
 	preserveDBState(t)
@@ -368,17 +496,19 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 
 	updateConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			precheckDiskSpaceCmd: {stdout: "2048000\n2097152\n"},
-			precheckLocksCmd:     {err: fakeExitStatusError{code: 1, msg: "no process found"}},
-			precheckDpkgAuditCmd: {},
-			precheckAptCheckCmd:  {},
-			aptUpdateCmd:         {},
-			aptListUpgradableCmd: {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
+			precheckDiskSpaceCmd:    {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:        {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd:    {},
+			precheckAptCheckCmd:     {},
+			postcheckFailedUnitsCmd: {},
+			aptUpdateCmd:            {},
+			aptListUpgradableCmd:    {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
 		},
 	}
 	cveConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			changelogCVECommand("openssl"): {err: errors.New("lookup failed")},
+			postcheckFailedUnitsCmd:            {},
+			buildPackageCVEQueryCmd("openssl"): {err: errors.New("lookup failed")},
 		},
 	}
 

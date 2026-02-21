@@ -122,6 +122,7 @@ const aptAutoremoveCmd = "sudo apt-get -y autoremove"
 const aptListUpgradableCmd = "sudo apt-get -s upgrade"
 const cveLookupMaxPackages = 25
 const cveLookupMaxPerPackage = 12
+const cveLookupCommandTimeout = 20 * time.Second
 const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
 const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
 const postcheckNameAptHealth = "post_apt_health"
@@ -863,6 +864,53 @@ func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, s
 	}
 	err = session.Run(cmd)
 	return stdout.String(), stderr.String(), err
+}
+
+func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader, timeout time.Duration) (string, string, error) {
+	if timeout <= 0 {
+		return runSSHCommand(client, cmd, stdin)
+	}
+	if client == nil {
+		return "", "", errors.New("missing SSH connection")
+	}
+	session, err := client.NewSession()
+	if err != nil {
+		return "", "", err
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.SetStdout(&stdout)
+	session.SetStderr(&stderr)
+	if stdin != nil {
+		session.SetStdin(stdin)
+	}
+
+	runErrCh := make(chan error, 1)
+	go func() {
+		runErrCh <- session.Run(cmd)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case runErr := <-runErrCh:
+		return stdout.String(), stderr.String(), runErr
+	case <-timer.C:
+		_ = session.Close()
+		select {
+		case runErr := <-runErrCh:
+			if runErr == nil {
+				runErr = fmt.Errorf("command timed out after %s", timeout)
+			} else {
+				runErr = fmt.Errorf("command timed out after %s: %w", timeout, runErr)
+			}
+			return stdout.String(), stderr.String(), runErr
+		case <-time.After(1 * time.Second):
+			return "", "", fmt.Errorf("command timed out after %s", timeout)
+		}
+	}
 }
 
 func sshExitCode(err error) (int, bool) {
@@ -3224,14 +3272,17 @@ func extractCVEsFromText(text string, max int) []string {
 	return out
 }
 
-func queryPackageCVEs(client sshConnection, pkg string) ([]string, error) {
+func buildPackageCVEQueryCmd(pkg string) string {
 	escapedPkg := shellEscapeSingleQuotes(pkg)
-	cmd := fmt.Sprintf(
+	return fmt.Sprintf(
 		"sh -c \"apt-get changelog '%s' 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | head -n %d\"",
 		escapedPkg,
 		cveLookupMaxPerPackage,
 	)
-	stdout, _, err := runSSHCommand(client, cmd, nil)
+}
+
+func queryPackageCVEs(client sshConnection, pkg string) ([]string, error) {
+	stdout, _, err := runSSHCommandWithTimeout(client, buildPackageCVEQueryCmd(pkg), nil, cveLookupCommandTimeout)
 	if err != nil {
 		return nil, err
 	}
