@@ -137,6 +137,7 @@ var errActionInProgress = errors.New("action already in progress")
 var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
 var errInvalidWindow = errors.New("invalid observability window")
 var cveRegex = regexp.MustCompile(`CVE-[0-9]{4}-[0-9]+`)
+var securitySuiteTokenRegex = regexp.MustCompile(`(?:^|[\s/:])[a-z0-9][a-z0-9+.-]*-security(?:$|[\s/\],:\)])`)
 
 type AuditEvent struct {
 	ID         int64  `json:"id"`
@@ -877,7 +878,6 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 	if err != nil {
 		return "", "", err
 	}
-	defer session.Close()
 
 	var stdout, stderr bytes.Buffer
 	session.SetStdout(&stdout)
@@ -896,9 +896,12 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 
 	select {
 	case runErr := <-runErrCh:
+		_ = session.Close()
 		return stdout.String(), stderr.String(), runErr
 	case <-timer.C:
 		_ = session.Close()
+		timeoutStdout := stdout.String()
+		timeoutStderr := stderr.String()
 		select {
 		case runErr := <-runErrCh:
 			if runErr == nil {
@@ -906,9 +909,10 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 			} else {
 				runErr = fmt.Errorf("command timed out after %s: %w", timeout, runErr)
 			}
-			return stdout.String(), stderr.String(), runErr
+			return timeoutStdout, timeoutStderr, runErr
 		case <-time.After(1 * time.Second):
-			return "", "", fmt.Errorf("command timed out after %s", timeout)
+			go func() { <-runErrCh }()
+			return timeoutStdout, timeoutStderr, fmt.Errorf("command timed out after %s", timeout)
 		}
 	}
 }
@@ -2274,16 +2278,17 @@ func init() {
 	loadServers()
 	for _, s := range servers {
 		statusMap[s.Name] = &ServerStatus{
-			Name:        s.Name,
-			Host:        s.Host,
-			Port:        normalizePort(s.Port),
-			User:        s.User,
-			Status:      "idle",
-			Logs:        "",
-			Upgradable:  []string{},
-			HasPassword: s.Pass != "",
-			HasKey:      s.Key != "",
-			Tags:        s.Tags,
+			Name:           s.Name,
+			Host:           s.Host,
+			Port:           normalizePort(s.Port),
+			User:           s.User,
+			Status:         "idle",
+			Logs:           "",
+			Upgradable:     []string{},
+			PendingUpdates: []PendingUpdate{},
+			HasPassword:    s.Pass != "",
+			HasKey:         s.Key != "",
+			Tags:           s.Tags,
 		}
 	}
 }
@@ -3121,7 +3126,6 @@ func isSecurityUpdate(raw, source string) bool {
 	securityMarkers := []string{
 		"security.debian.org",
 		"debian-security",
-		"-security",
 		"/security",
 		"esm-apps",
 		"esm-infra",
@@ -3132,7 +3136,11 @@ func isSecurityUpdate(raw, source string) bool {
 			return true
 		}
 	}
-	return false
+	sourceOnly := strings.ToLower(strings.TrimSpace(source))
+	if sourceOnly == "" {
+		sourceOnly = combined
+	}
+	return securitySuiteTokenRegex.MatchString(sourceOnly)
 }
 
 func sortPendingUpdates(updates []PendingUpdate) {
@@ -3271,12 +3279,13 @@ func extractCVEsFromText(text string, max int) []string {
 }
 
 func buildPackageCVEQueryCmd(pkg string) string {
-	escapedPkg := shellEscapeSingleQuotes(pkg)
-	return fmt.Sprintf(
-		"sh -c \"apt-get changelog '%s' 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | head -n %d\"",
+	escapedPkg := fmt.Sprintf("'%s'", shellEscapeSingleQuotes(strings.TrimSpace(pkg)))
+	innerCmd := fmt.Sprintf(
+		"apt-get changelog %s 2>/dev/null | grep -Eo 'CVE-[0-9]{4}-[0-9]+' | sort -u | head -n %d",
 		escapedPkg,
 		cveLookupMaxPerPackage,
 	)
+	return fmt.Sprintf("sh -c '%s'", shellEscapeSingleQuotes(innerCmd))
 }
 
 func queryPackageCVEs(client sshConnection, pkg string) ([]string, error) {
@@ -3825,16 +3834,17 @@ func main() {
 		}
 		servers = append(servers, newServer)
 		statusMap[newServer.Name] = &ServerStatus{
-			Name:        newServer.Name,
-			Host:        newServer.Host,
-			Port:        normalizePort(newServer.Port),
-			User:        newServer.User,
-			Status:      "idle",
-			Logs:        "",
-			Upgradable:  []string{},
-			HasPassword: newServer.Pass != "",
-			HasKey:      newServer.Key != "",
-			Tags:        newServer.Tags,
+			Name:           newServer.Name,
+			Host:           newServer.Host,
+			Port:           normalizePort(newServer.Port),
+			User:           newServer.User,
+			Status:         "idle",
+			Logs:           "",
+			Upgradable:     []string{},
+			PendingUpdates: []PendingUpdate{},
+			HasPassword:    newServer.Pass != "",
+			HasKey:         newServer.Key != "",
+			Tags:           newServer.Tags,
 		}
 		if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 			mu.Unlock()
@@ -3903,23 +3913,25 @@ func main() {
 				if updatedServer.Name != name {
 					delete(statusMap, name)
 					statusMap[updatedServer.Name] = &ServerStatus{
-						Name:        updatedServer.Name,
-						Host:        updatedServer.Host,
-						Port:        normalizePort(updatedServer.Port),
-						User:        updatedServer.User,
-						Status:      "idle",
-						Logs:        "",
-						Upgradable:  []string{},
-						HasPassword: updatedServer.Pass != "",
-						HasKey:      updatedServer.Key != "",
-						Tags:        updatedServer.Tags,
+						Name:           updatedServer.Name,
+						Host:           updatedServer.Host,
+						Port:           normalizePort(updatedServer.Port),
+						User:           updatedServer.User,
+						Status:         "idle",
+						Logs:           "",
+						Upgradable:     []string{},
+						PendingUpdates: []PendingUpdate{},
+						HasPassword:    updatedServer.Pass != "",
+						HasKey:         updatedServer.Key != "",
+						Tags:           updatedServer.Tags,
 					}
 				} else {
 					if statusMap[name] == nil {
 						statusMap[name] = &ServerStatus{
-							Name:       updatedServer.Name,
-							Status:     "idle",
-							Upgradable: []string{},
+							Name:           updatedServer.Name,
+							Status:         "idle",
+							Upgradable:     []string{},
+							PendingUpdates: []PendingUpdate{},
 						}
 					}
 					statusMap[name].Host = updatedServer.Host
