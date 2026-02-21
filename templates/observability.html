@@ -28,9 +28,10 @@
         }
 
         .page {
-            max-width: 1200px;
+            width: 100%;
+            max-width: 1360px;
             margin: 0 auto;
-            padding: 24px;
+            padding: 24px clamp(12px, 2.2vw, 34px);
         }
 
         .hero, .card {
@@ -135,7 +136,7 @@
         }
 
         @media (max-width: 720px) {
-            .page { padding: 14px; }
+            .page { padding: 14px 12px; }
             h1 { font-size: 25px; }
         }
     </style>
