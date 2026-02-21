@@ -76,6 +76,8 @@ cp .env-template .env
 - [Architecture](docs/architecture.md)
 - [Contributing](docs/contributing.md)
 
+Choosing between SimpleLinuxUpdater, scripts, and Ansible: see [docs/usage.md](docs/usage.md#how-simplelinuxupdater-compares-to-scripts-and-ansible).
+
 ## Security
 
 This project can run apt commands via `sudo` on remote hosts and stores SSH credentials encrypted in SQLite. Do not expose the UI to the public internet. See [docs/security.md](docs/security.md).

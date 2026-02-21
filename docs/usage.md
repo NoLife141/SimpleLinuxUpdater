@@ -11,6 +11,7 @@
 - [Logs and status](#logs-and-status)
 - [Audit trail](#audit-trail)
 - [Observability and metrics](#observability-and-metrics)
+- [How SimpleLinuxUpdater compares](#how-simplelinuxupdater-compares-to-scripts-and-ansible)
 
 ## Add and manage servers
 
@@ -125,3 +126,67 @@ Metrics:
 - `GET /metrics` (Prometheus text format)
 
 Observability KPIs are computed from `update.complete` audit events.
+
+## How SimpleLinuxUpdater compares to scripts and Ansible
+
+### Overview table
+
+| Aspect                          | SimpleLinuxUpdater                           | Shell/script automation                | Ansible-style automation                     |
+| ------------------------------- | -------------------------------------------- | -------------------------------------- | -------------------------------------------- |
+| **Primary goal**                | Lightweight web UI for Debian/Ubuntu updates | Quick custom commands and scripts      | Full automation and configuration management |
+| **Ease of setup**               | Low (fast UI setup)                          | Very low (simple scripts run anywhere) | Medium (install Ansible, manage inventories) |
+| **Typical use case**            | Manual review and remote update control      | Ad-hoc tasks or one-off automation     | Repeatable automation across many hosts      |
+| **Learning curve**              | Low                                          | Low (if you know shell basics)         | Medium-high (YAML, playbooks, roles)         |
+| **Scale**                       | Small fleets / homelabs                      | Works on small sets, limited structure | Best for large infrastructures               |
+| **Repeatability / idempotence** | Manual (UI driven)                           | Depends on script quality              | Designed for repeatable, idempotent runs     |
+| **Scope**                       | Package updates only                         | Any shell task                         | Updates, configuration, orchestration        |
+
+### Pros and cons
+
+#### SimpleLinuxUpdater
+
+Pros:
+
+- Easy to install and use with a web UI
+- No need to write scripts or playbooks
+- Great for quickly managing updates from one dashboard
+
+Cons:
+
+- Specialized to apt updates
+- Not built for broader automation workflows
+- Not ideal for large automated infrastructures
+
+#### Shell/script automation
+
+Pros:
+
+- Extremely flexible; write exactly what you need
+- No additional tooling required apart from a shell and SSH
+- Good for simple tasks or custom operations
+
+Cons:
+
+- Harder to maintain as complexity grows
+- Less structure for large inventories of hosts
+- Repeatability is up to the script author
+
+#### Ansible-style automation
+
+Pros:
+
+- Structured, scalable automation for many tasks (not just updates)
+- Ideal for configuration management and large fleets
+- Uses playbooks and inventories for repeatable operations
+
+Cons:
+
+- Requires learning Ansible fundamentals (YAML, inventories)
+- More setup and tooling overhead
+- Overkill when all you need is a UI for Debian package updates
+
+### When to choose what
+
+- SimpleLinuxUpdater: if you want a simple web UI to manage Debian/Ubuntu updates without scripts or playbooks
+- Shell/script automation: if you are comfortable with shell and want quick, custom control
+- Ansible-style automation: if you need large-scale automation, configuration, and repeatability across environments
