@@ -2700,7 +2700,6 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			}
 
-			r.approvalScope = normalizeApprovalScope(r.approvalScope)
 			if r.approvalScope == "security" && len(r.approvedPackages) == 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
