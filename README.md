@@ -2,7 +2,7 @@
 
 Version: v0.1.5
 
-A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
+SimpleLinuxUpdater is a self-hosted web UI that helps you manage apt updates on Debian-based servers over SSH. It provides an approval workflow, health checks, audit history, and basic observability so you can update hosts confidently without logging into each machine.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
@@ -10,349 +10,80 @@ A web-based tool written in Go to manage apt updates on Debian-based Linux syste
 
 ![UI demo](.github/assets/ALSU.gif)
 
+## Table of contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Documentation](#documentation)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Overview
+
+SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects to your servers via SSH and runs apt operations with sudo. Updates are gated behind `pending_approval`, and the UI surfaces checks, logs, and audit events.
+
 ## Features
 
-- Manage multiple servers in a web UI (including custom SSH ports)
-- Runs `apt update` and lists upgradable packages
-- Prompts for approval before running `apt upgrade`
-- Supports scoped approval (`all` or `security-only`) during pending approval
-- Enriches pending updates with CVE data from package changelogs (security-first ordering)
-- On-demand `apt autoremove` per server or in bulk
-- Shows live logs and status
-- Includes an Observability dashboard and Prometheus `/metrics` endpoint for update KPIs
+- Multi-server management (custom SSH ports supported)
+- `apt update` + pending package listing, gated behind approval
+- Scoped approval during pending approval: approve all updates or security-only
+- CVE-aware pending updates (best-effort changelog enrichment; security-first ordering)
+- Pre-checks before upgrade and post-update health checks after upgrade
+- On-demand `apt autoremove`
+- Activity history (audit trail) stored in SQLite
+- Observability: `/observability` dashboard and Prometheus `GET /metrics`
 
-## Requirements
+## Quick start
 
-- Go 1.26 or later (for building)
-- Debian-based Linux system with `apt` and `sudo` access
-
-### Sudo (Non-interactive)
-
-The updater uses `sudo apt ...` over SSH. You can enable or disable passwordless apt in-app from the Status page (per server). Enabling modifies sudoers on the remote host by creating `/etc/sudoers.d/apt-nopasswd`; disabling removes it, both after you enter the sudo password once. Restrict who can access the UI and monitor changes (for example, check `/etc/sudoers.d/apt-nopasswd`).
-
-Manual setup (optional):
-
-```
-# As root, replace <user> with your SSH user
-sudo visudo -f /etc/sudoers.d/apt-nopasswd
-```
-
-Add this line:
-
-```
-<user> ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser
-```
-
-This allows non-interactive sudo for update and pre-check commands. The app writes this rule under `/etc/sudoers.d/`. Test on a non-critical host first; optional hardening is to validate with `visudo -c` after changes. If you prefer broader access, adjust accordingly.
-
-## Building
-
-### Web Server Binary
-
-#### On Windows (Cross-Compilation)
-
-1. Install Go from https://golang.org/dl/
-2. Open command prompt in the project directory
-3. Run:
-    ```
-    set GOOS=linux
-    set GOARCH=amd64
-    go build -o webserver webserver.go
-    ```
-4. Transfer the `webserver` binary to your central server, along with `templates/` directory
-
-#### On Linux
-
-1. Clone or copy the code
-2. Run `go build -o webserver webserver.go`
-
-## Usage
-
-### Quickstart (Docker)
-
-```
-docker build -t debian-updater-web .
-cp .env-template .env
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
-```
-
-The web server listens on `:8080` by default.
-
-### Web UI Basic Auth (Recommended)
-
-The app supports built-in HTTP Basic Auth (use this even behind your reverse proxy):
-
-- `DEBIAN_UPDATER_BASIC_AUTH_USER`
-- `DEBIAN_UPDATER_BASIC_AUTH_PASS`
-
-If only one of these is set, the server exits at startup with a configuration error.
-For Docker, `.env` is not loaded automatically unless you pass `--env-file .env`.
-
-Example (binary):
-
-```bash
-DEBIAN_UPDATER_BASIC_AUTH_USER=admin \
-DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me' \
-./webserver
-```
-
-Example (Docker):
+### Docker (official image)
 
 ```bash
 cp .env-template .env
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.5
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.5
 ```
 
-### Quickstart (Binary)
+Open `http://localhost:8080`.
 
-```
-go build -o webserver webserver.go
+### Binary (prebuilt release)
+
+Download the archive for your platform from GitHub Releases and run the included `webserver` binary. Release archives include `templates/`, `static/`, and `.env-template`.
+
+Example (Linux amd64):
+
+```bash
+VERSION="0.1.5"
+APP="SimpleLinuxUpdater_${VERSION}"
+ARCHIVE="${APP}_linux_amd64.tar.gz"
+
+curl -L -o "${ARCHIVE}" "https://github.com/NoLife141/SimpleLinuxUpdater/releases/download/v${VERSION}/${ARCHIVE}"
+tar -xzf "${ARCHIVE}"
+cd "${APP}"
+cp .env-template .env
 ./webserver
 ```
 
-The web server listens on `:8080` by default.
+## Documentation
 
-### Web Server
+- [Installation](docs/installation.md)
+- [Configuration](docs/configuration.md)
+- [Usage](docs/usage.md)
+- [Deployment](docs/deployment.md)
+- [Security](docs/security.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
+- [Contributing](docs/contributing.md)
 
-The web interface allows managing multiple servers:
+## Security
 
-1. Add, edit, or delete servers via the management section.
-   - Authentication can use a password, a per-server SSH key upload, or a global SSH key upload.
-2. Trigger updates: the process will update packages, list available upgrades, and wait for approval.
-3. Approve or cancel upgrades from the web interface.
-4. View real-time logs and status.
+This project can run apt commands via `sudo` on remote hosts and stores SSH credentials encrypted in SQLite. Do not expose the UI to the public internet. See `docs/security.md`.
 
-### Audit Trail / Activity History
+## Contributing
 
-- The Manage page includes an **Activity History** panel.
-- Each entry records: timestamp, actor, action, target, status, and message.
-- Actor is derived from app Basic Auth username when enabled.
-- If Basic Auth is disabled, actor is recorded as `unknown` (or `system` for background tasks).
-- Entries are stored in SQLite (`audit_events` table) and auto-pruned after 90 days.
+See `docs/contributing.md`.
 
-Audit API:
+## License
 
-- `GET /api/audit-events?page=1&page_size=50&target_name=&action=&status=&from=&to=`
-- `POST /api/audit-events/prune` (manual prune trigger)
-
-Example:
-
-```bash
-curl -u admin:change-me "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure&from=2026-02-10T00:00:00Z&to=2026-02-10T23:59:59Z"
-```
-
-### Retry Policy (Transient Failures)
-
-Remote actions (`update`, `autoremove`, `sudoers enable/disable`) use retry with exponential backoff for transient errors (network resets/timeouts, temporary SSH transport issues, apt lock contention). Permanent failures (bad auth, host key verification, invalid config) fail fast without retries.
-
-Defaults:
-
-- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS=3`
-- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS=1000`
-- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS=8000`
-- `DEBIAN_UPDATER_RETRY_JITTER_PCT=20`
-
-Validation rules:
-
-- `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS` must be in `[1,10]`
-- `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` must be `> 0`
-- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `> 0`
-- `DEBIAN_UPDATER_RETRY_JITTER_PCT` must be in `[0,50]`
-- `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` must be `>= DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (otherwise base/max delay fall back to defaults)
-
-If a retry env value is invalid, the app logs a warning and uses defaults.
-
-### Update Pre-Checks (Fail Fast)
-
-Before `apt update` starts, update actions now run mandatory pre-checks over SSH:
-
-- Disk space: checks free space on `/var` and `/` and requires at least `1 GiB` (`1048576 KB`).
-- Lock files: checks apt/dpkg lock contention with `sudo /usr/bin/fuser` and falls back to a process-based check when `fuser` is unavailable.
-- APT health: runs `sudo dpkg --audit` and `sudo apt-get check`.
-
-Lock check behavior:
-
-- If `/usr/bin/fuser` is missing on the remote host, the pre-check falls back to checking whether `apt`, `apt-get`, `dpkg`, or `unattended-upgrade` is running.
-- If a probed lock file path does not exist, this is treated as a no-lock state (non-fatal).
-
-Troubleshooting lock pre-check:
-
-- Missing `fuser` (fallback path):
-  - Example: `sudo: /usr/bin/fuser: command not found`
-  - Example: `sudo: unable to execute /usr/bin/fuser: No such file or directory`
-- Fallback lock is in use (fatal):
-  - `pgrep` fallback exits `0` when apt/dpkg related processes are active.
-- Lock file path missing (non-fatal/no-lock):
-  - Example: `/usr/bin/fuser: /var/cache/apt/archives/lock: No such file or directory`
-- Lock is in use (fatal):
-  - `fuser` exits `0` and reports one or more PIDs holding lock files.
-
-If any pre-check fails, the update stops before entering the normal update/approval flow, status becomes `error`, and logs/audit metadata include the failed check and details.
-
-### Post-Update Health Checks
-
-After a successful `apt upgrade`, the updater runs post-update health checks to validate host health before finalizing update status.
-
-- APT/DPKG health (`sudo dpkg --audit` and `sudo apt-get check`) - blocking by default
-- Failed systemd units (`systemctl --failed --no-legend --plain`) - blocking by default
-- Reboot required marker (`/var/run/reboot-required`) - warning only
-- Optional custom check command (`DEBIAN_UPDATER_POSTCHECK_CMD`) - blocking when configured
-
-Defaults:
-
-- `DEBIAN_UPDATER_POSTCHECKS_ENABLED=true`
-- `DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH=true`
-- `DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS=true`
-- `DEBIAN_UPDATER_POSTCHECK_REBOOT_REQUIRED_WARNING=true`
-- `DEBIAN_UPDATER_POSTCHECK_CMD=` (empty by default)
-
-Outcome behavior:
-
-- If any blocking post-check fails, final status is `error` and logs include `Upgrade completed but post-check failed (...)`.
-- If only warning checks fail (for example reboot required), final status remains `done` with warning details in logs and audit metadata.
-
-### CVE-Aware Pending Approval
-
-During `pending_approval`, the Status page now presents structured pending updates with security-first prioritization.
-
-- Security updates are sorted to the top.
-- CVE enrichment runs asynchronously from `apt-get changelog <package>`, so approval is not blocked.
-- Each package exposes CVE state:
-  - `pending` (lookup in progress)
-  - `ready` (CVE list available)
-  - `unavailable` (lookup failed or timed out)
-  - `skipped` (outside lookup budget)
-- Approval supports two scopes:
-  - `Approve all updates`
-  - `Approve security only`
-
-Notes:
-- CVE data is advisory and best-effort.
-- `Approve security only` runs a targeted `apt-get --only-upgrade` command for approved security packages.
-
-### Observability and Metrics
-
-The app includes a dedicated observability page and a Prometheus-compatible metrics endpoint for update run tracking.
-
-- UI page: `GET /observability`
-- Summary API: `GET /api/observability/summary?window=24h|7d|30d`
-- Metrics endpoint: `GET /metrics`
-
-Current KPI scope is `update.complete` audit events, including:
-
-- Update totals, success/failure counts, and success rate
-- Average execution duration (for events with duration metadata)
-- Failure-cause aggregation (precheck/postcheck/retry/error class)
-
-### Tests and Release
-
-Local test run:
-
-```
-go test ./...
-```
-
-Automated checks:
-
-- CI on pushes/PRs to main runs tests: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-- Release workflow on tag `v*` runs tests, validates version/changelog metadata, builds release archives, and publishes a GitHub Release: [`.github/workflows/release.yml`](.github/workflows/release.yml)
-- Release artifacts are cross-compiled for multiple platforms, but runtime testing is currently performed only on Linux amd64.
-
-### Docker Release Images
-
-Release tags also publish a Docker image to GHCR:
-
-- `ghcr.io/nolife141/simplelinuxupdater:vX.Y.Z`
-- `ghcr.io/nolife141/simplelinuxupdater:latest`
-
-Note: local `docker build` examples use the image name `debian-updater-web`; this is just a local tag and can be changed.
-
-Runtime testing is currently performed on Linux amd64.
-
-```bash
-docker pull ghcr.io/nolife141/simplelinuxupdater:vX.Y.Z
-docker pull ghcr.io/nolife141/simplelinuxupdater:latest
-```
-
-Release checklist (v0.1.0 and later):
-
-- [ ] CI is green on main
-- [ ] `README.md` `Version: vX.Y.Z` matches the release tag
-- [ ] `templates/index.html` version pill matches the release tag
-- [ ] `CHANGELOG.md` contains a `## [vX.Y.Z]` section
-- [ ] Tag pipeline passes and publishes archives/checksums
-- [ ] Dashboard loads and shows version pill
-- [ ] Add/edit server works (including SSH port)
-- [ ] Autoremove and sudoers setup work on a test host
-
-### Encryption Key (Auto-Generated)
-
-Passwords are stored encrypted in SQLite. On first run, the app generates a 32-byte key and saves it to:
-
-- `/data/config.json` (Docker with a volume)
-- `./data/config.json` (local)
-
-Optional DB path override:
-- `DEBIAN_UPDATER_DB_PATH` (defaults to `/data/servers.db` if `/data` exists, otherwise `./data/servers.db`)
-
-### Running with Docker
-
-1. Ensure Docker Desktop is installed and running.
-
-2. Build the Docker image:
-   ```
-   docker build -t debian-updater-web .
-   ```
-
-3. Copy env template and set your credentials:
-
-   ```bash
-   cp .env-template .env
-   ```
-
-4. Run the container:
-
-   ```bash
-   docker run --env-file .env -p 8080:8080 debian-updater-web
-   ```
-
-5. Access the web interface at http://localhost:8080
-
-6. To persist server configurations, use a named volume:
-
-   ```bash
-   docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
-   ```
-
-7. If you use SSH keys, upload the private key from the web UI (global or per-server). The key is stored encrypted in the DB.
-
-## SECURITY
-
-This tool accepts SSH private keys via the web UI, can create `/etc/sudoers.d/apt-nopasswd` on remote hosts, and runs `apt` commands as root via `sudo`.
-
-- The web UI must not be exposed to the public internet.
-- Run it behind a VPN and/or a reverse proxy with authentication.
-- Enable app-level Basic Auth via `DEBIAN_UPDATER_BASIC_AUTH_USER` and `DEBIAN_UPDATER_BASIC_AUTH_PASS`.
-- Secrets (passwords and SSH keys) are stored encrypted in SQLite (`./data/servers.db` or `/data/servers.db`).
-- The encryption key is stored in `./data/config.json` (local) or `/data/config.json` (Docker volume).
-- If an attacker obtains both the SQLite database and the config file (or mounted volume), they can decrypt stored secrets.
-
-## Threat Model / Limitations
-
-- Basic Auth is optional and disabled unless configured via env vars.
-- No TLS termination by default; use a VPN or reverse proxy for HTTPS.
-- Intended for trusted LAN/VPN environments only.
-- Designed for Debian-family hosts (e.g., Debian, Ubuntu, Linux Mint).
-
-## Notes
-
-- Requires sudo access for apt commands on the remote hosts
-- Assumes amd64 architecture; adjust GOARCH if needed
-- On first run, the app will import `servers.json` if present, then switch to SQLite
-- Uploaded SSH key files are limited to 64KB
-- Default known_hosts path is next to the DB (Docker default: `/data/known_hosts`); override with `DEBIAN_UPDATER_KNOWN_HOSTS` (colon-separated paths)
-- In Add/Edit server forms, "Trust SSH host key now" scans the server key, shows its fingerprint, and appends it to known_hosts after confirmation
-
-License
-
-MIT © NoLife141
+MIT. See `LICENSE`.
