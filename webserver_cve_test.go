@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -271,17 +272,15 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 	}
 	cveConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			postcheckFailedUnitsCmd:            {},
 			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
 			buildPackageCVEQueryCmd("bash"):    {},
 		},
 	}
 
 	origDial := dialSSHConnection
-	dialCalls := 0
+	var dialCalls int32
 	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		dialCalls++
-		if dialCalls == 1 {
+		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
 		return cveConn, nil
@@ -376,17 +375,15 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 	}
 	cveConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			postcheckFailedUnitsCmd:            {},
 			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
 			buildPackageCVEQueryCmd("bash"):    {},
 		},
 	}
 
 	origDial := dialSSHConnection
-	dialCalls := 0
+	var dialCalls int32
 	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		dialCalls++
-		if dialCalls == 1 {
+		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
 		return cveConn, nil
@@ -507,16 +504,14 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 	}
 	cveConn := &scriptedSSHConnection{
 		responses: map[string]scriptedResponse{
-			postcheckFailedUnitsCmd:            {},
 			buildPackageCVEQueryCmd("openssl"): {err: errors.New("lookup failed")},
 		},
 	}
 
 	origDial := dialSSHConnection
-	dialCalls := 0
+	var dialCalls int32
 	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		dialCalls++
-		if dialCalls == 1 {
+		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
 		return cveConn, nil

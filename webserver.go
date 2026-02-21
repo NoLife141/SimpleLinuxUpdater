@@ -2301,8 +2301,8 @@ type withActorRunner struct {
 	startedAt  time.Time
 	approvedAt time.Time
 
-	approvalScope   string
-	approvedPackage []string
+	approvalScope    string
+	approvedPackages []string
 
 	config *ssh.ClientConfig
 	client sshConnection
@@ -2497,8 +2497,8 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"upgrade_completed":             r.upgradeCompleted,
 		"pre_update_failed_units":       r.preUpdateFailedUnits,
 		"approval_scope":                approvalScope,
-		"approved_package_count":        len(r.approvedPackage),
-		"approved_packages":             append([]string(nil), r.approvedPackage...),
+		"approved_package_count":        len(r.approvedPackages),
+		"approved_packages":             append([]string(nil), r.approvedPackages...),
 	}
 	if !r.startedAt.IsZero() {
 		meta["total_elapsed_ms"] = time.Since(r.startedAt).Milliseconds()
@@ -2676,9 +2676,9 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					if status.Status == "approved" {
 						r.approvalScope = normalizeApprovalScope(status.ApprovalScope)
 						if r.approvalScope == "security" {
-							r.approvedPackage = securityPackagesFromPendingUpdates(status.PendingUpdates)
+							r.approvedPackages = securityPackagesFromPendingUpdates(status.PendingUpdates)
 						} else {
-							r.approvedPackage = packageNamesFromPendingUpdates(status.PendingUpdates)
+							r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
 						}
 						approved = true
 					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
@@ -2701,7 +2701,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			}
 
 			r.approvalScope = normalizeApprovalScope(r.approvalScope)
-			if r.approvalScope == "security" && len(r.approvedPackage) == 0 {
+			if r.approvalScope == "security" && len(r.approvedPackages) == 0 {
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
 					status.ApprovalScope = ""
@@ -2719,7 +2719,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				status.PendingUpdates = nil
 				switch r.approvalScope {
 				case "security":
-					status.Logs += fmt.Sprintf("\nApproval received: security-only upgrade (%d package(s)).", len(r.approvedPackage))
+					status.Logs += fmt.Sprintf("\nApproval received: security-only upgrade (%d package(s)).", len(r.approvedPackages))
 				default:
 					status.Logs += "\nApproval received: all pending upgrades."
 				}
@@ -2729,7 +2729,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 			stderr.Reset()
 			upgradeCmd := aptUpgradeCmd
 			if r.approvalScope == "security" {
-				selectedCmd := buildSelectedUpgradeCmd(r.approvedPackage)
+				selectedCmd := buildSelectedUpgradeCmd(r.approvedPackages)
 				if selectedCmd == "" {
 					r.lastErrClass = "permanent"
 					r.setErrorLogs(r.currentLogs() + "\nError: could not build security-only apt command from approved package set")
@@ -3124,7 +3124,6 @@ func isSecurityUpdate(raw, source string) bool {
 		"debian-security",
 		"-security",
 		"/security",
-		"ubuntuesm",
 		"esm-apps",
 		"esm-infra",
 		"ubuntu-security",
@@ -3329,13 +3328,18 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 	go func() {
 		cveClient, err := dialSSHConnection(server, &configCopy)
 		if err != nil {
-			log.Printf("CVE enrichment dial failed for server %q: %v", server.Name, err)
-			for _, pkg := range packages {
-				if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
-					return
+			log.Printf("CVE enrichment dial attempt 1 failed for server %q: %v", server.Name, err)
+			time.Sleep(250 * time.Millisecond)
+			cveClient, err = dialSSHConnection(server, &configCopy)
+			if err != nil {
+				log.Printf("CVE enrichment dial attempt 2 failed for server %q: %v", server.Name, err)
+				for _, pkg := range packages {
+					if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
+						return
+					}
 				}
+				return
 			}
-			return
 		}
 		defer func() { _ = cveClient.Close() }()
 
@@ -4431,11 +4435,12 @@ func main() {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if cancelled {
-			audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
-		} else {
+		if !cancelled {
 			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
 		}
+		audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
 	})
 
