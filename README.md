@@ -1,11 +1,11 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.4
+Version: v0.1.5
 
 A web-based tool written in Go to manage apt updates on Debian-based Linux systems over SSH.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white)](https://go.dev/dl/)
 [![CI](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml/badge.svg)](https://github.com/NoLife141/SimpleLinuxUpdater/actions/workflows/ci.yml)
 
 ![UI demo](.github/assets/ALSU.gif)
@@ -15,12 +15,15 @@ A web-based tool written in Go to manage apt updates on Debian-based Linux syste
 - Manage multiple servers in a web UI (including custom SSH ports)
 - Runs `apt update` and lists upgradable packages
 - Prompts for approval before running `apt upgrade`
+- Supports scoped approval (`all` or `security-only`) during pending approval
+- Enriches pending updates with CVE data from package changelogs (security-first ordering)
 - On-demand `apt autoremove` per server or in bulk
 - Shows live logs and status
+- Includes an Observability dashboard and Prometheus `/metrics` endpoint for update KPIs
 
 ## Requirements
 
-- Go 1.25 or later (for building)
+- Go 1.26 or later (for building)
 - Debian-based Linux system with `apt` and `sudo` access
 
 ### Sudo (Non-interactive)
@@ -207,6 +210,39 @@ Outcome behavior:
 
 - If any blocking post-check fails, final status is `error` and logs include `Upgrade completed but post-check failed (...)`.
 - If only warning checks fail (for example reboot required), final status remains `done` with warning details in logs and audit metadata.
+
+### CVE-Aware Pending Approval
+
+During `pending_approval`, the Status page now presents structured pending updates with security-first prioritization.
+
+- Security updates are sorted to the top.
+- CVE enrichment runs asynchronously from `apt-get changelog <package>`, so approval is not blocked.
+- Each package exposes CVE state:
+  - `pending` (lookup in progress)
+  - `ready` (CVE list available)
+  - `unavailable` (lookup failed or timed out)
+  - `skipped` (outside lookup budget)
+- Approval supports two scopes:
+  - `Approve all updates`
+  - `Approve security only`
+
+Notes:
+- CVE data is advisory and best-effort.
+- `Approve security only` runs a targeted `apt-get --only-upgrade` command for approved security packages.
+
+### Observability and Metrics
+
+The app includes a dedicated observability page and a Prometheus-compatible metrics endpoint for update run tracking.
+
+- UI page: `GET /observability`
+- Summary API: `GET /api/observability/summary?window=24h|7d|30d`
+- Metrics endpoint: `GET /metrics`
+
+Current KPI scope is `update.complete` audit events, including:
+
+- Update totals, success/failure counts, and success rate
+- Average execution duration (for events with duration metadata)
+- Failure-cause aggregation (precheck/postcheck/retry/error class)
 
 ### Tests and Release
 

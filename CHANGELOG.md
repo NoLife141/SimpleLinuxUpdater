@@ -18,6 +18,29 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.5] - 2026-02-21
+
+### Added
+
+- Add CVE-aware pending approval view with structured pending updates sorted security-first.
+- Add asynchronous CVE enrichment from package changelogs with per-package states (`pending`, `ready`, `unavailable`, `skipped`).
+- Add scoped approval actions for pending updates (`all` and `security-only`).
+- Add observability dashboard page (`/observability`) and summary API (`/api/observability/summary`) with 24h/7d/30d windows.
+- Add Prometheus-compatible metrics endpoint (`/metrics`) for update success rate, duration, and failure causes.
+
+### Changed
+
+- Align toolchain/dependency baseline with Go `1.26` and updated module dependencies.
+- Improve status-page UX for pending approval and log/pending details presentation.
+- Track richer update completion metadata for observability and approval scope reporting.
+
+### Fixed
+
+- Fix approval/cancel API semantics to return conflict when server is not in `pending_approval`.
+- Harden CVE lookup flow with command timeout, safer command construction, and retry handling for enrichment SSH dial.
+- Reduce security-source false positives by replacing broad `-security` substring matching with stricter suite-token matching.
+- Improve timeout command handling to avoid lingering goroutine/buffer ownership issues in SSH command execution.
+
 ## [v0.1.4] - 2026-02-13
 
 ### Changed
