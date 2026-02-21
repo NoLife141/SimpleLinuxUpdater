@@ -96,10 +96,27 @@ jobs:
             sha256sum *.tar.gz *.zip > checksums.txt
           )
 
+      - name: Build release notes from CHANGELOG
+        id: release_notes
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          NOTES_FILE="dist/release_notes.md"
+          awk -v tag="$TAG" '
+            $0 ~ "^## \\[" tag "\\]" {capture=1}
+            capture && $0 ~ "^## \\[" && $0 !~ "^## \\[" tag "\\]" {exit}
+            capture {print}
+          ' CHANGELOG.md > "$NOTES_FILE"
+          if [ ! -s "$NOTES_FILE" ]; then
+            echo "Failed to extract release notes for $TAG from CHANGELOG.md" >&2
+            exit 1
+          fi
+          echo "path=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.release_notes.outputs.path }}
           files: |
             dist/*.tar.gz
             dist/*.zip
