@@ -467,6 +467,13 @@
         .log-line-success { color: #86efac; }
         .log-line-info { color: #93c5fd; }
 
+        .name-col { width: 230px; min-width: 190px; }
+        .name-cell {
+            max-width: 280px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .logs-col { width: 48%; min-width: 380px; }
         .actions-col { width: 170px; min-width: 170px; }
         .status-col { width: 190px; min-width: 190px; }
@@ -533,6 +540,12 @@
             .hero { padding: 22px; }
             h1 { font-size: 26px; }
             table { min-width: 460px; }
+            .name-cell {
+                max-width: none;
+                white-space: normal;
+                overflow: visible;
+                text-overflow: clip;
+            }
             .hero { padding-left: 22px; }
             .hero-logo { position: static; width: 220px; height: 220px; margin-bottom: 12px; }
         }
@@ -594,7 +607,7 @@
                     <thead>
                         <tr>
                             <th></th>
-                            <th class="sortable" data-sort-key="name">Server</th>
+                            <th class="sortable name-col" data-sort-key="name">Server</th>
                             <th class="sortable status-col" data-sort-key="status">Status</th>
                             <th class="actions-col">Actions</th>
                             <th class="logs-col">Logs</th>
@@ -633,6 +646,7 @@
         let page = 1;
         let expandedLogs = new Set();
         let selectedServers = new Set();
+        let expandedPendingDetails = new Set();
         let hoveredName = null;
         let interactingWithLogs = false;
         let lastLogInteractionAt = 0;
@@ -725,6 +739,8 @@
             if (server.status !== "pending_approval") return "";
             const updates = Array.isArray(server.pending_updates) ? server.pending_updates : [];
             if (updates.length === 0) return "";
+            const detailName = String(server.name || "");
+            const detailsOpen = expandedPendingDetails.has(detailName);
 
             const hasPending = updates.some(u => String(u.cve_state || "").toLowerCase() === "pending");
             const securityCount = updates.filter(u => !!u.security).length;
@@ -778,7 +794,7 @@
                         <span class="pending-badge">${stateCounts.pending || 0} scanning</span>
                         <span class="pending-badge">${stateCounts.unavailable || 0} unavailable</span>
                         <span class="pending-badge">${stateCounts.skipped || 0} skipped</span>
-                        <details>
+                        <details class="pending-details" data-name="${escapeHtml(detailName)}" ${detailsOpen ? "open" : ""}>
                             <summary>Show package details</summary>
                             <div class="table-wrap">
                                 <table class="pending-table">
@@ -964,7 +980,7 @@
                           `;
                     row.innerHTML = `
                         <td><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
-                        <td>${safeNameHtml}</td>
+                        <td class="name-cell" title="${safeNameHtml}">${safeNameHtml}</td>
                         <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="actions-col">${actionButtons}</td>
                         <td class="logs-col">
@@ -1001,6 +1017,17 @@
                     markLogInteraction();
                     scrollPositions[name] = div.scrollTop;
                     followLogs[name] = isNearBottom(div);
+                });
+            });
+            tbody.querySelectorAll('.pending-details').forEach(details => {
+                details.addEventListener('toggle', () => {
+                    const name = details.dataset.name;
+                    if (!name) return;
+                    if (details.open) {
+                        expandedPendingDetails.add(name);
+                    } else {
+                        expandedPendingDetails.delete(name);
+                    }
                 });
             });
             applyHoverClass();
