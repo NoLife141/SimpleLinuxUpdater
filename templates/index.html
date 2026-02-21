@@ -159,19 +159,29 @@
             box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
         }
 
-        button:hover { transform: translateY(-1px); }
+        button:hover, .btn-link:hover { transform: translateY(-1px); }
         button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
-        .btn-ghost,
-        .btn-link {
+        .btn-ghost {
             background: transparent;
             border: 1px solid rgba(255, 255, 255, 0.18);
             color: var(--text);
             box-shadow: none;
+        }
+
+        .btn-link {
+            background: linear-gradient(135deg, #38bdf8, #22d3ee);
+            border: none;
+            color: #051019;
+            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
             text-decoration: none;
             display: inline-flex;
             align-items: center;
             justify-content: center;
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
         }
 
         .btn-danger {
@@ -430,6 +440,7 @@
             <div class="version-pill">Version v0.1.4</div>
             <div class="nav">
                 <a class="btn-link" href="/manage">Manage Servers</a>
+                <a class="btn-link" href="/observability">Observability</a>
             </div>
         </header>
 
@@ -747,7 +758,7 @@
                     const actionButtons = server.status === 'pending_approval'
                         ? `
                             <button onclick="approveUpgrade('${safeNameJs}')">Approve Upgrade</button>
-                            <button onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
+                            <button class="btn-danger" onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
                           `
                         : `
                             <button onclick="updateServer('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Update</button>

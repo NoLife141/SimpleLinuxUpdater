@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,8 @@ var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
 var auditPruneTickerOnce sync.Once
+var observabilityCacheMu sync.RWMutex
+var observabilityCache = make(map[string]observabilityCacheEntry)
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -81,6 +84,7 @@ const auditRetentionDays = 90
 const auditPruneInterval = 12 * time.Hour
 const auditMessageMaxLen = 512
 const auditMetaMaxLen = 2048
+const observabilityMetricsCacheTTL = 45 * time.Second
 const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
@@ -107,11 +111,13 @@ const postcheckNameAptHealth = "post_apt_health"
 const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
+const updateCompleteAction = "update.complete"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
 var errActionInProgress = errors.New("action already in progress")
 var errFingerprintMismatch = errors.New("host key fingerprint mismatch")
+var errInvalidWindow = errors.New("invalid observability window")
 
 type AuditEvent struct {
 	ID         int64  `json:"id"`
@@ -125,6 +131,40 @@ type AuditEvent struct {
 	MetaJSON   string `json:"meta_json"`
 	RequestID  string `json:"request_id"`
 	ClientIP   string `json:"client_ip"`
+}
+
+type observabilityFailureItem struct {
+	Cause string `json:"cause"`
+	Count int    `json:"count"`
+}
+
+type observabilityStatusItem struct {
+	Status string `json:"status"`
+	Count  int    `json:"count"`
+}
+
+type observabilitySummaryResponse struct {
+	Window string `json:"window"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+	Totals struct {
+		UpdatesTotal   int     `json:"updates_total"`
+		UpdatesSuccess int     `json:"updates_success"`
+		UpdatesFailure int     `json:"updates_failure"`
+		SuccessRatePct float64 `json:"success_rate_pct"`
+	} `json:"totals"`
+	Duration struct {
+		AvgMS                  float64 `json:"avg_ms"`
+		SamplesWithDuration    int     `json:"samples_with_duration"`
+		SamplesWithoutDuration int     `json:"samples_without_duration"`
+	} `json:"duration"`
+	FailureCauses   []observabilityFailureItem `json:"failure_causes"`
+	StatusBreakdown []observabilityStatusItem  `json:"status_breakdown"`
+}
+
+type observabilityCacheEntry struct {
+	summary  observabilitySummaryResponse
+	cachedAt time.Time
 }
 
 type RetryPolicy struct {
@@ -1422,6 +1462,317 @@ func handleAuditEvents(c *gin.Context) {
 	})
 }
 
+func parseObservabilityWindow(raw string) (string, time.Duration, error) {
+	window := strings.TrimSpace(strings.ToLower(raw))
+	if window == "" {
+		window = "7d"
+	}
+	switch window {
+	case "24h":
+		return window, 24 * time.Hour, nil
+	case "7d":
+		return window, 7 * 24 * time.Hour, nil
+	case "30d":
+		return window, 30 * 24 * time.Hour, nil
+	default:
+		return "", 0, fmt.Errorf("%w: %q", errInvalidWindow, raw)
+	}
+}
+
+func metaStringValue(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return ""
+	}
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", v))
+	}
+}
+
+func metaBoolValue(meta map[string]any, key string) (bool, bool) {
+	if meta == nil {
+		return false, false
+	}
+	raw, ok := meta[key]
+	if !ok {
+		return false, false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		if err != nil {
+			return false, false
+		}
+		return parsed, true
+	default:
+		return false, false
+	}
+}
+
+func metaDurationMS(meta map[string]any) (float64, bool) {
+	if meta == nil {
+		return 0, false
+	}
+	raw, ok := meta["execution_duration_ms"]
+	if !ok {
+		raw, ok = meta["duration_ms"]
+	}
+	if !ok {
+		return 0, false
+	}
+	switch v := raw.(type) {
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return 0, false
+		}
+		return v, true
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
+}
+
+func failureCauseFromMeta(meta map[string]any, metaValid bool) string {
+	if !metaValid {
+		return "unknown"
+	}
+	if precheck := metaStringValue(meta, "precheck_failed"); precheck != "" {
+		return "precheck:" + precheck
+	}
+	if postcheck := metaStringValue(meta, "postcheck_failed"); postcheck != "" {
+		return "postcheck:" + postcheck
+	}
+	if retryExhausted, ok := metaBoolValue(meta, "retry_exhausted"); ok && retryExhausted {
+		return "retry_exhausted"
+	}
+	if errClass := strings.ToLower(metaStringValue(meta, "last_error_class")); errClass != "" && errClass != "none" {
+		return "error_class:" + errClass
+	}
+	return "unknown"
+}
+
+func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySummaryResponse, error) {
+	window, span, err := parseObservabilityWindow(rawWindow)
+	if err != nil {
+		return observabilitySummaryResponse{}, err
+	}
+	to := now.UTC()
+	from := to.Add(-span)
+
+	summary := observabilitySummaryResponse{
+		Window: window,
+		From:   from.Format(time.RFC3339),
+		To:     to.Format(time.RFC3339),
+	}
+	summary.StatusBreakdown = []observabilityStatusItem{
+		{Status: "success", Count: 0},
+		{Status: "failure", Count: 0},
+	}
+	failureCauseCounts := map[string]int{}
+
+	db := getDB()
+	rows, err := db.Query(
+		`SELECT status, meta_json FROM audit_events
+		WHERE action = ? AND created_at >= ? AND created_at <= ?`,
+		updateCompleteAction,
+		from.Format(time.RFC3339),
+		to.Format(time.RFC3339),
+	)
+	if err != nil {
+		return observabilitySummaryResponse{}, err
+	}
+	defer rows.Close()
+
+	var durationTotal float64
+	for rows.Next() {
+		var status string
+		var metaJSON string
+		if scanErr := rows.Scan(&status, &metaJSON); scanErr != nil {
+			return observabilitySummaryResponse{}, scanErr
+		}
+		normalizedStatus := strings.ToLower(strings.TrimSpace(status))
+		if normalizedStatus != "success" && normalizedStatus != "failure" {
+			continue
+		}
+
+		summary.Totals.UpdatesTotal++
+		if normalizedStatus == "success" {
+			summary.Totals.UpdatesSuccess++
+		} else {
+			summary.Totals.UpdatesFailure++
+		}
+		for i := range summary.StatusBreakdown {
+			if summary.StatusBreakdown[i].Status == normalizedStatus {
+				summary.StatusBreakdown[i].Count++
+				break
+			}
+		}
+
+		meta := map[string]any{}
+		metaValid := false
+		if trimmed := strings.TrimSpace(metaJSON); trimmed != "" {
+			if unmarshalErr := json.Unmarshal([]byte(trimmed), &meta); unmarshalErr == nil {
+				metaValid = true
+			}
+		}
+
+		if durationMS, ok := metaDurationMS(meta); ok {
+			durationTotal += durationMS
+			summary.Duration.SamplesWithDuration++
+		} else {
+			summary.Duration.SamplesWithoutDuration++
+		}
+
+		if normalizedStatus == "failure" {
+			cause := failureCauseFromMeta(meta, metaValid)
+			failureCauseCounts[cause]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return observabilitySummaryResponse{}, err
+	}
+
+	if summary.Totals.UpdatesTotal > 0 {
+		summary.Totals.SuccessRatePct = (float64(summary.Totals.UpdatesSuccess) / float64(summary.Totals.UpdatesTotal)) * 100
+	}
+	if summary.Duration.SamplesWithDuration > 0 {
+		summary.Duration.AvgMS = durationTotal / float64(summary.Duration.SamplesWithDuration)
+	}
+
+	summary.FailureCauses = make([]observabilityFailureItem, 0, len(failureCauseCounts))
+	for cause, count := range failureCauseCounts {
+		summary.FailureCauses = append(summary.FailureCauses, observabilityFailureItem{
+			Cause: cause,
+			Count: count,
+		})
+	}
+	sort.Slice(summary.FailureCauses, func(i, j int) bool {
+		if summary.FailureCauses[i].Count == summary.FailureCauses[j].Count {
+			return summary.FailureCauses[i].Cause < summary.FailureCauses[j].Cause
+		}
+		return summary.FailureCauses[i].Count > summary.FailureCauses[j].Count
+	})
+
+	return summary, nil
+}
+
+func handleObservabilitySummary(c *gin.Context) {
+	window := c.Query("window")
+	summary, err := buildObservabilitySummary(window, time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, errInvalidWindow) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
+			return
+		}
+		log.Printf("handleObservabilitySummary: failed to build summary for window=%q: %v", window, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build observability summary"})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+func prometheusEscapeLabel(v string) string {
+	value := strings.ReplaceAll(v, `\`, `\\`)
+	value = strings.ReplaceAll(value, `"`, `\"`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return value
+}
+
+func metricsSummaryCacheKey(window string) string {
+	return dbPath() + "|" + window
+}
+
+func getMetricsSummary(window string, now time.Time) (observabilitySummaryResponse, error) {
+	cacheKey := metricsSummaryCacheKey(window)
+
+	observabilityCacheMu.RLock()
+	if entry, ok := observabilityCache[cacheKey]; ok && now.Sub(entry.cachedAt) < observabilityMetricsCacheTTL {
+		observabilityCacheMu.RUnlock()
+		return entry.summary, nil
+	}
+	observabilityCacheMu.RUnlock()
+
+	summary, err := buildObservabilitySummary(window, now)
+	if err != nil {
+		return observabilitySummaryResponse{}, err
+	}
+
+	observabilityCacheMu.Lock()
+	observabilityCache[cacheKey] = observabilityCacheEntry{
+		summary:  summary,
+		cachedAt: now,
+	}
+	observabilityCacheMu.Unlock()
+
+	return summary, nil
+}
+
+func handleMetrics(c *gin.Context) {
+	windows := []string{"24h", "7d", "30d"}
+	summaries := make([]observabilitySummaryResponse, 0, len(windows))
+	now := time.Now().UTC()
+	for _, window := range windows {
+		summary, err := getMetricsSummary(window, now)
+		if err != nil {
+			log.Printf("handleMetrics: failed to build summary for window=%q: %v", window, err)
+			c.String(http.StatusInternalServerError, "failed to build metrics\n")
+			return
+		}
+		summaries = append(summaries, summary)
+	}
+
+	var b strings.Builder
+
+	b.WriteString("# HELP simplelinuxupdater_update_runs Number of completed update runs by status in the selected window.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_runs gauge\n")
+	for _, summary := range summaries {
+		fmt.Fprintf(&b, "simplelinuxupdater_update_runs{window=%q,status=%q} %d\n", summary.Window, "success", summary.Totals.UpdatesSuccess)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_runs{window=%q,status=%q} %d\n", summary.Window, "failure", summary.Totals.UpdatesFailure)
+	}
+
+	b.WriteString("# HELP simplelinuxupdater_update_success_rate_percent Update success rate percentage in the selected window.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_success_rate_percent gauge\n")
+	for _, summary := range summaries {
+		fmt.Fprintf(&b, "simplelinuxupdater_update_success_rate_percent{window=%q} %.4f\n", summary.Window, summary.Totals.SuccessRatePct)
+	}
+
+	b.WriteString("# HELP simplelinuxupdater_update_duration_avg_milliseconds Average update duration in milliseconds for samples with duration data.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_duration_avg_milliseconds gauge\n")
+	for _, summary := range summaries {
+		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_avg_milliseconds{window=%q} %.4f\n", summary.Window, summary.Duration.AvgMS)
+	}
+
+	b.WriteString("# HELP simplelinuxupdater_update_duration_samples Number of update samples with/without duration metadata.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_duration_samples gauge\n")
+	for _, summary := range summaries {
+		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples{window=%q,kind=%q} %d\n", summary.Window, "with_duration", summary.Duration.SamplesWithDuration)
+		fmt.Fprintf(&b, "simplelinuxupdater_update_duration_samples{window=%q,kind=%q} %d\n", summary.Window, "without_duration", summary.Duration.SamplesWithoutDuration)
+	}
+
+	b.WriteString("# HELP simplelinuxupdater_update_failures_by_cause Number of failed update runs grouped by failure cause.\n")
+	b.WriteString("# TYPE simplelinuxupdater_update_failures_by_cause gauge\n")
+	for _, summary := range summaries {
+		for _, failure := range summary.FailureCauses {
+			fmt.Fprintf(&b, "simplelinuxupdater_update_failures_by_cause{window=%q,cause=\"%s\"} %d\n", summary.Window, prometheusEscapeLabel(failure.Cause), failure.Count)
+		}
+	}
+
+	c.Data(http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
+}
+
 func actorFromContext(c *gin.Context) string {
 	if c == nil {
 		return "system"
@@ -1848,10 +2199,12 @@ func runUpdate(server Server) {
 }
 
 type withActorRunner struct {
-	server   Server
-	actor    string
-	clientIP string
-	policy   RetryPolicy
+	server     Server
+	actor      string
+	clientIP   string
+	policy     RetryPolicy
+	startedAt  time.Time
+	approvedAt time.Time
 
 	config *ssh.ClientConfig
 	client sshConnection
@@ -1967,6 +2320,7 @@ func runWithActorShared(
 		clientIP:     clientIP,
 		policy:       policy,
 		lastErrClass: "none",
+		startedAt:    time.Now().UTC(),
 	}
 	if auditMeta == nil {
 		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
@@ -2021,7 +2375,7 @@ func doneOnlyOutcome(finalStatus string) string {
 }
 
 func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
-	return map[string]any{
+	meta := map[string]any{
 		"status":                        finalStatus,
 		"ssh_dial_attempts_used":        r.sshDialAttempts,
 		"apt_update_attempts_used":      r.aptUpdateAttempts,
@@ -2041,6 +2395,13 @@ func updateRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]an
 		"upgrade_completed":             r.upgradeCompleted,
 		"pre_update_failed_units":       r.preUpdateFailedUnits,
 	}
+	if !r.startedAt.IsZero() {
+		meta["total_elapsed_ms"] = time.Since(r.startedAt).Milliseconds()
+	}
+	if !r.approvedAt.IsZero() {
+		meta["execution_duration_ms"] = time.Since(r.approvedAt).Milliseconds()
+	}
+	return meta
 }
 
 func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]any {
@@ -2061,7 +2422,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		actor,
 		clientIP,
 		policy,
-		"update.complete",
+		updateCompleteAction,
 		func(status *ServerStatus, policy RetryPolicy) {
 			status.Status = "updating"
 			status.Upgradable = nil
@@ -2208,6 +2569,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 				mu.Unlock()
 				if approved {
+					r.approvedAt = time.Now().UTC()
 					break
 				}
 				if cancelledOrTimeout {
@@ -2945,6 +3307,12 @@ func main() {
 		c.HTML(http.StatusOK, "manage.html", nil)
 	})
 
+	r.GET("/observability", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "observability.html", nil)
+	})
+
+	r.GET("/metrics", handleMetrics)
+
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
 		var statuses []ServerStatus
@@ -3305,6 +3673,7 @@ func main() {
 	})
 
 	r.GET("/api/audit-events", handleAuditEvents)
+	r.GET("/api/observability/summary", handleObservabilitySummary)
 
 	r.POST("/api/audit-events/prune", func(c *gin.Context) {
 		if err := pruneAuditEvents(auditRetentionDays); err != nil {

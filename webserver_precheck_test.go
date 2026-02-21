@@ -335,4 +335,14 @@ func TestRunUpdateWithActorPrecheckFailureStopsBeforeAptUpdate(t *testing.T) {
 	if _, ok := meta["precheck_results"]; !ok {
 		t.Fatalf("missing precheck_results in audit metadata: %v", meta)
 	}
+	totalElapsedMS, ok := meta["total_elapsed_ms"].(float64)
+	if !ok {
+		t.Fatalf("missing total_elapsed_ms in audit metadata: %v", meta)
+	}
+	if totalElapsedMS < 0 {
+		t.Fatalf("total_elapsed_ms = %v, want >= 0", totalElapsedMS)
+	}
+	if _, ok := meta["execution_duration_ms"]; ok {
+		t.Fatalf("execution_duration_ms should not be set before approval: %v", meta)
+	}
 }
