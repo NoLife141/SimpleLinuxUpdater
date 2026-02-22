@@ -7,6 +7,8 @@
 - [Docker (recommended)](#docker-recommended)
 - [GHCR images](#ghcr-images)
 - [Binary deployment](#binary-deployment)
+- [First-run setup and login](#first-run-setup-and-login)
+- [Metrics scraping](#metrics-scraping)
 - [Reverse proxy and HTTPS](#reverse-proxy-and-https)
 - [Data persistence](#data-persistence)
 
@@ -49,19 +51,47 @@ Wants=network-online.target
 WorkingDirectory=/opt/simplelinuxupdater
 ExecStart=/opt/simplelinuxupdater/webserver
 Restart=on-failure
-Environment=DEBIAN_UPDATER_BASIC_AUTH_USER=admin
-Environment=DEBIAN_UPDATER_BASIC_AUTH_PASS=change-me
+Environment=DEBIAN_UPDATER_METRICS_BEARER_TOKEN=change-me
+Environment=DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true
 
 [Install]
 WantedBy=multi-user.target
+```
+
+## First-run setup and login
+
+After deployment:
+
+1. Open `/setup` (or `/`) and create the local admin user.
+2. Sign in at `/login`.
+3. Use `/api/auth/logout` or the UI logout action to end sessions.
+
+Only one local user is supported by design.
+
+## Metrics scraping
+
+`/metrics` requires bearer auth.
+
+Prometheus example:
+
+```yaml
+scrape_configs:
+  - job_name: simplelinuxupdater
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["simplelinuxupdater:8080"]
+    authorization:
+      type: Bearer
+      credentials: YOUR_METRICS_TOKEN
 ```
 
 ## Reverse proxy and HTTPS
 
 The app does not terminate TLS by default. For production:
 
-- Put it behind a reverse proxy (nginx, Caddy, Traefik) for HTTPS
-- Use Basic Auth and restrict access to your LAN/VPN
+- Put it behind a reverse proxy (nginx, Caddy, Traefik) for HTTPS.
+- Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` under HTTPS.
+- Restrict access to your LAN/VPN.
 
 ## Data persistence
 

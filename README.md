@@ -34,6 +34,7 @@ SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects t
 - On-demand `apt autoremove`
 - Activity history (audit trail) stored in SQLite
 - Observability: `/observability` dashboard and Prometheus `GET /metrics`
+- Built-in single-user login with first-run setup, Argon2id password hashing, and SQLite-backed sessions
 
 ## Quick start
 
@@ -46,6 +47,13 @@ docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nol
 ```
 
 Open `http://localhost:8080`.
+
+On first run, you will be redirected to `/setup` to create the local admin account.
+After setup, sign in at `/login`.
+
+For Prometheus, configure your scraper with:
+
+- `Authorization: Bearer <DEBIAN_UPDATER_METRICS_BEARER_TOKEN>`
 
 ### Binary (prebuilt release)
 

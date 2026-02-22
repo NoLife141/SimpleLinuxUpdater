@@ -551,6 +551,7 @@
             <div class="nav">
                 <a class="btn-link" href="/">View Status</a>
                 <a class="btn-link" href="/observability">Observability</a>
+                <button class="btn-link" type="button" id="logout-btn">Logout</button>
             </div>
         </header>
 
@@ -715,6 +716,16 @@
     </div>
 
     <script>
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+            const response = await nativeFetch(...args);
+            if (response.status === 401) {
+                window.location.href = '/login';
+                throw new Error('Authentication required');
+            }
+            return response;
+        };
+
         let serverCache = {};
         let sortKey = "name";
         let sortDir = "asc";
@@ -1290,6 +1301,16 @@
             status.textContent = data.has_key ? 'Global key: saved' : 'Global key: not set';
         }
 
+        async function logout() {
+            try {
+                await nativeFetch('/api/auth/logout', { method: 'POST' });
+            } catch (_) {
+                // Best effort.
+            }
+            window.location.href = '/login';
+        }
+
+        document.getElementById('logout-btn').addEventListener('click', logout);
         fetchManageServers();
         fetchGlobalKeyStatus();
         fetchAuditEvents();

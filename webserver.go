@@ -90,8 +90,6 @@ var observabilityCache = make(map[string]observabilityCacheEntry)
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
 const globalKeySetting = "global_ssh_key"
-const basicAuthUserEnv = "DEBIAN_UPDATER_BASIC_AUTH_USER"
-const basicAuthPassEnv = "DEBIAN_UPDATER_BASIC_AUTH_PASS"
 const maxUploadedKeyBytes = 64 * 1024
 const sshConnectTimeout = 15 * time.Second
 const auditRetentionDays = 90
@@ -437,6 +435,29 @@ func ensureSchema(db *sql.DB) error {
 		}
 	}
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS auth_users (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			username TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			token TEXT PRIMARY KEY,
+			data BLOB NOT NULL,
+			expiry REAL NOT NULL
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expiry)"); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`
@@ -2249,31 +2270,6 @@ func stringsEqualConstantTime(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-func basicAuthMiddleware(username, password string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		user, pass, ok := c.Request.BasicAuth()
-		if !ok || !stringsEqualConstantTime(user, username) || !stringsEqualConstantTime(pass, password) {
-			c.Header("WWW-Authenticate", `Basic realm="SimpleLinuxUpdater"`)
-			c.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-		c.Set("actor", user)
-		c.Next()
-	}
-}
-
-func basicAuthFromEnv() (string, string, bool, error) {
-	username := strings.TrimSpace(os.Getenv(basicAuthUserEnv))
-	password := os.Getenv(basicAuthPassEnv)
-	if username == "" && password == "" {
-		return "", "", false, nil
-	}
-	if username == "" || password == "" {
-		return "", "", false, fmt.Errorf("%s and %s must both be set", basicAuthUserEnv, basicAuthPassEnv)
-	}
-	return username, password, true, nil
-}
-
 func init() {
 	loadServers()
 	for _, s := range servers {
@@ -3741,21 +3737,30 @@ func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 	return methods, nil
 }
 
-func main() {
+func setupRouter() (*gin.Engine, error) {
 	r := gin.Default()
-	username, password, basicAuthEnabled, err := basicAuthFromEnv()
+	sm, err := newSessionManager(getDB())
 	if err != nil {
-		log.Fatalf("Invalid basic auth configuration: %v", err)
+		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
 	}
-	if basicAuthEnabled {
-		r.Use(basicAuthMiddleware(username, password))
-		log.Printf("Basic auth enabled from %s/%s", basicAuthUserEnv, basicAuthPassEnv)
-	} else {
-		log.Printf("Basic auth is disabled (set %s and %s to enable it)", basicAuthUserEnv, basicAuthPassEnv)
+	sessionManager = sm
+
+	metricsToken, err := metricsBearerTokenFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("invalid metrics bearer configuration: %w", err)
 	}
+
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
-	startAuditPruner(context.Background())
+
+	r.GET("/setup", handleSetupPage)
+	r.GET("/login", handleLoginPage)
+	r.POST("/api/auth/setup", handleAuthSetup)
+	r.POST("/api/auth/login", handleAuthLogin)
+	r.GET("/api/auth/status", handleAuthStatus)
+	r.GET("/metrics", metricsBearerMiddleware(metricsToken), handleMetrics)
+
+	r.Use(authGateMiddleware())
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -3769,7 +3774,7 @@ func main() {
 		c.HTML(http.StatusOK, "observability.html", nil)
 	})
 
-	r.GET("/metrics", handleMetrics)
+	r.POST("/api/auth/logout", handleAuthLogout)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
@@ -4469,6 +4474,20 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"logs": logs})
 	})
 
+	return r, nil
+}
+
+func main() {
+	r, err := setupRouter()
+	if err != nil {
+		log.Fatalf("Failed to setup router: %v", err)
+	}
+	startAuditPruner(context.Background())
 	log.Println("Starting web server on :8080")
-	r.Run(":8080")
+	if sessionManager == nil {
+		log.Fatalf("Failed to initialize session middleware")
+	}
+	if err := http.ListenAndServe(":8080", sessionManager.LoadAndSave(r)); err != nil {
+		log.Fatalf("Failed to run web server: %v", err)
+	}
 }

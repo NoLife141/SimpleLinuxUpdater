@@ -149,6 +149,7 @@
             <div class="nav">
                 <a class="btn-link" href="/">View Status</a>
                 <a class="btn-link" href="/manage">Manage Servers</a>
+                <button class="btn-link" type="button" id="logout-btn">Logout</button>
             </div>
         </header>
 
@@ -215,6 +216,16 @@
     </div>
 
     <script>
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+            const response = await nativeFetch(...args);
+            if (response.status === 401) {
+                window.location.href = '/login';
+                throw new Error('Authentication required');
+            }
+            return response;
+        };
+
         const windowSelect = document.getElementById('window-select');
         const refreshBtn = document.getElementById('refresh-btn');
         const errorBanner = document.getElementById('error-banner');
@@ -358,8 +369,18 @@
             refreshIntervalId = null;
         }
 
+        async function logout() {
+            try {
+                await nativeFetch('/api/auth/logout', { method: 'POST' });
+            } catch (_) {
+                // Best effort.
+            }
+            window.location.href = '/login';
+        }
+
         refreshBtn.addEventListener('click', fetchObservabilitySummary);
         windowSelect.addEventListener('change', fetchObservabilitySummary);
+        document.getElementById('logout-btn').addEventListener('click', logout);
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 stopAutoRefresh();

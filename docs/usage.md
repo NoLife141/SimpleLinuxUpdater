@@ -5,6 +5,7 @@
 ## Table of contents
 
 - [Add and manage servers](#add-and-manage-servers)
+- [Authentication flow](#authentication-flow)
 - [Trust a host key](#trust-a-host-key)
 - [Run updates with approval](#run-updates-with-approval)
 - [CVE-aware pending approval](#cve-aware-pending-approval)
@@ -20,6 +21,19 @@ Use the Manage page to add, edit, or delete servers. Authentication options:
 - Password per server
 - SSH key per server (uploaded via UI)
 - Global SSH key (uploaded via UI and reused when per-server key is missing)
+
+## Authentication flow
+
+UI/API access uses the built-in local login:
+
+1. First run: create the admin account at `/setup`.
+2. Sign in at `/login`.
+3. Use the logout action to end the current session.
+
+Notes:
+
+- Sessions are server-side and stored in SQLite.
+- `/metrics` is not tied to UI sessions; it uses bearer token auth.
 
 ## Trust a host key
 
@@ -103,12 +117,12 @@ The Manage page includes Activity History, backed by SQLite `audit_events`.
 API:
 
 ```bash
-curl -u admin:change-me "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure"
+curl -H "Cookie: simplelinuxupdater_session=<session-cookie>" "http://localhost:8080/api/audit-events?page=1&page_size=20&status=failure"
 ```
 
 Notes:
 
-- When Basic Auth is enabled, the actor is derived from the Basic Auth username.
+- The actor is derived from the authenticated session username.
 - The audit store is automatically pruned (default retention is 90 days).
 
 ## Observability and metrics
@@ -123,7 +137,7 @@ Summary API:
 
 Metrics:
 
-- `GET /metrics` (Prometheus text format)
+- `GET /metrics` (Prometheus text format, bearer token required)
 
 Observability KPIs are computed from `update.complete` audit events.
 

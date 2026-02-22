@@ -6,9 +6,11 @@
 
 - [Summary](#summary)
 - [Threat model](#threat-model)
-- [Authentication](#authentication)
+- [Authentication model](#authentication-model)
+- [Metrics endpoint protection](#metrics-endpoint-protection)
 - [Encryption at rest](#encryption-at-rest)
 - [Remote sudo behavior](#remote-sudo-behavior)
+- [SSH key handling](#ssh-key-handling)
 - [Recommended hardening](#recommended-hardening)
 
 ## Summary
@@ -25,16 +27,35 @@ Treat it as privileged infrastructure.
 
 - Intended for trusted LAN/VPN environments only.
 - No TLS termination by default; use a reverse proxy for HTTPS.
-- Basic Auth is optional and disabled unless configured.
+- Single-user local authentication is intended for small trusted teams/homelabs.
 
-## Authentication
+## Authentication model
 
-Enable Basic Auth:
+SimpleLinuxUpdater uses:
 
-- `DEBIAN_UPDATER_BASIC_AUTH_USER`
-- `DEBIAN_UPDATER_BASIC_AUTH_PASS`
+- First-run setup at `/setup` to create one local admin user
+- Argon2id password hashing (`auth_users` table in SQLite)
+- Server-side sessions stored in SQLite (`sessions` table)
+- Session cookies with `HttpOnly` and `SameSite=Lax`
 
-When enabled, it protects the full UI and API surface, including `/metrics`.
+Session hardening options:
+
+- Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` when running behind HTTPS.
+- Optionally set `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`.
+
+## Metrics endpoint protection
+
+`/metrics` is protected by a bearer token, separate from UI sessions.
+
+Configure:
+
+- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`
+
+Scrapers must send:
+
+```text
+Authorization: Bearer <token>
+```
 
 ## Encryption at rest
 
@@ -83,5 +104,6 @@ sudo visudo -c
 
 - Do not expose the UI to the public internet.
 - Restrict access with a VPN and/or reverse proxy controls.
-- Use Basic Auth and strong passwords.
+- Use HTTPS and set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true`.
+- Use a strong `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`.
 - Protect the persisted volume (`/data`) like a secret.

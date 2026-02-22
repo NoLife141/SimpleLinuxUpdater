@@ -4,7 +4,8 @@
 
 ## Table of contents
 
-- [Basic Auth issues](#basic-auth-issues)
+- [Setup and login issues](#setup-and-login-issues)
+- [Metrics authentication issues](#metrics-authentication-issues)
 - [SSH host key issues](#ssh-host-key-issues)
 - [APT locks and missing fuser](#apt-locks-and-missing-fuser)
 - [Pre-check failures](#pre-check-failures)
@@ -12,13 +13,28 @@
 - [CVE enrichment issues](#cve-enrichment-issues)
 - [Database and file permissions](#database-and-file-permissions)
 
-## Basic Auth issues
+## Setup and login issues
 
-Symptom: startup error about invalid Basic Auth configuration.
+Symptom: cannot create user, cannot log in, or repeated redirects to `/login`.
 
-Fix:
+Checks:
 
-- Set both `DEBIAN_UPDATER_BASIC_AUTH_USER` and `DEBIAN_UPDATER_BASIC_AUTH_PASS`, or unset both.
+- On first run, you must complete `/setup` before `/login` works.
+- Password must meet policy requirements (length and complexity).
+- Confirm your browser accepts cookies for the app host.
+- If behind HTTPS, ensure `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` matches your deployment:
+  - `true` when served over HTTPS
+  - `false` for local plain HTTP testing
+
+## Metrics authentication issues
+
+Symptom: `/metrics` returns `401`.
+
+Checks:
+
+- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN` is set and non-empty.
+- Scraper sends `Authorization: Bearer <token>`.
+- Token value matches exactly (including casing and whitespace).
 
 ## SSH host key issues
 
