@@ -18,6 +18,25 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.6] - 2026-02-22
+
+### Added
+
+- Add dedicated documentation pages under `docs/` for installation, configuration, usage, deployment, security, troubleshooting, architecture, and contributing.
+- Add a usage comparison section covering SimpleLinuxUpdater vs scripts vs Ansible-style automation.
+
+### Changed
+
+- Refresh README quick start to prioritize the official GHCR image and improve binary-release onboarding.
+- Refine status page action layout to keep controls compact, stable, and easier to operate during `pending_approval`.
+- Improve drawer approval actions with clearer emphasis and dynamic update counts.
+
+### Fixed
+
+- Keep drawer tab positions stable when pending-approval controls appear to avoid accidental misclicks.
+- Harden inline `onclick` escaping in status/manage tables for safer server-name handling in HTML attribute context.
+- Improve form control accessibility with explicit select focus/hover states and scoped table-button styling.
+
 ## [v0.1.5] - 2026-02-21
 
 ### Added
