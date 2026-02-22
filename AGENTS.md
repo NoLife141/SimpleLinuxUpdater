@@ -210,6 +210,14 @@ func TestNormalizePort(t *testing.T) {
 - Log errors with context
 - Never log sensitive information
 
+### Frontend UI Consistency
+
+- Use the visual style from `templates/observability.html` as the default design baseline for all pages.
+- Keep the same core theme tokens (`--bg`, `--card`, `--card-alt`, `--text`, `--subtle`, `--accent`, `--border`, `--shadow`) unless there is an explicit product decision to change them.
+- Reuse the same component language for `hero`, `card`, nav links, buttons, inputs, selects, table styling, and hover states to maintain a consistent experience.
+- For UI updates in `templates/index.html` and `templates/manage.html`, prefer aligning to Observability styling rather than introducing a new visual direction.
+- Preserve responsiveness behavior across desktop and mobile when applying style changes.
+
 ## CI/CD
 
 The project uses GitHub Actions (see `.github/workflows/ci.yml`):

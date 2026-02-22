@@ -157,6 +157,19 @@
             padding: 9px 12px;
             border-radius: 10px;
             font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, outline-color 0.2s ease;
+        }
+
+        select:focus {
+            border-color: rgba(56, 189, 248, 0.55);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+            outline: 2px solid transparent;
+            outline-offset: 2px;
+        }
+
+        select:focus-visible {
+            outline-color: rgba(56, 189, 248, 0.75);
         }
 
         input[type="checkbox"] {
