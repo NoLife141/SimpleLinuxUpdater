@@ -3,50 +3,50 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Debian Updater Dashboard</title>
+    <title>SimpleLinuxUpdater - Dashboard</title>
     <style>
         :root {
-            --bg: #0e151b;
-            --bg-soft: #131c24;
-            --card: #16212b;
-            --card-2: #0f1820;
-            --text: #f2f5f7;
-            --muted: #b8c2cc;
+            --bg: #0b1220;
+            --bg-soft: #0b1220;
+            --card: #111a2b;
+            --card-2: #111a2b;
+            --card-alt: #17243b;
+            --text: #e7edf7;
+            --subtle: #94a3b8;
+            --muted: #94a3b8;
             --accent: #38bdf8;
-            --accent-2: #22d3ee;
+            --accent-2: #38bdf8;
             --success: #34d399;
             --warning: #fbbf24;
             --danger: #f87171;
-            --shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+            --border: rgba(148, 163, 184, 0.2);
+            --shadow: 0 10px 30px rgba(2, 8, 23, 0.35);
         }
 
         * { box-sizing: border-box; }
 
         body {
-            font-family: "Bahnschrift", "Segoe UI Variable", "Segoe UI", sans-serif;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
             color: var(--text);
             margin: 0;
             min-height: 100vh;
-            background:
-                radial-gradient(800px 400px at 10% 0%, rgba(56, 189, 248, 0.18), transparent 60%),
-                radial-gradient(700px 500px at 90% 10%, rgba(34, 211, 238, 0.18), transparent 60%),
-                linear-gradient(160deg, #0b1116 0%, #0e151b 60%, #0b141c 100%);
+            background: radial-gradient(1200px 700px at 80% -20%, rgba(56, 189, 248, 0.18), transparent 60%), var(--bg);
         }
 
         .page {
             width: 100%;
             max-width: 1360px;
             margin: 0 auto;
-            padding: 36px clamp(12px, 2.2vw, 34px) 64px;
+            padding: 24px clamp(12px, 2.2vw, 34px) 64px;
         }
 
         .hero {
-            background: linear-gradient(135deg, rgba(56, 189, 248, 0.18), rgba(34, 211, 238, 0.05));
-            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: linear-gradient(180deg, var(--card-alt), var(--card));
+            border: 1px solid var(--border);
             padding: 28px 28px 24px;
-            border-radius: 18px;
+            border-radius: 14px;
             box-shadow: var(--shadow);
-            margin-bottom: 28px;
+            margin-bottom: 18px;
             position: relative;
             overflow: hidden;
             padding-left: 300px;
@@ -61,7 +61,7 @@
             width: 280px;
             height: 280px;
             border-radius: 50%;
-            background: radial-gradient(circle at center, rgba(56, 189, 248, 0.35), transparent 70%);
+            background: radial-gradient(circle at center, rgba(56, 189, 248, 0.22), transparent 70%);
             filter: blur(1px);
         }
 
@@ -100,7 +100,7 @@
 
         h2 {
             font-size: 20px;
-            color: var(--muted);
+            color: var(--subtle);
             font-weight: 600;
         }
 
@@ -111,9 +111,9 @@
         }
 
         .card {
-            background: linear-gradient(180deg, rgba(22, 33, 43, 0.95), rgba(15, 24, 32, 0.95));
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 16px;
+            background: linear-gradient(180deg, var(--card-alt), var(--card));
+            border: 1px solid var(--border);
+            border-radius: 14px;
             padding: 20px;
             box-shadow: var(--shadow);
         }
@@ -134,8 +134,8 @@
         }
 
         input {
-            background: rgba(8, 13, 18, 0.7);
-            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid var(--border);
             color: var(--text);
             padding: 10px 12px;
             border-radius: 10px;
@@ -144,8 +144,18 @@
         }
 
         input:focus {
-            border-color: rgba(56, 189, 248, 0.8);
+            border-color: rgba(56, 189, 248, 0.55);
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+        }
+
+        select {
+            appearance: none;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            padding: 9px 12px;
+            border-radius: 10px;
+            font-size: 14px;
         }
 
         input[type="checkbox"] {
@@ -168,46 +178,56 @@
         }
 
         button {
-            background: linear-gradient(135deg, #38bdf8, #22d3ee);
-            border: none;
-            color: #051019;
-            padding: 10px 14px;
+            appearance: none;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            padding: 9px 12px;
             border-radius: 10px;
-            font-weight: 600;
+            font-size: 14px;
             cursor: pointer;
-            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
-            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
+            transition: border-color 0.2s ease, opacity 0.2s ease;
+            box-shadow: none;
         }
 
-        button:hover, .btn-link:hover { transform: translateY(-1px); }
-        button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        button:hover, .btn-link:hover {
+            border-color: rgba(56, 189, 248, 0.55);
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
 
         .btn-ghost {
             background: transparent;
-            border: 1px solid rgba(255, 255, 255, 0.18);
+            border: 1px solid var(--border);
             color: var(--text);
             box-shadow: none;
         }
 
         .btn-link {
-            background: linear-gradient(135deg, #38bdf8, #22d3ee);
-            border: none;
-            color: #051019;
-            box-shadow: 0 12px 24px rgba(34, 211, 238, 0.2);
+            appearance: none;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            box-shadow: none;
             text-decoration: none;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            padding: 10px 14px;
+            padding: 9px 12px;
             border-radius: 10px;
-            font-weight: 600;
-            transition: transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+            font-size: 14px;
+            transition: border-color 0.2s ease, opacity 0.2s ease;
         }
 
         .btn-danger {
-            background: linear-gradient(135deg, #f87171, #fb7185);
-            color: #1a0a0a;
-            box-shadow: 0 12px 24px rgba(248, 113, 113, 0.25);
+            background: rgba(127, 29, 29, 0.38);
+            color: #fecaca;
+            border-color: rgba(248, 113, 113, 0.5);
+        }
+
+        .btn-security {
+            background: rgba(245, 158, 11, 0.18);
+            color: #fde68a;
+            border-color: rgba(245, 158, 11, 0.55);
         }
 
         .nav {
@@ -269,6 +289,12 @@
             width: 100%;
             border-collapse: collapse;
             min-width: 520px;
+        }
+
+        #servers-table {
+            table-layout: fixed;
+            width: max-content;
+            min-width: 100%;
         }
 
         th, td {
@@ -497,36 +523,105 @@
         .log-line-success { color: #86efac; }
         .log-line-info { color: #93c5fd; }
 
-        .name-col { width: 210px; min-width: 180px; max-width: 220px; }
+        .name-col {
+            width: 200px;
+            min-width: 140px;
+        }
         .name-cell {
-            max-width: 220px;
+            max-width: none;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .actions-col { width: 170px; min-width: 170px; max-width: 170px; }
-        .status-col { width: 170px; min-width: 160px; max-width: 180px; }
-
-        td button { display: block; margin: 6px 0; width: 100%; }
-        td .inline-btn { width: auto; display: inline-flex; }
-
-        td.actions-col button:not(.inline-btn) {
-            width: 146px;
-            min-width: 146px;
-            max-width: 146px;
-            margin-left: auto;
-            margin-right: auto;
+        .actions-col {
+            width: 500px;
+            min-width: 420px;
+        }
+        .status-col {
+            width: 120px;
+            min-width: 96px;
         }
 
-        .action-row {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 6px;
-            justify-items: center;
+        th.resizable {
+            position: relative;
+            padding-right: 16px;
         }
 
-        .action-row button {
+        .col-title {
+            display: inline-block;
+        }
+
+        .col-resize-handle {
+            position: absolute;
+            right: -1px;
+            top: 0;
+            width: 8px;
+            height: 100%;
+            cursor: col-resize;
+            user-select: none;
+            touch-action: none;
+            z-index: 2;
+        }
+
+        .col-resize-handle::before {
+            content: "";
+            position: absolute;
+            left: 3px;
+            top: 28%;
+            width: 2px;
+            height: 44%;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.5);
+            transition: background 0.2s ease, opacity 0.2s ease;
+            opacity: 0;
+        }
+
+        th.resizable:hover .col-resize-handle::before {
+            background: rgba(148, 163, 184, 0.75);
+            opacity: 1;
+        }
+
+        th.resizable.resizing .col-resize-handle::before {
+            background: rgba(56, 189, 248, 0.95);
+            opacity: 1;
+        }
+
+        body.col-resizing,
+        body.col-resizing * {
+            cursor: col-resize !important;
+            user-select: none !important;
+        }
+
+        td button {
+            display: block;
             margin: 0;
+            width: 100%;
+        }
+
+        td .inline-btn {
+            width: auto;
+            display: inline-flex;
+        }
+
+        .actions-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+            align-items: stretch;
+        }
+
+        .actions-grid .action-span {
+            grid-column: 1 / -1;
+        }
+
+        .actions-grid button {
+            width: 100%;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            padding: 6px 8px;
+            font-size: 12px;
         }
 
         .drawer-backdrop {
@@ -603,7 +698,8 @@
             display: flex;
             flex-wrap: wrap;
             gap: 8px;
-            margin-top: 10px;
+            padding: 10px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         }
 
         .drawer-approval-actions.hidden {
@@ -738,12 +834,26 @@
             </div>
             <div class="table-wrap">
                 <table id="servers-table">
+                    <colgroup>
+                        <col data-col-key="select" style="width: 44px;">
+                        <col data-col-key="name" style="width: 220px;">
+                        <col data-col-key="status" style="width: 120px;">
+                        <col data-col-key="actions" style="width: 500px;">
+                    </colgroup>
                     <thead>
                         <tr>
                             <th class="select-col"></th>
-                            <th class="sortable name-col" data-sort-key="name">Server</th>
-                            <th class="sortable status-col" data-sort-key="status">Status</th>
-                            <th class="actions-col">Actions</th>
+                            <th class="sortable name-col resizable" data-sort-key="name">
+                                <span class="col-title">Server</span>
+                                <span class="col-resize-handle" data-col-key="name" aria-hidden="true"></span>
+                            </th>
+                            <th class="sortable status-col" data-sort-key="status">
+                                <span class="col-title">Status</span>
+                            </th>
+                            <th class="actions-col resizable">
+                                <span class="col-title">Actions</span>
+                                <span class="col-resize-handle" data-col-key="actions" aria-hidden="true"></span>
+                            </th>
                         </tr>
                     </thead>
                     <tbody></tbody>
@@ -763,16 +873,16 @@
             <div>
                 <h3 class="drawer-title" id="status-drawer-title">Server details</h3>
                 <div id="status-drawer-status"></div>
-                <div class="drawer-approval-actions hidden" id="status-drawer-approval-actions">
-                    <button class="inline-btn" id="drawer-approve-all">Approve all updates</button>
-                    <button class="btn-ghost inline-btn" id="drawer-approve-security">Approve security only</button>
-                </div>
             </div>
             <button class="btn-ghost inline-btn" id="status-drawer-close">Close</button>
         </div>
         <div class="drawer-tabs">
             <button class="btn-ghost inline-btn drawer-tab" id="drawer-tab-logs">Logs</button>
             <button class="btn-ghost inline-btn drawer-tab" id="drawer-tab-pending">Pending updates</button>
+        </div>
+        <div class="drawer-approval-actions hidden" id="status-drawer-approval-actions">
+            <button class="inline-btn" id="drawer-approve-all">Approve all (0)</button>
+            <button class="btn-security inline-btn" id="drawer-approve-security">Approve security only (0)</button>
         </div>
         <div class="drawer-content">
             <section class="drawer-panel" id="drawer-panel-logs">
@@ -819,6 +929,23 @@
         let drawerLogScrollTop = 0;
         let passwordResolve = null;
         let passwordReject = null;
+        let suppressSortClickUntil = 0;
+        const columnResizeStorageKey = "simplelinuxupdater.statusTableColWidths.v5";
+        const defaultColumnWidths = Object.freeze({
+            name: 220,
+            status: 120,
+            actions: 500
+        });
+        const minColumnWidths = Object.freeze({
+            name: 140,
+            status: 96,
+            actions: 420
+        });
+        const maxColumnWidths = Object.freeze({
+            name: 520,
+            status: 180,
+            actions: 760
+        });
         const allowedStatuses = new Set([
             "idle", "updating", "pending_approval", "approved", "cancelled",
             "upgrading", "autoremove", "sudoers", "done", "error"
@@ -894,6 +1021,18 @@
         function hasPendingUpdates(server) {
             if (!server || server.status !== "pending_approval") return false;
             return Array.isArray(server.pending_updates) && server.pending_updates.length > 0;
+        }
+
+        function getPendingApprovalCounts(server) {
+            const pendingUpdates = Array.isArray(server?.pending_updates) ? server.pending_updates : [];
+            const totalFromPending = pendingUpdates.length;
+            const securityFromPending = pendingUpdates.filter(update => !!update?.security).length;
+            const upgradableFallback = Array.isArray(server?.upgradable) ? server.upgradable.length : 0;
+            const total = totalFromPending > 0 ? totalFromPending : upgradableFallback;
+            return {
+                total,
+                security: securityFromPending
+            };
         }
 
         function renderPendingUpdatesHtml(server, includeHeading = true) {
@@ -978,6 +1117,112 @@
         function restoreWindowScroll(pos) {
             if (!pos) return;
             window.scrollTo(pos.x, pos.y);
+        }
+
+        function getTableColByKey(key) {
+            return document.querySelector(`#servers-table col[data-col-key="${key}"]`);
+        }
+
+        function loadColumnWidths() {
+            try {
+                const raw = localStorage.getItem(columnResizeStorageKey);
+                if (!raw) return {};
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === "object" ? parsed : {};
+            } catch (_) {
+                return {};
+            }
+        }
+
+        function saveColumnWidths(widths) {
+            try {
+                localStorage.setItem(columnResizeStorageKey, JSON.stringify(widths));
+            } catch (_) {
+                // Ignore storage failures (private mode, quota, etc.)
+            }
+        }
+
+        function applyColumnWidths(widths) {
+            Object.keys(defaultColumnWidths).forEach((key) => {
+                const col = getTableColByKey(key);
+                if (!col) return;
+                const configured = Number(widths[key]);
+                const minWidth = minColumnWidths[key] || 100;
+                const maxWidth = maxColumnWidths[key] || 9999;
+                const fallback = defaultColumnWidths[key];
+                const boundedFallback = Math.min(maxWidth, Math.max(minWidth, fallback));
+                const nextWidth = Number.isFinite(configured)
+                    ? Math.min(maxWidth, Math.max(minWidth, configured))
+                    : boundedFallback;
+                col.style.width = `${Math.round(nextWidth)}px`;
+            });
+        }
+
+        function initColumnResizing() {
+            const savedWidths = loadColumnWidths();
+            applyColumnWidths(savedWidths);
+
+            document.querySelectorAll('#servers-table .col-resize-handle').forEach((handle) => {
+                if (handle.dataset.bound === "1") return;
+                handle.dataset.bound = "1";
+
+                handle.addEventListener('pointerdown', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    const colKey = handle.dataset.colKey || "";
+                    const col = getTableColByKey(colKey);
+                    const th = handle.closest('th');
+                    if (!col || !th) return;
+
+                    const minWidth = minColumnWidths[colKey] || 100;
+                    const maxWidth = maxColumnWidths[colKey] || 9999;
+                    const startX = event.clientX;
+                    const startWidth = Math.max(minWidth, Math.round(col.getBoundingClientRect().width));
+
+                    const onPointerMove = (moveEvent) => {
+                        const delta = moveEvent.clientX - startX;
+                        const nextWidth = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
+                        col.style.width = `${Math.round(nextWidth)}px`;
+                    };
+
+                    const onPointerEnd = (endEvent) => {
+                        window.removeEventListener('pointermove', onPointerMove);
+                        window.removeEventListener('pointerup', onPointerEnd);
+                        window.removeEventListener('pointercancel', onPointerEnd);
+                        document.body.classList.remove('col-resizing');
+                        th.classList.remove('resizing');
+
+                        const finalWidth = Math.min(maxWidth, Math.max(minWidth, Math.round(col.getBoundingClientRect().width)));
+                        const nextWidths = loadColumnWidths();
+                        nextWidths[colKey] = finalWidth;
+                        saveColumnWidths(nextWidths);
+                        suppressSortClickUntil = Date.now() + 250;
+
+                        if (handle.releasePointerCapture && endEvent.pointerId !== undefined) {
+                            try {
+                                handle.releasePointerCapture(endEvent.pointerId);
+                            } catch (_) {
+                                // Ignore pointer release issues.
+                            }
+                        }
+                    };
+
+                    document.body.classList.add('col-resizing');
+                    th.classList.add('resizing');
+                    if (handle.setPointerCapture && event.pointerId !== undefined) {
+                        try {
+                            handle.setPointerCapture(event.pointerId);
+                        } catch (_) {
+                            // Ignore pointer capture issues.
+                        }
+                    }
+
+                    window.addEventListener('pointermove', onPointerMove);
+                    window.addEventListener('pointerup', onPointerEnd);
+                    window.addEventListener('pointercancel', onPointerEnd);
+                });
+            });
         }
 
         async function fetchServers(forceRender = false) {
@@ -1120,6 +1365,8 @@
             const logsHint = document.getElementById('drawer-logs-hint');
             const logsEl = document.getElementById('drawer-logs');
             const approvalActions = document.getElementById('status-drawer-approval-actions');
+            const drawerApproveAllBtn = document.getElementById('drawer-approve-all');
+            const drawerApproveSecurityBtn = document.getElementById('drawer-approve-security');
 
             if (!drawerOpen) {
                 drawer.classList.remove('open');
@@ -1138,6 +1385,7 @@
             const safeStatusText = escapeHtml(server.status || "unknown");
             const isPendingApproval = server.status === "pending_approval";
             const hasPending = hasPendingUpdates(server);
+            const approvalCounts = getPendingApprovalCounts(server);
             if (drawerTab === "pending" && !hasPending) {
                 drawerTab = "logs";
             }
@@ -1145,6 +1393,8 @@
             title.textContent = server.name || "Server details";
             statusContainer.innerHTML = `<span class="status-pill status-${safeStatus}">${safeStatusText}</span>`;
             approvalActions.classList.toggle('hidden', !isPendingApproval);
+            drawerApproveAllBtn.textContent = `Approve all (${approvalCounts.total})`;
+            drawerApproveSecurityBtn.textContent = `Approve security only (${approvalCounts.security})`;
 
             pendingTabBtn.disabled = !hasPending;
             pendingTabBtn.classList.toggle('active', drawerTab === "pending");
@@ -1200,21 +1450,24 @@
                     const safeStatusText = escapeHtml(server.status || "unknown");
                     const safeStatus = safeStatusClass(server.status);
                     const safeDataName = escapeHtml(server.name);
+                    const approvalCounts = getPendingApprovalCounts(server);
                     const actionButtons = server.status === 'pending_approval'
                         ? `
-                            <button onclick="approveAllUpdates('${safeNameJs}')">Approve all updates</button>
-                            <button class="btn-ghost" onclick="approveSecurityUpdates('${safeNameJs}')">Approve security only</button>
-                            <button class="btn-danger" onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
-                            <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
-                            <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'pending')">Pending updates</button>
+                            <div class="actions-grid">
+                                <button onclick="approveAllUpdates('${safeNameJs}')" title="Approve all updates">Approve all (${approvalCounts.total})</button>
+                                <button class="btn-security" onclick="approveSecurityUpdates('${safeNameJs}')" title="Approve only security updates">Approve security only (${approvalCounts.security})</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
+                                <button class="btn-danger" onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'pending')">Pending updates</button>
+                            </div>
                           `
                         : `
-                            <button onclick="updateServer('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Update</button>
-                            <button onclick="runAutoremove('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>apt autoremove</button>
-                            <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
-                            <div class="action-row">
-                                <button onclick="enablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Enable passwordless apt</button>
-                                <button onclick="disablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Disable passwordless apt</button>
+                            <div class="actions-grid">
+                                <button onclick="updateServer('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Update</button>
+                                <button onclick="runAutoremove('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Run apt autoremove">Autoremove</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
+                                <button onclick="enablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Enable passwordless apt">Enable apt</button>
+                                <button onclick="disablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Disable passwordless apt">Disable apt</button>
                             </div>
                           `;
                     row.innerHTML = `
@@ -1298,6 +1551,9 @@
 
         document.querySelectorAll('#servers-table th.sortable').forEach(th => {
             th.addEventListener('click', () => {
+                if (Date.now() < suppressSortClickUntil) {
+                    return;
+                }
                 const key = th.dataset.sortKey;
                 if (sortKey === key) {
                     sortDir = sortDir === "asc" ? "desc" : "asc";
@@ -1480,6 +1736,7 @@
             fetchServers();
         }
 
+        initColumnResizing();
         setInterval(fetchServers, 2000);
         fetchServers();
     </script>
