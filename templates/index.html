@@ -524,7 +524,7 @@
         .log-line-info { color: #93c5fd; }
 
         .name-col {
-            width: 200px;
+            width: 220px;
             min-width: 140px;
         }
         .name-cell {
@@ -1031,7 +1031,7 @@
             const total = totalFromPending > 0 ? totalFromPending : upgradableFallback;
             return {
                 total,
-                security: securityFromPending
+                security: totalFromPending > 0 ? securityFromPending : null
             };
         }
 
@@ -1386,6 +1386,9 @@
             const isPendingApproval = server.status === "pending_approval";
             const hasPending = hasPendingUpdates(server);
             const approvalCounts = getPendingApprovalCounts(server);
+            const securityApprovalLabel = approvalCounts.security === null
+                ? "Approve security only (unknown)"
+                : `Approve security only (${approvalCounts.security})`;
             if (drawerTab === "pending" && !hasPending) {
                 drawerTab = "logs";
             }
@@ -1394,7 +1397,7 @@
             statusContainer.innerHTML = `<span class="status-pill status-${safeStatus}">${safeStatusText}</span>`;
             approvalActions.classList.toggle('hidden', !isPendingApproval);
             drawerApproveAllBtn.textContent = `Approve all (${approvalCounts.total})`;
-            drawerApproveSecurityBtn.textContent = `Approve security only (${approvalCounts.security})`;
+            drawerApproveSecurityBtn.textContent = securityApprovalLabel;
 
             pendingTabBtn.disabled = !hasPending;
             pendingTabBtn.classList.toggle('active', drawerTab === "pending");
@@ -1446,28 +1449,32 @@
                     }
                     const isBusy = server.status === 'updating' || server.status === 'upgrading' || server.status === 'autoremove' || server.status === 'sudoers';
                     const safeNameJs = escapeJsSingleQuoted(server.name);
+                    const safeNameOnclickAttr = escapeHtml(safeNameJs);
                     const safeNameHtml = escapeHtml(server.name);
                     const safeStatusText = escapeHtml(server.status || "unknown");
                     const safeStatus = safeStatusClass(server.status);
                     const safeDataName = escapeHtml(server.name);
                     const approvalCounts = getPendingApprovalCounts(server);
+                    const securityApprovalLabel = approvalCounts.security === null
+                        ? "Approve security only (unknown)"
+                        : `Approve security only (${approvalCounts.security})`;
                     const actionButtons = server.status === 'pending_approval'
                         ? `
                             <div class="actions-grid">
-                                <button onclick="approveAllUpdates('${safeNameJs}')" title="Approve all updates">Approve all (${approvalCounts.total})</button>
-                                <button class="btn-security" onclick="approveSecurityUpdates('${safeNameJs}')" title="Approve only security updates">Approve security only (${approvalCounts.security})</button>
-                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
-                                <button class="btn-danger" onclick="cancelUpgrade('${safeNameJs}')">Cancel</button>
-                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'pending')">Pending updates</button>
+                                <button onclick="approveAllUpdates('${safeNameOnclickAttr}')" title="Approve all updates">Approve all (${approvalCounts.total})</button>
+                                <button class="btn-security" onclick="approveSecurityUpdates('${safeNameOnclickAttr}')" title="Approve only security updates">${securityApprovalLabel}</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameOnclickAttr}', 'logs')">Logs</button>
+                                <button class="btn-danger" onclick="cancelUpgrade('${safeNameOnclickAttr}')">Cancel</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameOnclickAttr}', 'pending')">Pending updates</button>
                             </div>
                           `
                         : `
                             <div class="actions-grid">
-                                <button onclick="updateServer('${safeNameJs}')" ${isBusy ? 'disabled' : ''}>Update</button>
-                                <button onclick="runAutoremove('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Run apt autoremove">Autoremove</button>
-                                <button class="btn-ghost" onclick="openDrawer('${safeNameJs}', 'logs')">Logs</button>
-                                <button onclick="enablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Enable passwordless apt">Enable apt</button>
-                                <button onclick="disablePasswordlessApt('${safeNameJs}')" ${isBusy ? 'disabled' : ''} title="Disable passwordless apt">Disable apt</button>
+                                <button onclick="updateServer('${safeNameOnclickAttr}')" ${isBusy ? 'disabled' : ''}>Update</button>
+                                <button onclick="runAutoremove('${safeNameOnclickAttr}')" ${isBusy ? 'disabled' : ''} title="Run apt autoremove">Autoremove</button>
+                                <button class="btn-ghost" onclick="openDrawer('${safeNameOnclickAttr}', 'logs')">Logs</button>
+                                <button onclick="enablePasswordlessApt('${safeNameOnclickAttr}')" ${isBusy ? 'disabled' : ''} title="Enable passwordless apt">Enable apt</button>
+                                <button onclick="disablePasswordlessApt('${safeNameOnclickAttr}')" ${isBusy ? 'disabled' : ''} title="Disable passwordless apt">Disable apt</button>
                             </div>
                           `;
                     row.innerHTML = `
