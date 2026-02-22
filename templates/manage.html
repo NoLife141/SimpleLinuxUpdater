@@ -902,6 +902,7 @@
                     const row = document.createElement('tr');
                     row.dataset.name = server.name;
                     const safeNameJs = escapeJsSingleQuoted(server.name);
+                    const safeNameOnclickAttr = escapeHtml(safeNameJs);
                     const safeName = escapeHtml(server.name);
                     const safeHost = escapeHtml(server.host);
                     const safeUser = escapeHtml(server.user);
@@ -912,8 +913,8 @@
                         <td>${renderTags(server.tags)}</td>
                         <td>${renderAuth(server)}</td>
                         <td>
-                            <button class="btn-ghost" onclick="editServer('${safeNameJs}')">Edit</button>
-                            <button class="btn-danger" onclick="deleteServer('${safeNameJs}')">Delete</button>
+                            <button class="btn-ghost" onclick="editServer('${safeNameOnclickAttr}')">Edit</button>
+                            <button class="btn-danger" onclick="deleteServer('${safeNameOnclickAttr}')">Delete</button>
                         </td>
                     `;
                     tbody.appendChild(row);
