@@ -7,15 +7,16 @@
     <style>
         :root {
             --bg: #0b1220;
-            --bg-soft: #0b1220;
+            /* Intentional aliases: keep these tied to base tokens for consistency. */
+            --bg-soft: var(--bg);
             --card: #111a2b;
-            --card-2: #111a2b;
+            --card-2: var(--card);
             --card-alt: #17243b;
             --text: #e7edf7;
             --subtle: #94a3b8;
-            --muted: #94a3b8;
+            --muted: var(--subtle);
             --accent: #38bdf8;
-            --accent-2: #38bdf8;
+            --accent-2: var(--accent);
             --success: #34d399;
             --warning: #fbbf24;
             --danger: #f87171;
@@ -592,13 +593,13 @@
             user-select: none !important;
         }
 
-        td button {
+        #servers-table td button {
             display: block;
             margin: 0;
             width: 100%;
         }
 
-        td .inline-btn {
+        #servers-table td .inline-btn {
             width: auto;
             display: inline-flex;
         }
@@ -608,10 +609,6 @@
             grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 6px;
             align-items: stretch;
-        }
-
-        .actions-grid .action-span {
-            grid-column: 1 / -1;
         }
 
         .actions-grid button {
@@ -1186,18 +1183,22 @@
                         col.style.width = `${Math.round(nextWidth)}px`;
                     };
 
-                    const onPointerEnd = (endEvent) => {
+                    const finishResize = (endEvent, canceled) => {
                         window.removeEventListener('pointermove', onPointerMove);
-                        window.removeEventListener('pointerup', onPointerEnd);
-                        window.removeEventListener('pointercancel', onPointerEnd);
+                        window.removeEventListener('pointerup', onPointerUp);
+                        window.removeEventListener('pointercancel', onPointerCancel);
                         document.body.classList.remove('col-resizing');
                         th.classList.remove('resizing');
 
-                        const finalWidth = Math.min(maxWidth, Math.max(minWidth, Math.round(col.getBoundingClientRect().width)));
-                        const nextWidths = loadColumnWidths();
-                        nextWidths[colKey] = finalWidth;
-                        saveColumnWidths(nextWidths);
-                        suppressSortClickUntil = Date.now() + 250;
+                        if (canceled) {
+                            col.style.width = `${Math.round(startWidth)}px`;
+                        } else {
+                            const finalWidth = Math.min(maxWidth, Math.max(minWidth, Math.round(col.getBoundingClientRect().width)));
+                            const nextWidths = loadColumnWidths();
+                            nextWidths[colKey] = finalWidth;
+                            saveColumnWidths(nextWidths);
+                            suppressSortClickUntil = Date.now() + 250;
+                        }
 
                         if (handle.releasePointerCapture && endEvent.pointerId !== undefined) {
                             try {
@@ -1207,6 +1208,9 @@
                             }
                         }
                     };
+
+                    const onPointerUp = (endEvent) => finishResize(endEvent, false);
+                    const onPointerCancel = (endEvent) => finishResize(endEvent, true);
 
                     document.body.classList.add('col-resizing');
                     th.classList.add('resizing');
@@ -1219,8 +1223,8 @@
                     }
 
                     window.addEventListener('pointermove', onPointerMove);
-                    window.addEventListener('pointerup', onPointerEnd);
-                    window.addEventListener('pointercancel', onPointerEnd);
+                    window.addEventListener('pointerup', onPointerUp);
+                    window.addEventListener('pointercancel', onPointerCancel);
                 });
             });
         }
