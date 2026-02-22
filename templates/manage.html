@@ -7,15 +7,16 @@
     <style>
         :root {
             --bg: #0b1220;
-            --bg-soft: #0b1220;
+            /* Intentional aliases: keep these tied to base tokens for consistency. */
+            --bg-soft: var(--bg);
             --card: #111a2b;
-            --card-2: #111a2b;
+            --card-2: var(--card);
             --card-alt: #17243b;
             --text: #e7edf7;
             --subtle: #94a3b8;
-            --muted: #94a3b8;
+            --muted: var(--subtle);
             --accent: #38bdf8;
-            --accent-2: #38bdf8;
+            --accent-2: var(--accent);
             --success: #34d399;
             --warning: #fbbf24;
             --danger: #f87171;
@@ -220,6 +221,23 @@
             padding: 9px 12px;
             border-radius: 10px;
             font-size: 14px;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, outline-color 0.2s ease;
+        }
+
+        select:hover {
+            border-color: rgba(56, 189, 248, 0.55);
+        }
+
+        select:focus {
+            border-color: rgba(56, 189, 248, 0.55);
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+            outline: 2px solid transparent;
+            outline-offset: 2px;
+        }
+
+        select:focus-visible {
+            outline-color: rgba(56, 189, 248, 0.75);
         }
 
         button {

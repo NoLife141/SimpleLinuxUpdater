@@ -140,6 +140,7 @@
             color: var(--text);
             padding: 10px 12px;
             border-radius: 10px;
+            font-size: 14px;
             outline: none;
             transition: border-color 0.2s ease, box-shadow 0.2s ease;
         }
@@ -204,7 +205,7 @@
             box-shadow: none;
         }
 
-        button:hover, .btn-link:hover {
+        button:hover, .btn-link:hover, select:hover {
             border-color: rgba(56, 189, 248, 0.55);
         }
         button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -236,6 +237,12 @@
             background: rgba(127, 29, 29, 0.38);
             color: #fecaca;
             border-color: rgba(248, 113, 113, 0.5);
+        }
+
+        .btn-success {
+            background: rgba(6, 95, 70, 0.4);
+            color: #d1fae5;
+            border-color: rgba(52, 211, 153, 0.45);
         }
 
         .btn-security {
