@@ -20,12 +20,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -4539,8 +4541,23 @@ func main() {
 		log.Fatalf("Failed to setup router: %v", err)
 	}
 	startAuditPruner(context.Background())
+	defer StopAuthRateLimiters()
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: sessionManager.LoadAndSave(r),
+	}
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-shutdownCtx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("Failed to shutdown web server cleanly: %v", err)
+		}
+	}()
 	log.Println("Starting web server on :8080")
-	if err := http.ListenAndServe(":8080", sessionManager.LoadAndSave(r)); err != nil {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Failed to run web server: %v", err)
 	}
 }

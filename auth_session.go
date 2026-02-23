@@ -144,6 +144,15 @@ var (
 	setupRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
 )
 
+func StopAuthRateLimiters() {
+	if loginRateLimiter != nil {
+		loginRateLimiter.Stop()
+	}
+	if setupRateLimiter != nil {
+		setupRateLimiter.Stop()
+	}
+}
+
 type AuthCredentialsRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -349,6 +358,9 @@ func setNoStoreHeaders(c *gin.Context) {
 }
 
 func sameOriginAuthRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
 	host := strings.ToLower(strings.TrimSpace(c.Request.Host))
 	if host == "" {
 		return false
@@ -372,6 +384,13 @@ func sameOriginAuthRequest(c *gin.Context) bool {
 		if !stringsEqualConstantTime(strings.ToLower(u.Host), host) {
 			return false
 		}
+	}
+	if origin == "" && referer == "" {
+		return false
+	}
+	secFetchSite := strings.ToLower(strings.TrimSpace(c.GetHeader("Sec-Fetch-Site")))
+	if secFetchSite != "same-origin" && secFetchSite != "same-site" {
+		return false
 	}
 	return true
 }

@@ -12,12 +12,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	testPasswordStrong = "StrongPass123" // gitleaks:allow
+	testPasswordAlt    = "StrongPass999" // gitleaks:allow
+)
+
 func preserveSessionState(t *testing.T) {
 	t.Helper()
 	orig := sessionManager
 	t.Cleanup(func() {
 		sessionManager = orig
 	})
+}
+
+func markSameOriginAuthRequest(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req.Header.Set("Referer", "http://localhost/")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 }
 
 func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
@@ -36,11 +51,27 @@ func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder)
 }
 
 func TestValidatePasswordPolicy(t *testing.T) {
-	if err := validatePasswordPolicy(strings.Repeat("A", 63) + "1"); err != nil {
-		t.Fatalf("validatePasswordPolicy(max valid) unexpected error: %v", err)
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "empty string", value: "", wantErr: true},
+		{name: "too short", value: "Abc123", wantErr: true},
+		{name: "missing letter", value: strings.Repeat("1", 10), wantErr: true},
+		{name: "missing digit", value: strings.Repeat("A", 10), wantErr: true},
+		{name: "max valid length", value: strings.Repeat("A", 63) + "1", wantErr: false},
+		{name: "too long", value: strings.Repeat("A", 64) + "1", wantErr: true},
 	}
-	if err := validatePasswordPolicy(strings.Repeat("A", 64) + "1"); err == nil {
-		t.Fatalf("validatePasswordPolicy(too long) error = nil, want non-nil")
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePasswordPolicy(tc.value)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validatePasswordPolicy(%q) err=%v, wantErr=%v", tc.value, err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -56,7 +87,7 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 		t.Fatalf("setupRequired() = false, want true on empty auth_users")
 	}
 
-	if err := createInitialUser("admin", "StrongPass123"); err != nil {
+	if err := createInitialUser("admin", testPasswordStrong); err != nil {
 		t.Fatalf("createInitialUser() unexpected error: %v", err)
 	}
 
@@ -78,11 +109,11 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 	if username != "admin" {
 		t.Fatalf("getSingleUser() username = %q, want %q", username, "admin")
 	}
-	if passwordHash == "" || strings.Contains(passwordHash, "StrongPass123") {
+	if passwordHash == "" || strings.Contains(passwordHash, testPasswordStrong) {
 		t.Fatalf("getSingleUser() password hash appears invalid: %q", passwordHash)
 	}
 
-	ok, err := authenticateUser("admin", "StrongPass123")
+	ok, err := authenticateUser("admin", testPasswordStrong)
 	if err != nil {
 		t.Fatalf("authenticateUser(valid) unexpected error: %v", err)
 	}
@@ -105,7 +136,7 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 		t.Fatalf("authenticateUser(non-existent user) = true, want false")
 	}
 
-	if err := createInitialUser("second", "StrongPass999"); err == nil {
+	if err := createInitialUser("second", testPasswordAlt); err == nil {
 		t.Fatalf("createInitialUser(second) error = nil, want errSetupAlreadyCompleted")
 	}
 }
@@ -229,9 +260,10 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 		t.Fatalf("unauthenticated HTML redirect = %q, want %q", got, "/setup")
 	}
 
-	setupBody := bytes.NewBufferString(`{"username":"admin","password":"StrongPass123"}`)
+	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+	markSameOriginAuthRequest(req)
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -252,6 +284,7 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	markSameOriginAuthRequest(req)
 	req.AddCookie(setupCookie)
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -272,15 +305,17 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	loginBody := bytes.NewBufferString(`{"username":"admin","password":"wrong-pass"}`)
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
+	markSameOriginAuthRequest(req)
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("login invalid status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 
-	loginBody = bytes.NewBufferString(`{"username":"admin","password":"StrongPass123"}`)
+	loginBody = bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
+	markSameOriginAuthRequest(req)
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
