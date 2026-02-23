@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -312,6 +313,28 @@ func sameOriginAuthRequest(c *gin.Context) bool {
 	return true
 }
 
+func rateLimitClientIP(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return "unknown"
+	}
+	remoteAddr := strings.TrimSpace(c.Request.RemoteAddr)
+	if remoteAddr == "" {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "unknown"
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return host
+}
+
 func metricsBearerMiddleware(token string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authz := strings.TrimSpace(c.GetHeader("Authorization"))
@@ -416,7 +439,7 @@ func handleAuthSetup(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "cross-site setup request denied"})
 		return
 	}
-	key := fmt.Sprintf("%s:setup", strings.TrimSpace(c.ClientIP()))
+	key := fmt.Sprintf("%s:setup", rateLimitClientIP(c))
 	if !setupRateLimiter.allow(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many setup attempts"})
 		return
@@ -463,7 +486,7 @@ func handleAuthLogin(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "cross-site login request denied"})
 		return
 	}
-	key := fmt.Sprintf("%s:login", strings.TrimSpace(c.ClientIP()))
+	key := fmt.Sprintf("%s:login", rateLimitClientIP(c))
 	if !loginRateLimiter.allow(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many login attempts"})
 		return

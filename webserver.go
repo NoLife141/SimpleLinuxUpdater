@@ -4540,9 +4540,6 @@ func main() {
 	}
 	startAuditPruner(context.Background())
 	log.Println("Starting web server on :8080")
-	if sessionManager == nil {
-		log.Fatalf("Failed to initialize session middleware")
-	}
 	if err := http.ListenAndServe(":8080", sessionManager.LoadAndSave(r)); err != nil {
 		log.Fatalf("Failed to run web server: %v", err)
 	}
