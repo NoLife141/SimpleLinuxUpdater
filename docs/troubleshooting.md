@@ -37,7 +37,7 @@ For single-user deployments, password recovery is a reset flow:
 
 Impact:
 
-- Deleting only `auth_users` resets login only.
+- Deleting only `auth_users` resets login.
 - Dropping the entire DB also removes saved servers, audit history, and app settings.
 
 ## Metrics authentication issues

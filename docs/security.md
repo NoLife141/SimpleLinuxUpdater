@@ -41,6 +41,7 @@ SimpleLinuxUpdater uses:
 Setup enforces a password policy for the local admin user in `auth_users`:
 
 - Minimum length: 10 characters
+- Maximum length: 64 characters
 - Must include at least one letter and one digit
 - Username is required, maximum 64 characters, and limited to supported SSH-safe characters
 

@@ -15,6 +15,7 @@
             --border: rgba(148, 163, 184, 0.2);
             --shadow: 0 10px 30px rgba(2, 8, 23, 0.35);
             --danger: #f87171;
+            --danger-bg: rgba(127, 29, 29, 0.35);
         }
 
         * { box-sizing: border-box; }
@@ -25,6 +26,7 @@
             font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
             color: var(--text);
             background: radial-gradient(1200px 700px at 80% -20%, rgba(56, 189, 248, 0.18), transparent 60%), var(--bg);
+            background: radial-gradient(1200px 700px at 80% -20%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 60%), var(--bg);
             display: grid;
             place-items: center;
             padding: 20px;
@@ -94,8 +96,10 @@
             display: none;
             margin-top: 12px;
             border: 1px solid rgba(248, 113, 113, 0.45);
-            background: rgba(127, 29, 29, 0.35);
-            color: #fecaca;
+            border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+            background: var(--danger-bg);
+            background: color-mix(in srgb, var(--danger) 35%, rgba(2, 8, 23, 0.65));
+            color: color-mix(in srgb, var(--danger) 25%, #ffffff);
             border-radius: 10px;
             padding: 10px 12px;
             font-size: 14px;
@@ -149,6 +153,10 @@
 
             const username = document.getElementById('username').value.trim();
             const password = document.getElementById('password').value;
+            if (!username) {
+                showError('Username is required.');
+                return;
+            }
 
             try {
                 const response = await fetch('/api/auth/login', {

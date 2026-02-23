@@ -28,6 +28,7 @@ const (
 	authSessionUserKey            = "auth_user"
 	authUserID                    = 1
 	authMinPasswordLen            = 10
+	authMaxPasswordLen            = 64
 	authLoginRateLimitMaxAttempts = 10
 	authSetupRateLimitMaxAttempts = 5
 	authRateLimitWindow           = 10 * time.Minute
@@ -52,14 +53,65 @@ type AuthRateLimiter struct {
 	window  time.Duration
 	max     int
 	buckets map[string]AuthRateBucket
+	stopCh  chan struct{}
+	doneCh  chan struct{}
+	stopMu  sync.Mutex
+	stopped bool
 }
 
 func NewAuthRateLimiter(window time.Duration, max int) *AuthRateLimiter {
-	return &AuthRateLimiter{
+	if window <= 0 {
+		window = authRateLimitWindow
+	}
+	limiter := &AuthRateLimiter{
 		window:  window,
 		max:     max,
 		buckets: make(map[string]AuthRateBucket),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
 	}
+	cleanupInterval := window / 2
+	if cleanupInterval < time.Minute {
+		cleanupInterval = time.Minute
+	}
+	go limiter.cleanupWorker(cleanupInterval)
+	return limiter
+}
+
+func (l *AuthRateLimiter) cleanupExpiredLocked(now time.Time) {
+	for key, bucket := range l.buckets {
+		if now.After(bucket.windowEnd) {
+			delete(l.buckets, key)
+		}
+	}
+}
+
+func (l *AuthRateLimiter) cleanupWorker(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	defer close(l.doneCh)
+	for {
+		select {
+		case <-l.stopCh:
+			return
+		case now := <-ticker.C:
+			l.mu.Lock()
+			l.cleanupExpiredLocked(now)
+			l.mu.Unlock()
+		}
+	}
+}
+
+func (l *AuthRateLimiter) Stop() {
+	l.stopMu.Lock()
+	if l.stopped {
+		l.stopMu.Unlock()
+		return
+	}
+	l.stopped = true
+	close(l.stopCh)
+	l.stopMu.Unlock()
+	<-l.doneCh
 }
 
 func (l *AuthRateLimiter) allow(key string) bool {
@@ -68,7 +120,11 @@ func (l *AuthRateLimiter) allow(key string) bool {
 	defer l.mu.Unlock()
 
 	bucket, ok := l.buckets[key]
-	if !ok || now.After(bucket.windowEnd) {
+	if ok && now.After(bucket.windowEnd) {
+		delete(l.buckets, key)
+		ok = false
+	}
+	if !ok {
 		l.buckets[key] = AuthRateBucket{
 			attempts:  1,
 			windowEnd: now.Add(l.window),
@@ -172,7 +228,7 @@ func setupRequired() (bool, error) {
 func getSingleUser() (username, passwordHash string, exists bool, err error) {
 	row := getDB().QueryRow("SELECT username, password_hash FROM auth_users WHERE id = ?", authUserID)
 	err = row.Scan(&username, &passwordHash)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", false, nil
 	}
 	if err != nil {
@@ -184,6 +240,9 @@ func getSingleUser() (username, passwordHash string, exists bool, err error) {
 func validatePasswordPolicy(password string) error {
 	if len(password) < authMinPasswordLen {
 		return fmt.Errorf("password must be at least %d characters long", authMinPasswordLen)
+	}
+	if len(password) > authMaxPasswordLen {
+		return fmt.Errorf("password must be %d characters or less", authMaxPasswordLen)
 	}
 	hasLetter := false
 	hasDigit := false
@@ -271,7 +330,7 @@ func authenticateUser(username, password string) (bool, error) {
 	}
 	match, err := argon2id.ComparePasswordAndHash(password, storedHash)
 	if err != nil {
-		return false, nil
+		return false, err
 	}
 	return match, nil
 }
@@ -514,6 +573,7 @@ func handleAuthLogin(c *gin.Context) {
 	username := strings.TrimSpace(req.Username)
 	ok, authErr := authenticateUser(username, req.Password)
 	if authErr != nil && !errors.Is(authErr, errSetupRequired) {
+		log.Printf("handleAuthLogin: authentication failed for username=%q: %v", username, authErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication failed"})
 		return
 	}
