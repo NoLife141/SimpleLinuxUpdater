@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -41,34 +42,34 @@ var (
 	errSetupRequired         = errors.New("setup required")
 )
 
-type authRateBucket struct {
+type AuthRateBucket struct {
 	attempts  int
 	windowEnd time.Time
 }
 
-type authRateLimiter struct {
+type AuthRateLimiter struct {
 	mu      sync.Mutex
 	window  time.Duration
 	max     int
-	buckets map[string]authRateBucket
+	buckets map[string]AuthRateBucket
 }
 
-func newAuthRateLimiter(window time.Duration, max int) *authRateLimiter {
-	return &authRateLimiter{
+func NewAuthRateLimiter(window time.Duration, max int) *AuthRateLimiter {
+	return &AuthRateLimiter{
 		window:  window,
 		max:     max,
-		buckets: make(map[string]authRateBucket),
+		buckets: make(map[string]AuthRateBucket),
 	}
 }
 
-func (l *authRateLimiter) allow(key string) bool {
+func (l *AuthRateLimiter) allow(key string) bool {
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	bucket, ok := l.buckets[key]
 	if !ok || now.After(bucket.windowEnd) {
-		l.buckets[key] = authRateBucket{
+		l.buckets[key] = AuthRateBucket{
 			attempts:  1,
 			windowEnd: now.Add(l.window),
 		}
@@ -83,11 +84,11 @@ func (l *authRateLimiter) allow(key string) bool {
 }
 
 var (
-	loginRateLimiter = newAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
-	setupRateLimiter = newAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	loginRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+	setupRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
 )
 
-type authCredentialsRequest struct {
+type AuthCredentialsRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
@@ -151,6 +152,9 @@ func metricsBearerTokenFromEnv() (string, error) {
 	token := strings.TrimSpace(os.Getenv(metricsBearerTokenEnv))
 	if token == "" {
 		return "", fmt.Errorf("%s must be set", metricsBearerTokenEnv)
+	}
+	if stringsEqualConstantTime(token, "change-me-metrics-token") {
+		return "", fmt.Errorf("%s must be changed from placeholder value", metricsBearerTokenEnv)
 	}
 	return token, nil
 }
@@ -314,18 +318,10 @@ func sameOriginAuthRequest(c *gin.Context) bool {
 }
 
 func rateLimitClientIP(c *gin.Context) string {
-	if c == nil || c.Request == nil {
+	if c == nil {
 		return "unknown"
 	}
-	remoteAddr := strings.TrimSpace(c.Request.RemoteAddr)
-	if remoteAddr == "" {
-		return "unknown"
-	}
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	host = strings.TrimSpace(host)
+	host := strings.TrimSpace(c.ClientIP())
 	if host == "" {
 		return "unknown"
 	}
@@ -454,19 +450,28 @@ func handleAuthSetup(c *gin.Context) {
 		return
 	}
 
-	var req authCredentialsRequest
+	var req AuthCredentialsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 		return
 	}
 	username := strings.TrimSpace(req.Username)
 	password := req.Password
+	if err := validateAuthUsername(username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validatePasswordPolicy(password); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := createInitialUser(username, password); err != nil {
 		switch {
 		case errors.Is(err, errSetupAlreadyCompleted):
 			c.JSON(http.StatusConflict, gin.H{"error": "setup already completed"})
 		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			log.Printf("handleAuthSetup: failed to create initial user for username=%q: %v", username, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		}
 		return
 	}
@@ -501,7 +506,7 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 
-	var req authCredentialsRequest
+	var req AuthCredentialsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 		return

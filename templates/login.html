@@ -75,7 +75,9 @@
         input:focus {
             outline: none;
             border-color: rgba(56, 189, 248, 0.55);
+            border-color: color-mix(in srgb, var(--accent) 55%, transparent);
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
         }
 
         button {
@@ -85,6 +87,7 @@
 
         button:hover {
             border-color: rgba(56, 189, 248, 0.55);
+            border-color: color-mix(in srgb, var(--accent) 55%, transparent);
         }
 
         .error {
@@ -107,7 +110,7 @@
             <label for="username">Username</label>
             <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
             <label for="password">Password</label>
-            <input id="password" name="password" type="password" required autocomplete="current-password">
+            <input id="password" name="password" type="password" required maxlength="64" autocomplete="current-password">
             <button type="submit">Sign in</button>
         </form>
         <div id="error-banner" class="error"></div>

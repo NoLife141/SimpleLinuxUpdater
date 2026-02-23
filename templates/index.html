@@ -929,17 +929,8 @@
         </div>
     </div>
 
+    <script src="/static/auth.js"></script>
     <script>
-        const nativeFetch = window.fetch.bind(window);
-        window.fetch = async (...args) => {
-            const response = await nativeFetch(...args);
-            if (response.status === 401) {
-                window.location.href = '/login';
-                throw new Error('Authentication required');
-            }
-            return response;
-        };
-
         const LOG_BOTTOM_THRESHOLD = 20;
         let sortKey = "name";
         let sortDir = "asc";
@@ -1778,16 +1769,7 @@
             fetchServers();
         }
 
-        async function logout() {
-            try {
-                await nativeFetch('/api/auth/logout', { method: 'POST' });
-            } catch (_) {
-                // Best effort.
-            }
-            window.location.href = '/login';
-        }
-
-        document.getElementById('logout-btn').addEventListener('click', logout);
+        document.getElementById('logout-btn').addEventListener('click', () => window.logout());
         initColumnResizing();
         setInterval(fetchServers, 2000);
         fetchServers();

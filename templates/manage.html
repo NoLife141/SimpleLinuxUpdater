@@ -715,17 +715,8 @@
         </div>
     </div>
 
+    <script src="/static/auth.js"></script>
     <script>
-        const nativeFetch = window.fetch.bind(window);
-        window.fetch = async (...args) => {
-            const response = await nativeFetch(...args);
-            if (response.status === 401) {
-                window.location.href = '/login';
-                throw new Error('Authentication required');
-            }
-            return response;
-        };
-
         let serverCache = {};
         let sortKey = "name";
         let sortDir = "asc";
@@ -1301,16 +1292,7 @@
             status.textContent = data.has_key ? 'Global key: saved' : 'Global key: not set';
         }
 
-        async function logout() {
-            try {
-                await nativeFetch('/api/auth/logout', { method: 'POST' });
-            } catch (_) {
-                // Best effort.
-            }
-            window.location.href = '/login';
-        }
-
-        document.getElementById('logout-btn').addEventListener('click', logout);
+        document.getElementById('logout-btn').addEventListener('click', () => window.logout());
         fetchManageServers();
         fetchGlobalKeyStatus();
         fetchAuditEvents();

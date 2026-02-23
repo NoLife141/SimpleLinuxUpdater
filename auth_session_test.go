@@ -32,8 +32,7 @@ func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder)
 
 func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 	preserveDBState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-lifecycle.db"))
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", t.TempDir()+"/auth-session.db")
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-session.db"))
 
 	required, err := setupRequired()
 	if err != nil {
@@ -84,6 +83,13 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 	if ok {
 		t.Fatalf("authenticateUser(invalid) = true, want false")
 	}
+	ok, err = authenticateUser("ghost", "anything")
+	if err != nil {
+		t.Fatalf("authenticateUser(non-existent user) unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("authenticateUser(non-existent user) = true, want false")
+	}
 
 	if err := createInitialUser("second", "StrongPass999"); err == nil {
 		t.Fatalf("createInitialUser(second) error = nil, want errSetupAlreadyCompleted")
@@ -129,6 +135,10 @@ func TestMetricsBearerTokenFromEnv(t *testing.T) {
 	if _, err := metricsBearerTokenFromEnv(); err == nil {
 		t.Fatalf("metricsBearerTokenFromEnv() error = nil, want error when token is missing")
 	}
+	t.Setenv(metricsBearerTokenEnv, "change-me-metrics-token")
+	if _, err := metricsBearerTokenFromEnv(); err == nil {
+		t.Fatalf("metricsBearerTokenFromEnv() error = nil, want error for placeholder token")
+	}
 
 	t.Setenv(metricsBearerTokenEnv, " test-token ")
 	token, err := metricsBearerTokenFromEnv()
@@ -143,8 +153,7 @@ func TestMetricsBearerTokenFromEnv(t *testing.T) {
 func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	preserveDBState(t)
 	preserveSessionState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-gate.db"))
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", t.TempDir()+"/auth-flow.db")
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-flow.db"))
 
 	sm, err := newSessionManager(getDB())
 	if err != nil {

@@ -5,6 +5,7 @@
 ## Table of contents
 
 - [Setup and login issues](#setup-and-login-issues)
+- [Forgotten admin password](#forgotten-admin-password)
 - [Metrics authentication issues](#metrics-authentication-issues)
 - [SSH host key issues](#ssh-host-key-issues)
 - [APT locks and missing fuser](#apt-locks-and-missing-fuser)
@@ -25,6 +26,19 @@ Checks:
 - If behind HTTPS, ensure `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` matches your deployment:
   - `true` when served over HTTPS
   - `false` for local plain HTTP testing
+
+## Forgotten admin password
+
+For single-user deployments, password recovery is a reset flow:
+
+1. Stop the application.
+2. Remove the local auth record by deleting rows from `auth_users` (or drop/reset the whole application database if you prefer full reset).
+3. Start the application again and revisit `/setup` to create a new admin user.
+
+Impact:
+
+- Deleting only `auth_users` resets login only.
+- Dropping the entire DB also removes saved servers, audit history, and app settings.
 
 ## Metrics authentication issues
 

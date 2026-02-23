@@ -55,6 +55,12 @@ For Prometheus, configure your scraper with:
 
 - `Authorization: Bearer <DEBIAN_UPDATER_METRICS_BEARER_TOKEN>`
 
+Environment variables for auth/metrics:
+
+- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`: required non-empty bearer token for `/metrics`.
+- `DEBIAN_UPDATER_SESSION_COOKIE_SECURE`: optional boolean (`true|false`, default `false`), enables secure-only session cookies; set `true` behind HTTPS.
+- `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`: optional integer idle timeout in hours; `0` or unset keeps default behavior.
+
 ### Binary (prebuilt release)
 
 Download the archive for your platform from GitHub Releases and run the included `webserver` binary. Release archives include `templates/`, `static/`, and `.env-template`.

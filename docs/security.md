@@ -38,10 +38,16 @@ SimpleLinuxUpdater uses:
 - Server-side sessions stored in SQLite (`sessions` table)
 - Session cookies with `HttpOnly` and `SameSite=Lax`
 
+Setup enforces a password policy for the local admin user in `auth_users`:
+
+- Minimum length: 10 characters
+- Must include at least one letter and one digit
+- Username is required, maximum 64 characters, and limited to supported SSH-safe characters
+
 Session hardening options:
 
 - Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` when running behind HTTPS.
-- Optionally set `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`.
+- Optionally set `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (hours). Default is `0`/unset, which means no additional idle timeout is applied.
 
 ## Metrics endpoint protection
 
