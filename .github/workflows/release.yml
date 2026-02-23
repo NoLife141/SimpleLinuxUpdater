@@ -73,7 +73,7 @@ jobs:
             PKG_DIR="dist/${APP}_${GOOS}_${GOARCH}"
             PKG_ROOT="${PKG_DIR}/${APP}"
 
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "dist/${BIN}" webserver.go
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "dist/${BIN}" .
 
             mkdir -p "$PKG_ROOT"
             cp "dist/${BIN}" "${PKG_ROOT}/webserver${EXT}"
