@@ -6,9 +6,11 @@
 
 - [Summary](#summary)
 - [Threat model](#threat-model)
-- [Authentication](#authentication)
+- [Authentication model](#authentication-model)
+- [Metrics endpoint protection](#metrics-endpoint-protection)
 - [Encryption at rest](#encryption-at-rest)
 - [Remote sudo behavior](#remote-sudo-behavior)
+- [SSH key handling](#ssh-key-handling)
 - [Recommended hardening](#recommended-hardening)
 
 ## Summary
@@ -25,16 +27,48 @@ Treat it as privileged infrastructure.
 
 - Intended for trusted LAN/VPN environments only.
 - No TLS termination by default; use a reverse proxy for HTTPS.
-- Basic Auth is optional and disabled unless configured.
+- Single-user local authentication is intended for small trusted teams/homelabs.
 
-## Authentication
+## Authentication model
 
-Enable Basic Auth:
+SimpleLinuxUpdater uses:
 
-- `DEBIAN_UPDATER_BASIC_AUTH_USER`
-- `DEBIAN_UPDATER_BASIC_AUTH_PASS`
+- First-run setup at `/setup` to create one local admin user
+- Argon2id password hashing (`auth_users` table in SQLite)
+- Server-side sessions stored in SQLite (`sessions` table)
+- Session cookies with `HttpOnly` and `SameSite=Lax`
 
-When enabled, it protects the full UI and API surface, including `/metrics`.
+Setup enforces a password policy for the local admin user in `auth_users`:
+
+- Minimum length: 10 characters
+- Maximum length: 64 characters
+- Must include at least one letter and one digit
+- Username is required, maximum 64 characters, and limited to supported SSH-safe characters
+
+Session hardening options:
+
+- Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` when running behind HTTPS.
+- Optionally set `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (hours). Default is `0`/unset, which means no additional idle timeout is applied.
+
+## Metrics endpoint protection
+
+`/metrics` is protected by a bearer token, separate from UI sessions.
+
+Configure from the Manage page:
+
+- Generate/rotate the Metrics API token in-app
+- Store the one-time token output securely for your scraper
+- Disable token to make `/metrics` return `404`
+
+Scrapers must send:
+
+```text
+Authorization: Bearer <token>
+```
+
+Operational note:
+
+- Auth and metrics rate limiting is in-memory per process. In multi-instance deployments, enforce global limits at the load balancer/API gateway.
 
 ## Encryption at rest
 
@@ -83,5 +117,6 @@ sudo visudo -c
 
 - Do not expose the UI to the public internet.
 - Restrict access with a VPN and/or reverse proxy controls.
-- Use Basic Auth and strong passwords.
+- Use HTTPS and set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true`.
+- Store the generated Metrics API token in a secret manager and rotate it periodically.
 - Protect the persisted volume (`/data`) like a secret.

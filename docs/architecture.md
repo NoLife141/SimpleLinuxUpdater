@@ -23,6 +23,8 @@ SQLite stores:
 
 - Server inventory and encrypted credentials
 - Audit events (`audit_events`)
+- Local auth user (`auth_users`)
+- Server-side sessions (`sessions`)
 
 An encryption key is stored in `config.json` alongside the DB (typically under `/data`).
 
@@ -45,7 +47,7 @@ Typical update:
 
 ## Audit events
 
-Actions record status, message, and metadata. When Basic Auth is enabled, the actor is the Basic Auth username.
+Actions record status, message, and metadata. The actor is the authenticated session username (or `system` for internal/background flows).
 
 The audit store is auto-pruned (default retention 90 days).
 

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SimpleLinuxUpdater - Observability</title>
+    <title>Observability</title>
     <style>
         :root {
             --bg: #0b1220;
@@ -144,11 +144,12 @@
 <body>
     <div class="page">
         <header class="hero">
-            <h1>SimpleLinuxUpdater Observability</h1>
+            <h1>Observability</h1>
             <p class="subtle">Update success rate, average duration, and failure causes over time.</p>
             <div class="nav">
                 <a class="btn-link" href="/">View Status</a>
                 <a class="btn-link" href="/manage">Manage Servers</a>
+                <button class="btn-link" type="button" id="logout-btn">Logout</button>
             </div>
         </header>
 
@@ -214,6 +215,7 @@
         </section>
     </div>
 
+    <script src="/static/auth.js"></script>
     <script>
         const windowSelect = document.getElementById('window-select');
         const refreshBtn = document.getElementById('refresh-btn');
@@ -360,6 +362,7 @@
 
         refreshBtn.addEventListener('click', fetchObservabilitySummary);
         windowSelect.addEventListener('change', fetchObservabilitySummary);
+        document.getElementById('logout-btn').addEventListener('click', () => window.logout());
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 stopAutoRefresh();

@@ -20,14 +20,17 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/alexedwards/argon2id"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -80,6 +83,10 @@ var keyOnce sync.Once
 var encryptionKey []byte
 var globalKeyMu sync.RWMutex
 var globalKey string
+var metricsBearerTokenHashMu sync.RWMutex
+var metricsBearerTokenHash string
+var metricsBearerTokenHashLoaded bool
+var metricsBearerTokenHashDBPath string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
@@ -90,8 +97,8 @@ var observabilityCache = make(map[string]observabilityCacheEntry)
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
 const globalKeySetting = "global_ssh_key"
-const basicAuthUserEnv = "DEBIAN_UPDATER_BASIC_AUTH_USER"
-const basicAuthPassEnv = "DEBIAN_UPDATER_BASIC_AUTH_PASS"
+const metricsBearerTokenHashSetting = "metrics_bearer_token_hash"
+const metricsBearerTokenEntropyBytes = 32
 const maxUploadedKeyBytes = 64 * 1024
 const sshConnectTimeout = 15 * time.Second
 const auditRetentionDays = 90
@@ -437,6 +444,85 @@ func ensureSchema(db *sql.DB) error {
 		}
 	}
 	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS auth_users (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			username TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			token TEXT PRIMARY KEY,
+			data BLOB NOT NULL,
+			expiry REAL NOT NULL
+		)
+	`); err != nil {
+		return err
+	}
+	sessionRows, err := db.Query("PRAGMA table_info(sessions)")
+	if err != nil {
+		return err
+	}
+	defer sessionRows.Close()
+	hasSessionToken := false
+	hasSessionData := false
+	hasSessionExpiry := false
+	hasSessionExpires := false
+	for sessionRows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := sessionRows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		switch name {
+		case "token":
+			hasSessionToken = true
+		case "data":
+			hasSessionData = true
+		case "expiry":
+			hasSessionExpiry = true
+		case "expires":
+			hasSessionExpires = true
+		}
+	}
+	if err := sessionRows.Err(); err != nil {
+		return err
+	}
+	// Session rows are ephemeral: if legacy schema is incompatible, recreate table.
+	if !hasSessionToken || !hasSessionData {
+		if _, err := db.Exec("DROP TABLE IF EXISTS sessions"); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`
+			CREATE TABLE sessions (
+				token TEXT PRIMARY KEY,
+				data BLOB NOT NULL,
+				expiry REAL NOT NULL
+			)
+		`); err != nil {
+			return err
+		}
+		hasSessionExpiry = true
+	} else if !hasSessionExpiry {
+		if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN expiry REAL NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+		if hasSessionExpires {
+			if _, err := db.Exec("UPDATE sessions SET expiry = CAST(expires AS REAL) WHERE expiry = 0"); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expiry)"); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`
@@ -1843,6 +1929,31 @@ func handleMetrics(c *gin.Context) {
 	c.Data(http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
 }
 
+func handleMetricsTokenStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"enabled": strings.TrimSpace(getMetricsBearerTokenHash()) != ""})
+}
+
+func handleMetricsTokenRotate(c *gin.Context) {
+	token, err := issueMetricsBearerToken()
+	if err != nil {
+		audit(c, "metrics.token.rotate", "metrics_token", "metrics", "failure", "Failed to rotate metrics API token", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate metrics token"})
+		return
+	}
+	audit(c, "metrics.token.rotate", "metrics_token", "metrics", "success", "Metrics API token rotated", nil)
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "token": token})
+}
+
+func handleMetricsTokenClear(c *gin.Context) {
+	if err := clearMetricsBearerTokenHash(); err != nil {
+		audit(c, "metrics.token.clear", "metrics_token", "metrics", "failure", "Failed to disable metrics API token", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to disable metrics token"})
+		return
+	}
+	audit(c, "metrics.token.clear", "metrics_token", "metrics", "success", "Metrics API token disabled", nil)
+	c.JSON(http.StatusOK, gin.H{"enabled": false, "message": "Metrics token disabled"})
+}
+
 func actorFromContext(c *gin.Context) string {
 	if c == nil {
 		return "system"
@@ -2247,31 +2358,6 @@ func readUploadedPrivateKey(file *multipart.FileHeader) (string, error) {
 
 func stringsEqualConstantTime(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
-
-func basicAuthMiddleware(username, password string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		user, pass, ok := c.Request.BasicAuth()
-		if !ok || !stringsEqualConstantTime(user, username) || !stringsEqualConstantTime(pass, password) {
-			c.Header("WWW-Authenticate", `Basic realm="SimpleLinuxUpdater"`)
-			c.AbortWithStatus(http.StatusUnauthorized)
-			return
-		}
-		c.Set("actor", user)
-		c.Next()
-	}
-}
-
-func basicAuthFromEnv() (string, string, bool, error) {
-	username := strings.TrimSpace(os.Getenv(basicAuthUserEnv))
-	password := os.Getenv(basicAuthPassEnv)
-	if username == "" && password == "" {
-		return "", "", false, nil
-	}
-	if username == "" || password == "" {
-		return "", "", false, fmt.Errorf("%s and %s must both be set", basicAuthUserEnv, basicAuthPassEnv)
-	}
-	return username, password, true, nil
 }
 
 func init() {
@@ -3443,6 +3529,108 @@ func clearGlobalKey() error {
 	return nil
 }
 
+func generateMetricsBearerToken() (string, error) {
+	buf := make([]byte, metricsBearerTokenEntropyBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate metrics token entropy: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func getMetricsBearerTokenHash() string {
+	cacheDBPath := dbPath()
+	metricsBearerTokenHashMu.RLock()
+	if metricsBearerTokenHashLoaded && metricsBearerTokenHashDBPath == cacheDBPath {
+		cached := metricsBearerTokenHash
+		metricsBearerTokenHashMu.RUnlock()
+		return cached
+	}
+	cached := ""
+	if metricsBearerTokenHashDBPath == cacheDBPath {
+		cached = metricsBearerTokenHash
+	}
+	metricsBearerTokenHashMu.RUnlock()
+
+	db := getDB()
+	for attempt := 1; attempt <= 3; attempt++ {
+		var tokenHash string
+		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", metricsBearerTokenHashSetting).Scan(&tokenHash)
+		if err == sql.ErrNoRows {
+			metricsBearerTokenHashMu.Lock()
+			metricsBearerTokenHash = ""
+			metricsBearerTokenHashLoaded = true
+			metricsBearerTokenHashDBPath = cacheDBPath
+			metricsBearerTokenHashMu.Unlock()
+			return ""
+		}
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "database is locked") && attempt < 3 {
+				time.Sleep(75 * time.Millisecond)
+				continue
+			}
+			log.Printf("Failed to load metrics bearer token hash: %v", err)
+			return strings.TrimSpace(cached)
+		}
+		tokenHash = strings.TrimSpace(tokenHash)
+		metricsBearerTokenHashMu.Lock()
+		metricsBearerTokenHash = tokenHash
+		metricsBearerTokenHashLoaded = true
+		metricsBearerTokenHashDBPath = cacheDBPath
+		metricsBearerTokenHashMu.Unlock()
+		return tokenHash
+	}
+	return strings.TrimSpace(cached)
+}
+
+func setMetricsBearerTokenHash(tokenHash string) error {
+	tokenHash = strings.TrimSpace(tokenHash)
+	if tokenHash == "" {
+		return errors.New("metrics bearer token hash is required")
+	}
+	db := getDB()
+	_, err := db.Exec(
+		"INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		metricsBearerTokenHashSetting, tokenHash,
+	)
+	if err != nil {
+		return err
+	}
+	metricsBearerTokenHashMu.Lock()
+	metricsBearerTokenHash = tokenHash
+	metricsBearerTokenHashLoaded = true
+	metricsBearerTokenHashDBPath = dbPath()
+	metricsBearerTokenHashMu.Unlock()
+	return nil
+}
+
+func clearMetricsBearerTokenHash() error {
+	db := getDB()
+	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", metricsBearerTokenHashSetting); err != nil {
+		return err
+	}
+	metricsBearerTokenHashMu.Lock()
+	metricsBearerTokenHash = ""
+	metricsBearerTokenHashLoaded = true
+	metricsBearerTokenHashDBPath = dbPath()
+	metricsBearerTokenHashMu.Unlock()
+	return nil
+}
+
+func issueMetricsBearerToken() (string, error) {
+	token, err := generateMetricsBearerToken()
+	if err != nil {
+		return "", err
+	}
+	tokenHash, err := argon2id.CreateHash(token, argon2id.DefaultParams)
+	if err != nil {
+		return "", err
+	}
+	if err := setMetricsBearerTokenHash(tokenHash); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 func updateServerKey(name, key string) error {
 	enc, err := encryptSecret(key)
 	if err != nil {
@@ -3741,21 +3929,25 @@ func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 	return methods, nil
 }
 
-func main() {
+func setupRouter() (*gin.Engine, error) {
 	r := gin.Default()
-	username, password, basicAuthEnabled, err := basicAuthFromEnv()
+	sm, err := newSessionManager(getDB())
 	if err != nil {
-		log.Fatalf("Invalid basic auth configuration: %v", err)
+		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
 	}
-	if basicAuthEnabled {
-		r.Use(basicAuthMiddleware(username, password))
-		log.Printf("Basic auth enabled from %s/%s", basicAuthUserEnv, basicAuthPassEnv)
-	} else {
-		log.Printf("Basic auth is disabled (set %s and %s to enable it)", basicAuthUserEnv, basicAuthPassEnv)
-	}
+	sessionManager = sm
+
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
-	startAuditPruner(context.Background())
+
+	r.GET("/setup", handleSetupPage)
+	r.GET("/login", handleLoginPage)
+	r.POST("/api/auth/setup", handleAuthSetup)
+	r.POST("/api/auth/login", handleAuthLogin)
+	r.GET("/api/auth/status", handleAuthStatus)
+	r.GET("/metrics", metricsBearerMiddleware(), handleMetrics)
+
+	r.Use(authGateMiddleware())
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -3769,7 +3961,10 @@ func main() {
 		c.HTML(http.StatusOK, "observability.html", nil)
 	})
 
-	r.GET("/metrics", handleMetrics)
+	r.POST("/api/auth/logout", handleAuthLogout)
+	r.GET("/api/metrics/token", handleMetricsTokenStatus)
+	r.POST("/api/metrics/token", handleMetricsTokenRotate)
+	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
@@ -4469,6 +4664,35 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"logs": logs})
 	})
 
+	return r, nil
+}
+
+func main() {
+	r, err := setupRouter()
+	if err != nil {
+		log.Fatalf("Failed to setup router: %v", err)
+	}
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	startAuditPruner(shutdownCtx)
+	defer StopAuthRateLimiters()
+	server := &http.Server{
+		Addr:         ":8080",
+		Handler:      sessionManager.LoadAndSave(r),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+	go func() {
+		<-shutdownCtx.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("Failed to shutdown web server cleanly: %v", err)
+		}
+	}()
 	log.Println("Starting web server on :8080")
-	r.Run(":8080")
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatalf("Failed to run web server: %v", err)
+	}
 }

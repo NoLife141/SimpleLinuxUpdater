@@ -4,40 +4,53 @@
 
 ## Table of contents
 
-- [Basic Auth](#basic-auth)
+- [Authentication and sessions](#authentication-and-sessions)
+- [Metrics API token](#metrics-api-token)
 - [Storage paths](#storage-paths)
 - [Retry policy](#retry-policy)
 - [Post-update checks](#post-update-checks)
 - [Known hosts handling](#known-hosts-handling)
 - [Environment file (.env)](#environment-file-env)
 
-## Basic Auth
+## Authentication and sessions
 
-Basic Auth is optional but strongly recommended.
+SimpleLinuxUpdater now uses a built-in single-user login flow:
+
+- First run requires setup at `/setup` to create the initial local user.
+- Passwords are stored as Argon2id hashes in SQLite (`auth_users` table).
+- Authenticated UI/API access uses server-side sessions stored in SQLite.
+
+Session defaults:
+
+- Lifetime: 30 days
+- Cookie: `HttpOnly`, `SameSite=Lax`
+- Cookie `Secure`: configurable (recommended `true` behind HTTPS)
 
 Environment variables:
 
-- `DEBIAN_UPDATER_BASIC_AUTH_USER`
-- `DEBIAN_UPDATER_BASIC_AUTH_PASS`
+- `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` (`true|false`, default `false`)
+- `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (optional, integer hours; unset/`0` keeps default behavior)
 
-Rules:
+## Metrics API token
 
-- If both are unset, Basic Auth is disabled.
-- If only one is set, the server exits on startup with a configuration error.
+`/metrics` is protected separately from UI sessions for machine-to-machine scraping.
 
-Example:
+Behavior:
 
-```bash
-export DEBIAN_UPDATER_BASIC_AUTH_USER=admin
-export DEBIAN_UPDATER_BASIC_AUTH_PASS='change-me'
-./webserver
+- Disabled by default.
+- Enabled only after generating a token from the Manage page.
+- Token is shown once on create/rotate; if lost, rotate again.
+- Scrape requests are rate-limited per client IP (in-memory, per app instance).
+
+Prometheus must send:
+
+```text
+Authorization: Bearer <token>
 ```
-
-When Basic Auth is enabled, all routes (including `/metrics` and `/observability`) require authentication.
 
 ## Storage paths
 
-The updater persists state in SQLite and encrypts credentials (passwords and SSH keys) at rest.
+The updater persists state in SQLite and encrypts SSH credentials at rest.
 
 Defaults:
 
@@ -106,5 +119,5 @@ Default behavior:
 For Docker, `.env` is not automatically loaded unless you pass it:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-updater-web
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
 ```

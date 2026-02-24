@@ -3,6 +3,9 @@ module debian-updater
 go 1.26.0
 
 require (
+	github.com/alexedwards/argon2id v1.0.0
+	github.com/alexedwards/scs/sqlite3store v0.0.0-20251002162104-209de6e426de
+	github.com/alexedwards/scs/v2 v2.9.0
 	github.com/gin-gonic/gin v1.11.0
 	golang.org/x/crypto v0.48.0
 	modernc.org/sqlite v1.46.1

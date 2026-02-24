@@ -4,7 +4,9 @@
 
 ## Table of contents
 
-- [Basic Auth issues](#basic-auth-issues)
+- [Setup and login issues](#setup-and-login-issues)
+- [Forgotten admin password](#forgotten-admin-password)
+- [Metrics authentication issues](#metrics-authentication-issues)
 - [SSH host key issues](#ssh-host-key-issues)
 - [APT locks and missing fuser](#apt-locks-and-missing-fuser)
 - [Pre-check failures](#pre-check-failures)
@@ -12,13 +14,41 @@
 - [CVE enrichment issues](#cve-enrichment-issues)
 - [Database and file permissions](#database-and-file-permissions)
 
-## Basic Auth issues
+## Setup and login issues
 
-Symptom: startup error about invalid Basic Auth configuration.
+Symptom: cannot create user, cannot log in, or repeated redirects to `/login`.
 
-Fix:
+Checks:
 
-- Set both `DEBIAN_UPDATER_BASIC_AUTH_USER` and `DEBIAN_UPDATER_BASIC_AUTH_PASS`, or unset both.
+- On first run, you must complete `/setup` before `/login` works.
+- Password must meet policy requirements (length and complexity).
+- Confirm your browser accepts cookies for the app host.
+- If behind HTTPS, ensure `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` matches your deployment:
+  - `true` when served over HTTPS
+  - `false` for local plain HTTP testing
+
+## Forgotten admin password
+
+For single-user deployments, password recovery is a reset flow:
+
+1. Stop the application.
+2. Remove the local auth record by deleting rows from `auth_users` (or drop/reset the whole application database if you prefer full reset).
+3. Start the application again and revisit `/setup` to create a new admin user.
+
+Impact:
+
+- Deleting only `auth_users` resets login.
+- Dropping the entire DB also removes saved servers, audit history, and app settings.
+
+## Metrics authentication issues
+
+Symptom: `/metrics` returns `404` or `401`.
+
+Checks:
+
+- If `404`: metrics token is not configured (generate one from `/manage`).
+- If `401`: scraper must send `Authorization: Bearer <token>`.
+- If token was rotated, update scraper credentials to the newest token.
 
 ## SSH host key issues
 
