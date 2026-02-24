@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alexedwards/argon2id"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -82,6 +83,10 @@ var keyOnce sync.Once
 var encryptionKey []byte
 var globalKeyMu sync.RWMutex
 var globalKey string
+var metricsBearerTokenHashMu sync.RWMutex
+var metricsBearerTokenHash string
+var metricsBearerTokenHashLoaded bool
+var metricsBearerTokenHashDBPath string
 var knownHostsMu sync.Mutex
 var scanHostKeyFunc = scanHostKey
 var saveServersFunc = saveServers
@@ -92,6 +97,8 @@ var observabilityCache = make(map[string]observabilityCacheEntry)
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
 const globalKeySetting = "global_ssh_key"
+const metricsBearerTokenHashSetting = "metrics_bearer_token_hash"
+const metricsBearerTokenEntropyBytes = 32
 const maxUploadedKeyBytes = 64 * 1024
 const sshConnectTimeout = 15 * time.Second
 const auditRetentionDays = 90
@@ -1922,6 +1929,31 @@ func handleMetrics(c *gin.Context) {
 	c.Data(http.StatusOK, "text/plain; version=0.0.4", []byte(b.String()))
 }
 
+func handleMetricsTokenStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"enabled": strings.TrimSpace(getMetricsBearerTokenHash()) != ""})
+}
+
+func handleMetricsTokenRotate(c *gin.Context) {
+	token, err := issueMetricsBearerToken()
+	if err != nil {
+		audit(c, "metrics.token.rotate", "metrics_token", "metrics", "failure", "Failed to rotate metrics API token", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate metrics token"})
+		return
+	}
+	audit(c, "metrics.token.rotate", "metrics_token", "metrics", "success", "Metrics API token rotated", nil)
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "token": token})
+}
+
+func handleMetricsTokenClear(c *gin.Context) {
+	if err := clearMetricsBearerTokenHash(); err != nil {
+		audit(c, "metrics.token.clear", "metrics_token", "metrics", "failure", "Failed to disable metrics API token", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to disable metrics token"})
+		return
+	}
+	audit(c, "metrics.token.clear", "metrics_token", "metrics", "success", "Metrics API token disabled", nil)
+	c.JSON(http.StatusOK, gin.H{"enabled": false, "message": "Metrics token disabled"})
+}
+
 func actorFromContext(c *gin.Context) string {
 	if c == nil {
 		return "system"
@@ -3497,6 +3529,108 @@ func clearGlobalKey() error {
 	return nil
 }
 
+func generateMetricsBearerToken() (string, error) {
+	buf := make([]byte, metricsBearerTokenEntropyBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate metrics token entropy: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func getMetricsBearerTokenHash() string {
+	cacheDBPath := dbPath()
+	metricsBearerTokenHashMu.RLock()
+	if metricsBearerTokenHashLoaded && metricsBearerTokenHashDBPath == cacheDBPath {
+		cached := metricsBearerTokenHash
+		metricsBearerTokenHashMu.RUnlock()
+		return cached
+	}
+	cached := ""
+	if metricsBearerTokenHashDBPath == cacheDBPath {
+		cached = metricsBearerTokenHash
+	}
+	metricsBearerTokenHashMu.RUnlock()
+
+	db := getDB()
+	for attempt := 1; attempt <= 3; attempt++ {
+		var tokenHash string
+		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", metricsBearerTokenHashSetting).Scan(&tokenHash)
+		if err == sql.ErrNoRows {
+			metricsBearerTokenHashMu.Lock()
+			metricsBearerTokenHash = ""
+			metricsBearerTokenHashLoaded = true
+			metricsBearerTokenHashDBPath = cacheDBPath
+			metricsBearerTokenHashMu.Unlock()
+			return ""
+		}
+		if err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "database is locked") && attempt < 3 {
+				time.Sleep(75 * time.Millisecond)
+				continue
+			}
+			log.Printf("Failed to load metrics bearer token hash: %v", err)
+			return strings.TrimSpace(cached)
+		}
+		tokenHash = strings.TrimSpace(tokenHash)
+		metricsBearerTokenHashMu.Lock()
+		metricsBearerTokenHash = tokenHash
+		metricsBearerTokenHashLoaded = true
+		metricsBearerTokenHashDBPath = cacheDBPath
+		metricsBearerTokenHashMu.Unlock()
+		return tokenHash
+	}
+	return strings.TrimSpace(cached)
+}
+
+func setMetricsBearerTokenHash(tokenHash string) error {
+	tokenHash = strings.TrimSpace(tokenHash)
+	if tokenHash == "" {
+		return errors.New("metrics bearer token hash is required")
+	}
+	db := getDB()
+	_, err := db.Exec(
+		"INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		metricsBearerTokenHashSetting, tokenHash,
+	)
+	if err != nil {
+		return err
+	}
+	metricsBearerTokenHashMu.Lock()
+	metricsBearerTokenHash = tokenHash
+	metricsBearerTokenHashLoaded = true
+	metricsBearerTokenHashDBPath = dbPath()
+	metricsBearerTokenHashMu.Unlock()
+	return nil
+}
+
+func clearMetricsBearerTokenHash() error {
+	db := getDB()
+	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", metricsBearerTokenHashSetting); err != nil {
+		return err
+	}
+	metricsBearerTokenHashMu.Lock()
+	metricsBearerTokenHash = ""
+	metricsBearerTokenHashLoaded = true
+	metricsBearerTokenHashDBPath = dbPath()
+	metricsBearerTokenHashMu.Unlock()
+	return nil
+}
+
+func issueMetricsBearerToken() (string, error) {
+	token, err := generateMetricsBearerToken()
+	if err != nil {
+		return "", err
+	}
+	tokenHash, err := argon2id.CreateHash(token, argon2id.DefaultParams)
+	if err != nil {
+		return "", err
+	}
+	if err := setMetricsBearerTokenHash(tokenHash); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
 func updateServerKey(name, key string) error {
 	enc, err := encryptSecret(key)
 	if err != nil {
@@ -3803,15 +3937,6 @@ func setupRouter() (*gin.Engine, error) {
 	}
 	sessionManager = sm
 
-	metricsToken, err := metricsBearerTokenFromEnv()
-	if err != nil {
-		if errors.Is(err, errMetricsBearerTokenMissing) {
-			metricsToken = ""
-		} else {
-			return nil, fmt.Errorf("invalid metrics bearer configuration: %w", err)
-		}
-	}
-
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
 
@@ -3820,9 +3945,7 @@ func setupRouter() (*gin.Engine, error) {
 	r.POST("/api/auth/setup", handleAuthSetup)
 	r.POST("/api/auth/login", handleAuthLogin)
 	r.GET("/api/auth/status", handleAuthStatus)
-	if metricsToken != "" {
-		r.GET("/metrics", metricsBearerMiddleware(metricsToken), handleMetrics)
-	}
+	r.GET("/metrics", metricsBearerMiddleware(), handleMetrics)
 
 	r.Use(authGateMiddleware())
 
@@ -3839,6 +3962,9 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.POST("/api/auth/logout", handleAuthLogout)
+	r.GET("/api/metrics/token", handleMetricsTokenStatus)
+	r.POST("/api/metrics/token", handleMetricsTokenRotate)
+	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()

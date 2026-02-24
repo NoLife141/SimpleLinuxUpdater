@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alexedwards/argon2id"
 	"github.com/gin-gonic/gin"
 )
 
@@ -40,6 +42,23 @@ func preserveRateLimiterState(t *testing.T) {
 		testSetup.Stop()
 		loginRateLimiter = origLogin
 		setupRateLimiter = origSetup
+	})
+}
+
+func preserveMetricsTokenState(t *testing.T) {
+	t.Helper()
+	metricsBearerTokenHashMu.RLock()
+	origHash := metricsBearerTokenHash
+	origLoaded := metricsBearerTokenHashLoaded
+	origDBPath := metricsBearerTokenHashDBPath
+	metricsBearerTokenHashMu.RUnlock()
+
+	t.Cleanup(func() {
+		metricsBearerTokenHashMu.Lock()
+		metricsBearerTokenHash = origHash
+		metricsBearerTokenHashLoaded = origLoaded
+		metricsBearerTokenHashDBPath = origDBPath
+		metricsBearerTokenHashMu.Unlock()
 	})
 }
 
@@ -160,12 +179,33 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 }
 
 func TestMetricsBearerMiddleware(t *testing.T) {
+	preserveDBState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "metrics-middleware.db"))
+	_ = getDB()
+
+	if err := clearMetricsBearerTokenHash(); err != nil {
+		t.Fatalf("clearMetricsBearerTokenHash() unexpected error: %v", err)
+	}
+
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(metricsBearerMiddleware("token-123"))
+	r.Use(metricsBearerMiddleware())
 	r.GET("/metrics", func(c *gin.Context) {
 		c.String(http.StatusOK, "ok")
 	})
+
+	disabledReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	disabledRec := httptest.NewRecorder()
+	r.ServeHTTP(disabledRec, disabledReq)
+	if disabledRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled metrics status = %d, want %d", disabledRec.Code, http.StatusNotFound)
+	}
+
+	token, err := issueMetricsBearerToken()
+	if err != nil {
+		t.Fatalf("issueMetricsBearerToken() unexpected error: %v", err)
+	}
 
 	cases := []struct {
 		name         string
@@ -175,7 +215,7 @@ func TestMetricsBearerMiddleware(t *testing.T) {
 		{name: "missing token", authz: "", wantHTTPCode: http.StatusUnauthorized},
 		{name: "wrong scheme", authz: "Basic abc", wantHTTPCode: http.StatusUnauthorized},
 		{name: "wrong token", authz: "Bearer nope", wantHTTPCode: http.StatusUnauthorized},
-		{name: "valid token", authz: "Bearer token-123", wantHTTPCode: http.StatusOK},
+		{name: "valid token", authz: "Bearer " + token, wantHTTPCode: http.StatusOK},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -193,23 +233,47 @@ func TestMetricsBearerMiddleware(t *testing.T) {
 	}
 }
 
-func TestMetricsBearerTokenFromEnv(t *testing.T) {
-	t.Setenv(metricsBearerTokenEnv, "")
-	if _, err := metricsBearerTokenFromEnv(); err == nil {
-		t.Fatalf("metricsBearerTokenFromEnv() error = nil, want error when token is missing")
+func TestMetricsBearerTokenLifecycle(t *testing.T) {
+	preserveDBState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "metrics-token-lifecycle.db"))
+	_ = getDB()
+
+	if err := clearMetricsBearerTokenHash(); err != nil {
+		t.Fatalf("clearMetricsBearerTokenHash() unexpected error: %v", err)
 	}
-	t.Setenv(metricsBearerTokenEnv, "change-me-metrics-token")
-	if _, err := metricsBearerTokenFromEnv(); err == nil {
-		t.Fatalf("metricsBearerTokenFromEnv() error = nil, want error for placeholder token")
+	if got := getMetricsBearerTokenHash(); got != "" {
+		t.Fatalf("getMetricsBearerTokenHash() = %q, want empty", got)
 	}
 
-	t.Setenv(metricsBearerTokenEnv, " test-token ")
-	token, err := metricsBearerTokenFromEnv()
+	token, err := issueMetricsBearerToken()
 	if err != nil {
-		t.Fatalf("metricsBearerTokenFromEnv() unexpected error: %v", err)
+		t.Fatalf("issueMetricsBearerToken() unexpected error: %v", err)
 	}
-	if token != "test-token" {
-		t.Fatalf("metricsBearerTokenFromEnv() = %q, want %q", token, "test-token")
+	if token == "" {
+		t.Fatalf("issueMetricsBearerToken() token is empty")
+	}
+	if _, err := base64.RawURLEncoding.DecodeString(token); err != nil {
+		t.Fatalf("issueMetricsBearerToken() token is not valid base64url: %v", err)
+	}
+
+	tokenHash := getMetricsBearerTokenHash()
+	if tokenHash == "" {
+		t.Fatalf("getMetricsBearerTokenHash() empty after issue")
+	}
+	match, err := argon2id.ComparePasswordAndHash(token, tokenHash)
+	if err != nil {
+		t.Fatalf("ComparePasswordAndHash() unexpected error: %v", err)
+	}
+	if !match {
+		t.Fatalf("ComparePasswordAndHash() = false, want true")
+	}
+
+	if err := clearMetricsBearerTokenHash(); err != nil {
+		t.Fatalf("clearMetricsBearerTokenHash() unexpected error: %v", err)
+	}
+	if got := getMetricsBearerTokenHash(); got != "" {
+		t.Fatalf("getMetricsBearerTokenHash() = %q after clear, want empty", got)
 	}
 }
 
@@ -217,6 +281,7 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	preserveDBState(t)
 	preserveSessionState(t)
 	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-flow.db"))
 
 	sm, err := newSessionManager(getDB())
@@ -365,5 +430,138 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	}
 	if got, _ := statusPayload["username"].(string); got != "admin" {
 		t.Fatalf("auth status after login username = %q, want %q", got, "admin")
+	}
+}
+
+func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "metrics-router-lifecycle.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionManager.LoadAndSave(r)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("metrics before token status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sessionCookie := testSessionCookieFromRecorder(t, rec)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/metrics/token", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics token status before create = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var statusPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusPayload); err != nil {
+		t.Fatalf("metrics token status before create unmarshal error = %v", err)
+	}
+	if enabled, _ := statusPayload["enabled"].(bool); enabled {
+		t.Fatalf("metrics token status enabled = true before create, want false")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/metrics/token", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics token create status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var createPayload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &createPayload); err != nil {
+		t.Fatalf("metrics token create unmarshal error = %v", err)
+	}
+	firstToken, _ := createPayload["token"].(string)
+	if strings.TrimSpace(firstToken) == "" {
+		t.Fatalf("metrics token create token empty")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+firstToken)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics with first token status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/metrics/token", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics token rotate status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	createPayload = map[string]any{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &createPayload); err != nil {
+		t.Fatalf("metrics token rotate unmarshal error = %v", err)
+	}
+	secondToken, _ := createPayload["token"].(string)
+	if strings.TrimSpace(secondToken) == "" {
+		t.Fatalf("metrics token rotate token empty")
+	}
+	if secondToken == firstToken {
+		t.Fatalf("metrics token rotate returned same token")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+firstToken)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("metrics with old token status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+secondToken)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics with rotated token status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodDelete, "/api/metrics/token", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics token clear status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/audit-events?page=1&page_size=50", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit events status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if body := rec.Body.String(); strings.Contains(body, firstToken) || strings.Contains(body, secondToken) {
+		t.Fatalf("audit payload unexpectedly contains metrics token")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+secondToken)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("metrics after clear status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
 }

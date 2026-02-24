@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	metricsBearerTokenEnv         = "DEBIAN_UPDATER_METRICS_BEARER_TOKEN"
 	sessionCookieSecureEnv        = "DEBIAN_UPDATER_SESSION_COOKIE_SECURE"
 	sessionIdleTimeoutHoursEnv    = "DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS"
 	authSessionUserKey            = "auth_user"
@@ -39,10 +38,9 @@ const (
 var sessionManager *scs.SessionManager
 
 var (
-	errInvalidCredentials        = errors.New("invalid credentials")
-	errSetupAlreadyCompleted     = errors.New("setup already completed")
-	errSetupRequired             = errors.New("setup required")
-	errMetricsBearerTokenMissing = errors.New("metrics bearer token missing")
+	errInvalidCredentials    = errors.New("invalid credentials")
+	errSetupAlreadyCompleted = errors.New("setup already completed")
+	errSetupRequired         = errors.New("setup required")
 )
 
 type AuthRateBucket struct {
@@ -213,17 +211,6 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 		sm.IdleTimeout = idleTimeout
 	}
 	return sm, nil
-}
-
-func metricsBearerTokenFromEnv() (string, error) {
-	token := strings.TrimSpace(os.Getenv(metricsBearerTokenEnv))
-	if token == "" {
-		return "", fmt.Errorf("%w: %s must be set", errMetricsBearerTokenMissing, metricsBearerTokenEnv)
-	}
-	if stringsEqualConstantTime(token, "change-me-metrics-token") {
-		return "", fmt.Errorf("%w: %s must be changed from placeholder value", errMetricsBearerTokenMissing, metricsBearerTokenEnv)
-	}
-	return token, nil
 }
 
 func setupRequired() (bool, error) {
@@ -413,8 +400,14 @@ func rateLimitClientIP(c *gin.Context) string {
 	return host
 }
 
-func metricsBearerMiddleware(token string) gin.HandlerFunc {
+func metricsBearerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		tokenHash := strings.TrimSpace(getMetricsBearerTokenHash())
+		if tokenHash == "" {
+			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+
 		authz := strings.TrimSpace(c.GetHeader("Authorization"))
 		if authz == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing bearer token"})
@@ -425,7 +418,8 @@ func metricsBearerMiddleware(token string) gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid bearer token"})
 			return
 		}
-		if !stringsEqualConstantTime(parts[1], token) {
+		match, err := argon2id.ComparePasswordAndHash(parts[1], tokenHash)
+		if err != nil || !match {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid bearer token"})
 			return
 		}

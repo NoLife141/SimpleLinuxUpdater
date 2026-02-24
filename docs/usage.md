@@ -33,7 +33,7 @@ UI/API access uses the built-in local login:
 Notes:
 
 - Sessions are server-side and stored in SQLite.
-- `/metrics` is not tied to UI sessions; it uses bearer token auth.
+- `/metrics` is not tied to UI sessions; it uses a dedicated bearer token managed from `/manage`.
 
 ## Trust a host key
 
@@ -138,6 +138,11 @@ Summary API:
 Metrics:
 
 - `GET /metrics` (Prometheus text format, bearer token required)
+- Disabled by default until a token is generated in `/manage`
+- Token management API (session-authenticated):
+  - `GET /api/metrics/token` (status only)
+  - `POST /api/metrics/token` (generate/rotate and return token once)
+  - `DELETE /api/metrics/token` (disable metrics token)
 
 Observability KPIs are computed from `update.complete` audit events.
 

@@ -54,9 +54,11 @@ Session hardening options:
 
 `/metrics` is protected by a bearer token, separate from UI sessions.
 
-Configure:
+Configure from the Manage page:
 
-- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`
+- Generate/rotate the Metrics API token in-app
+- Store the one-time token output securely for your scraper
+- Disable token to make `/metrics` return `404`
 
 Scrapers must send:
 
@@ -112,5 +114,5 @@ sudo visudo -c
 - Do not expose the UI to the public internet.
 - Restrict access with a VPN and/or reverse proxy controls.
 - Use HTTPS and set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true`.
-- Use a strong `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`.
+- Store the generated Metrics API token in a secret manager and rotate it periodically.
 - Protect the persisted volume (`/data`) like a secret.

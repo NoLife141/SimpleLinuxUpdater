@@ -5,7 +5,7 @@
 ## Table of contents
 
 - [Authentication and sessions](#authentication-and-sessions)
-- [Metrics bearer token](#metrics-bearer-token)
+- [Metrics API token](#metrics-api-token)
 - [Storage paths](#storage-paths)
 - [Retry policy](#retry-policy)
 - [Post-update checks](#post-update-checks)
@@ -31,13 +31,15 @@ Environment variables:
 - `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` (`true|false`, default `false`)
 - `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (optional, integer hours; unset/`0` keeps default behavior)
 
-## Metrics bearer token
+## Metrics API token
 
 `/metrics` is protected separately from UI sessions for machine-to-machine scraping.
 
-Required environment variable:
+Behavior:
 
-- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`
+- Disabled by default.
+- Enabled only after generating a token from the Manage page.
+- Token is shown once on create/rotate; if lost, rotate again.
 
 Prometheus must send:
 

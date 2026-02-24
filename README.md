@@ -53,11 +53,16 @@ After setup, sign in at `/login`.
 
 For Prometheus, configure your scraper with:
 
-- `Authorization: Bearer <DEBIAN_UPDATER_METRICS_BEARER_TOKEN>`
+- `Authorization: Bearer <token-created-in-Manage-page>`
 
-Environment variables for auth/metrics:
+Metrics token flow:
 
-- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN`: required non-empty bearer token for `/metrics`.
+- `/metrics` is disabled by default.
+- Sign in, go to `/manage`, then generate or rotate the Metrics API token.
+- The token is shown once. Store it in your scraper secret manager.
+
+Environment variables for auth/session:
+
 - `DEBIAN_UPDATER_SESSION_COOKIE_SECURE`: optional boolean (`true|false`, default `false`), enables secure-only session cookies; set `true` behind HTTPS.
 - `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`: optional integer idle timeout in hours; `0` or unset keeps default behavior.
 

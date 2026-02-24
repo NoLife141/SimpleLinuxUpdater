@@ -42,13 +42,13 @@ Impact:
 
 ## Metrics authentication issues
 
-Symptom: `/metrics` returns `401`.
+Symptom: `/metrics` returns `404` or `401`.
 
 Checks:
 
-- `DEBIAN_UPDATER_METRICS_BEARER_TOKEN` is set and non-empty.
-- Scraper sends `Authorization: Bearer <token>`.
-- Token value matches exactly (including casing and whitespace).
+- If `404`: metrics token is not configured (generate one from `/manage`).
+- If `401`: scraper must send `Authorization: Bearer <token>`.
+- If token was rotated, update scraper credentials to the newest token.
 
 ## SSH host key issues
 

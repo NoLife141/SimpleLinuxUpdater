@@ -310,6 +310,27 @@
             margin: 18px 0;
         }
 
+        .secret-box {
+            margin-top: 12px;
+            padding: 12px;
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            background: rgba(15, 23, 42, 0.55);
+            display: none;
+        }
+
+        .secret-box code {
+            display: block;
+            margin: 8px 0 12px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.8);
+            color: #dbeafe;
+            word-break: break-all;
+            white-space: pre-wrap;
+        }
+
         .controls {
             display: flex;
             flex-wrap: wrap;
@@ -565,6 +586,20 @@
                 <button class="btn-danger" onclick="clearGlobalKey()">Clear Global Key</button>
             </div>
             <div id="global-key-status" class="subtle"></div>
+            <hr class="section-sep">
+            <h2>Metrics API Token</h2>
+            <p class="subtle"><code>/metrics</code> stays disabled until you generate a token. The token is shown once on creation/rotation.</p>
+            <div class="nav key-actions">
+                <button class="btn-success" type="button" id="metrics-token-generate">Generate Token</button>
+                <button class="btn-ghost" type="button" id="metrics-token-rotate">Rotate Token</button>
+                <button class="btn-danger" type="button" id="metrics-token-disable">Disable Token</button>
+            </div>
+            <div id="metrics-token-status" class="subtle"></div>
+            <div id="metrics-token-once" class="secret-box">
+                <div class="subtle">Copy this token now. It will not be shown again.</div>
+                <code id="metrics-token-value"></code>
+                <button class="btn-ghost inline-btn" type="button" id="metrics-token-copy">Copy Token</button>
+            </div>
             <hr class="section-sep">
             <form id="add-server-form" class="add-server-form">
                 <span class="subtle form-note">Auth is password or SSH key (key takes priority). Leave one empty.</span>
@@ -1292,9 +1327,90 @@
             status.textContent = data.has_key ? 'Global key: saved' : 'Global key: not set';
         }
 
+        function showMetricsTokenOnce(token) {
+            const panel = document.getElementById('metrics-token-once');
+            const value = document.getElementById('metrics-token-value');
+            if (!panel || !value) return;
+            if (!token) {
+                value.textContent = '';
+                panel.style.display = 'none';
+                return;
+            }
+            value.textContent = token;
+            panel.style.display = 'block';
+        }
+
+        async function fetchMetricsTokenStatus(resetReveal = true) {
+            const status = document.getElementById('metrics-token-status');
+            if (!status) return;
+            if (resetReveal) {
+                showMetricsTokenOnce('');
+            }
+            const res = await fetch('/api/metrics/token');
+            if (!res.ok) {
+                status.textContent = 'Metrics token status: unknown';
+                return;
+            }
+            const data = await res.json();
+            status.textContent = data.enabled ? 'Metrics API token: enabled' : 'Metrics API token: disabled';
+        }
+
+        async function rotateMetricsToken(askConfirm) {
+            if (askConfirm && !window.confirm('Rotate metrics token? Existing scrapers using the old token will fail until updated.')) {
+                return;
+            }
+            const res = await fetch('/api/metrics/token', { method: 'POST' });
+            if (!res.ok) {
+                alert(await parseErrorResponse(res, 'Failed to rotate metrics token.'));
+                return;
+            }
+            const data = await res.json();
+            const token = (data && typeof data.token === 'string') ? data.token : '';
+            if (!token) {
+                alert('Token rotation succeeded but no token was returned.');
+                return;
+            }
+            showMetricsTokenOnce(token);
+            fetchMetricsTokenStatus(false);
+        }
+
+        async function disableMetricsToken() {
+            if (!window.confirm('Disable metrics token and hide /metrics now?')) {
+                return;
+            }
+            const res = await fetch('/api/metrics/token', { method: 'DELETE' });
+            if (!res.ok) {
+                alert(await parseErrorResponse(res, 'Failed to disable metrics token.'));
+                return;
+            }
+            showMetricsTokenOnce('');
+            fetchMetricsTokenStatus();
+        }
+
+        async function copyMetricsToken() {
+            const tokenValue = document.getElementById('metrics-token-value');
+            if (!tokenValue) return;
+            const token = tokenValue.textContent || '';
+            if (!token) {
+                alert('No token to copy.');
+                return;
+            }
+            try {
+                await navigator.clipboard.writeText(token);
+                alert('Metrics token copied.');
+            } catch (err) {
+                alert('Failed to copy token. Copy it manually from the box.');
+            }
+        }
+
         document.getElementById('logout-btn').addEventListener('click', () => window.logout());
+        document.getElementById('metrics-token-generate').addEventListener('click', () => rotateMetricsToken(false));
+        document.getElementById('metrics-token-rotate').addEventListener('click', () => rotateMetricsToken(true));
+        document.getElementById('metrics-token-disable').addEventListener('click', disableMetricsToken);
+        document.getElementById('metrics-token-copy').addEventListener('click', copyMetricsToken);
         fetchManageServers();
         fetchGlobalKeyStatus();
+        fetchMetricsTokenStatus();
         fetchAuditEvents();
         setInterval(fetchAuditEvents, 15000);
     </script>

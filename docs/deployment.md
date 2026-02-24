@@ -51,7 +51,6 @@ Wants=network-online.target
 WorkingDirectory=/opt/simplelinuxupdater
 ExecStart=/opt/simplelinuxupdater/webserver
 Restart=on-failure
-Environment=DEBIAN_UPDATER_METRICS_BEARER_TOKEN=change-me
 Environment=DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true
 
 [Install]
@@ -70,7 +69,7 @@ Only one local user is supported by design.
 
 ## Metrics scraping
 
-`/metrics` requires bearer auth.
+`/metrics` is disabled by default. Generate a Metrics API token from `/manage`, then configure your scraper with that token.
 
 Prometheus example:
 
