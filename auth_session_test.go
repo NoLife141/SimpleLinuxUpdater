@@ -659,11 +659,11 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 			t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
 		}
-		if got := rec.Header().Get("Content-Security-Policy"); strings.TrimSpace(got) == "" {
-			t.Fatalf("Content-Security-Policy unexpectedly empty")
+		if got := strings.TrimSpace(rec.Header().Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
+			t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
 		}
-		if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
-			t.Fatalf("Strict-Transport-Security = %q on HTTP request, want empty", got)
+		if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
 		}
 	})
 
@@ -678,6 +678,18 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		}
 		if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
 			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+			t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
+		}
+		if got := strings.TrimSpace(rec.Header().Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
+			t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
 		}
 	})
 }

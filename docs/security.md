@@ -41,7 +41,8 @@ SimpleLinuxUpdater uses:
   - `Content-Security-Policy`
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: strict-origin-when-cross-origin`
-  - `X-Frame-Options: DENY` (plus HSTS on HTTPS requests)
+  - `X-Frame-Options: DENY`
+  - `Strict-Transport-Security` (HSTS) for HTTPS deployments
 
 Setup enforces a password policy for the local admin user in `auth_users`:
 
