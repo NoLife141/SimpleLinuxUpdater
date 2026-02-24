@@ -34,6 +34,21 @@ Notes:
 
 - Sessions are server-side and stored in SQLite.
 - `/metrics` is not tied to UI sessions; it uses a dedicated bearer token managed from `/manage`.
+- Programmatic setup/login/logout requests must include same-origin headers:
+  - `Origin: http://localhost`
+  - `Referer: http://localhost/`
+  - `Sec-Fetch-Site: same-origin`
+
+Example (programmatic login):
+
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -H "Origin: http://localhost" \
+  -H "Referer: http://localhost/" \
+  -H "Sec-Fetch-Site: same-origin" \
+  -d '{"username":"admin","password":"<password>"}'
+```
 
 ## Trust a host key
 

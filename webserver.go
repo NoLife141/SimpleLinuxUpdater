@@ -4672,7 +4672,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to setup router: %v", err)
 	}
-	startAuditPruner(context.Background())
+	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	startAuditPruner(shutdownCtx)
 	defer StopAuthRateLimiters()
 	server := &http.Server{
 		Addr:         ":8080",
@@ -4681,8 +4683,6 @@ func main() {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-shutdownCtx.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

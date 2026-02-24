@@ -100,6 +100,7 @@ func TestValidatePasswordPolicy(t *testing.T) {
 	}{
 		{name: "empty string", value: "", wantErr: true},
 		{name: "too short", value: "Abc123", wantErr: true},
+		{name: "min valid length", value: strings.Repeat("A", authMinPasswordLen-1) + "1", wantErr: false},
 		{name: "missing letter", value: strings.Repeat("1", 10), wantErr: true},
 		{name: "missing digit", value: strings.Repeat("A", 10), wantErr: true},
 		{name: "max valid length", value: strings.Repeat("A", 63) + "1", wantErr: false},
@@ -339,130 +340,159 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	})
 
 	handler := sessionManager.LoadAndSave(r)
+	var setupCookie *http.Cookie
+	var loginCookie *http.Cookie
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated API status = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
-	if !strings.Contains(rec.Body.String(), `"setup_required":true`) {
-		t.Fatalf("unauthenticated API body missing setup_required=true: %s", rec.Body.String())
-	}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("auth status before setup status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	var statusPayload map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &statusPayload); err != nil {
-		t.Fatalf("auth status before setup unmarshal error = %v", err)
-	}
-	if got, _ := statusPayload["setup_required"].(bool); !got {
-		t.Fatalf("auth status before setup setup_required = %v, want true", statusPayload["setup_required"])
-	}
-	if got, _ := statusPayload["authenticated"].(bool); got {
-		t.Fatalf("auth status before setup authenticated = %v, want false", statusPayload["authenticated"])
-	}
+	t.Run("unauthenticated API ping/status", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated API status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+		if !strings.Contains(rec.Body.String(), `"setup_required":true`) {
+			t.Fatalf("unauthenticated API body missing setup_required=true: %s", rec.Body.String())
+		}
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/page", nil)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("unauthenticated HTML status = %d, want %d", rec.Code, http.StatusFound)
-	}
-	if got := rec.Header().Get("Location"); got != "/setup" {
-		t.Fatalf("unauthenticated HTML redirect = %q, want %q", got, "/setup")
-	}
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status before setup status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		var statusPayload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &statusPayload); err != nil {
+			t.Fatalf("auth status before setup unmarshal error = %v", err)
+		}
+		if got, _ := statusPayload["setup_required"].(bool); !got {
+			t.Fatalf("auth status before setup setup_required = %v, want true", statusPayload["setup_required"])
+		}
+		if got, _ := statusPayload["authenticated"].(bool); got {
+			t.Fatalf("auth status before setup authenticated = %v, want false", statusPayload["authenticated"])
+		}
+	})
 
-	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
-	markSameOriginAuthRequest(req)
-	req.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	setupCookie := testSessionCookieFromRecorder(t, rec)
+	t.Run("unauthenticated HTML redirect", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/page", nil)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("unauthenticated HTML status = %d, want %d", rec.Code, http.StatusFound)
+		}
+		if got := rec.Header().Get("Location"); got != "/setup" {
+			t.Fatalf("unauthenticated HTML redirect = %q, want %q", got, "/setup")
+		}
+	})
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-	req.AddCookie(setupCookie)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("authenticated API status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), `"actor":"admin"`) {
-		t.Fatalf("authenticated API body missing actor admin: %s", rec.Body.String())
-	}
+	t.Run("setup", func(t *testing.T) {
+		setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+		markSameOriginAuthRequest(req)
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("setup status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		setupCookie = testSessionCookieFromRecorder(t, rec)
+	})
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
-	markSameOriginAuthRequest(req)
-	req.AddCookie(setupCookie)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("logout status = %d, want %d", rec.Code, http.StatusOK)
-	}
+	t.Run("post-setup authenticated API", func(t *testing.T) {
+		if setupCookie == nil {
+			t.Fatalf("setup cookie is nil")
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+		req.AddCookie(setupCookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("authenticated API status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"actor":"admin"`) {
+			t.Fatalf("authenticated API body missing actor admin: %s", rec.Body.String())
+		}
+	})
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/ping", nil)
-	req.AddCookie(setupCookie)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("API status after logout = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
-	if !strings.Contains(rec.Body.String(), `"setup_required":false`) {
-		t.Fatalf("post-logout API body missing setup_required=false: %s", rec.Body.String())
-	}
+	t.Run("logout", func(t *testing.T) {
+		if setupCookie == nil {
+			t.Fatalf("setup cookie is nil")
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+		markSameOriginAuthRequest(req)
+		req.AddCookie(setupCookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("logout status = %d, want %d", rec.Code, http.StatusOK)
+		}
+	})
 
-	loginBody := bytes.NewBufferString(`{"username":"admin","password":"wrong-pass"}`)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
-	markSameOriginAuthRequest(req)
-	req.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("login invalid status = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
+	t.Run("post-logout API", func(t *testing.T) {
+		if setupCookie == nil {
+			t.Fatalf("setup cookie is nil")
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/ping", nil)
+		req.AddCookie(setupCookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("API status after logout = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+		if !strings.Contains(rec.Body.String(), `"setup_required":false`) {
+			t.Fatalf("post-logout API body missing setup_required=false: %s", rec.Body.String())
+		}
+	})
 
-	loginBody = bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
-	markSameOriginAuthRequest(req)
-	req.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("login valid status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	loginCookie := testSessionCookieFromRecorder(t, rec)
+	t.Run("invalid login", func(t *testing.T) {
+		loginBody := bytes.NewBufferString(`{"username":"admin","password":"wrong-pass"}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
+		markSameOriginAuthRequest(req)
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("login invalid status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		}
+	})
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/page", nil)
-	req.AddCookie(loginCookie)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("authenticated HTML status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
-	req.AddCookie(loginCookie)
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("auth status after login status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	statusPayload = map[string]any{}
-	if err := json.Unmarshal(rec.Body.Bytes(), &statusPayload); err != nil {
-		t.Fatalf("auth status after login unmarshal error = %v", err)
-	}
-	if got, _ := statusPayload["authenticated"].(bool); !got {
-		t.Fatalf("auth status after login authenticated = %v, want true", statusPayload["authenticated"])
-	}
-	if got, _ := statusPayload["username"].(string); got != "admin" {
-		t.Fatalf("auth status after login username = %q, want %q", got, "admin")
-	}
+	t.Run("valid login and status", func(t *testing.T) {
+		loginBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
+		markSameOriginAuthRequest(req)
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login valid status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		loginCookie = testSessionCookieFromRecorder(t, rec)
+
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/page", nil)
+		req.AddCookie(loginCookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("authenticated HTML status = %d, want %d", rec.Code, http.StatusOK)
+		}
+
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		req.AddCookie(loginCookie)
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status after login status = %d, want %d", rec.Code, http.StatusOK)
+		}
+		var statusPayload map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &statusPayload); err != nil {
+			t.Fatalf("auth status after login unmarshal error = %v", err)
+		}
+		if got, _ := statusPayload["authenticated"].(bool); !got {
+			t.Fatalf("auth status after login authenticated = %v, want true", statusPayload["authenticated"])
+		}
+		if got, _ := statusPayload["username"].(string); got != "admin" {
+			t.Fatalf("auth status after login username = %q, want %q", got, "admin")
+		}
+	})
 }
 
 func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {

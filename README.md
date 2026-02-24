@@ -66,6 +66,13 @@ Environment variables for auth/session:
 - `DEBIAN_UPDATER_SESSION_COOKIE_SECURE`: optional boolean (`true|false`, default `false`), enables secure-only session cookies; set `true` behind HTTPS.
 - `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`: optional integer idle timeout in hours; `0` or unset keeps default behavior.
 
+Programmatic auth note:
+
+- `POST /api/auth/setup`, `POST /api/auth/login`, and `POST /api/auth/logout` require same-origin headers:
+  - `Origin: http://localhost`
+  - `Referer: http://localhost/`
+  - `Sec-Fetch-Site: same-origin`
+
 ### Binary (prebuilt release)
 
 Download the archive for your platform from GitHub Releases and run the included `webserver` binary. Release archives include `templates/`, `static/`, and `.env-template`.
