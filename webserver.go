@@ -137,6 +137,7 @@ const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
 const updateCompleteAction = "update.complete"
+const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -3929,8 +3930,22 @@ func buildAuthMethods(server Server) ([]ssh.AuthMethod, error) {
 	return methods, nil
 }
 
+func securityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Content-Security-Policy", defaultContentSecurityPolicy)
+		if c.Request != nil && c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		c.Next()
+	}
+}
+
 func setupRouter() (*gin.Engine, error) {
 	r := gin.Default()
+	r.Use(securityHeadersMiddleware())
 	sm, err := newSessionManager(getDB())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize session manager: %w", err)

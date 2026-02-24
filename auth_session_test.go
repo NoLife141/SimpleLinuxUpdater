@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -626,4 +627,57 @@ func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("metrics after clear status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
+}
+
+func TestSecurityHeadersMiddleware(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "security-headers.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionManager.LoadAndSave(r)
+
+	t.Run("http response has hardening headers", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+		}
+		if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+			t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
+		}
+		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
+			t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
+		}
+		if got := rec.Header().Get("Content-Security-Policy"); strings.TrimSpace(got) == "" {
+			t.Fatalf("Content-Security-Policy unexpectedly empty")
+		}
+		if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
+			t.Fatalf("Strict-Transport-Security = %q on HTTP request, want empty", got)
+		}
+	})
+
+	t.Run("https response sets HSTS", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		req.TLS = &tls.ConnectionState{}
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
+		}
+	})
 }
