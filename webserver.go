@@ -137,7 +137,7 @@ const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
 const updateCompleteAction = "update.complete"
-const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -3936,7 +3936,19 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 		c.Header("X-Frame-Options", "DENY")
 		c.Header("Content-Security-Policy", defaultContentSecurityPolicy)
-		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		if c.Request != nil && c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		} else {
+			forwardedProto := strings.TrimSpace(c.GetHeader("X-Forwarded-Proto"))
+			if forwardedProto != "" {
+				if idx := strings.Index(forwardedProto, ","); idx >= 0 {
+					forwardedProto = strings.TrimSpace(forwardedProto[:idx])
+				}
+				if strings.EqualFold(forwardedProto, "https") {
+					c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+				}
+			}
+		}
 		c.Next()
 	}
 }

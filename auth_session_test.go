@@ -93,6 +93,32 @@ func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder)
 	return nil
 }
 
+func assertSecurityHeaders(t *testing.T, h http.Header, wantHSTS bool) {
+	t.Helper()
+	if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+	if got := h.Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
+	}
+	if got := h.Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
+	}
+	if got := strings.TrimSpace(h.Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
+		t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
+	}
+
+	if wantHSTS {
+		if got := h.Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
+		}
+		return
+	}
+	if got := h.Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("Strict-Transport-Security = %q, want empty", got)
+	}
+}
+
 func TestValidatePasswordPolicy(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -650,21 +676,7 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-			t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
-		}
-		if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
-			t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
-		}
-		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
-			t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
-		}
-		if got := strings.TrimSpace(rec.Header().Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
-			t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
-		}
-		if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
-			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
-		}
+		assertSecurityHeaders(t, rec.Header(), false)
 	})
 
 	t.Run("https response sets HSTS", func(t *testing.T) {
@@ -676,20 +688,18 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if got := rec.Header().Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
-			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
+		assertSecurityHeaders(t, rec.Header(), true)
+	})
+
+	t.Run("forwarded https sets HSTS", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
 		}
-		if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-			t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
-		}
-		if got := rec.Header().Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
-			t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
-		}
-		if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
-			t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
-		}
-		if got := strings.TrimSpace(rec.Header().Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
-			t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
-		}
+		assertSecurityHeaders(t, rec.Header(), true)
 	})
 }
