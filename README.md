@@ -34,6 +34,7 @@ SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects t
 - On-demand `apt autoremove`
 - Activity history (audit trail) stored in SQLite
 - Observability: `/observability` dashboard and Prometheus `GET /metrics`
+- Built-in single-user login with first-run setup, Argon2id password hashing, and SQLite-backed sessions
 
 ## Quick start
 
@@ -46,6 +47,31 @@ docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nol
 ```
 
 Open `http://localhost:8080`.
+
+On first run, you will be redirected to `/setup` to create the local admin account.
+After setup, sign in at `/login`.
+
+For Prometheus, configure your scraper with:
+
+- `Authorization: Bearer <token-created-in-Manage-page>`
+
+Metrics token flow:
+
+- `/metrics` is disabled by default.
+- Sign in, go to `/manage`, then generate or rotate the Metrics API token.
+- The token is shown once. Store it in your scraper secret manager.
+
+Environment variables for auth/session:
+
+- `DEBIAN_UPDATER_SESSION_COOKIE_SECURE`: optional boolean (`true|false`, default `false`), enables secure-only session cookies; set `true` behind HTTPS.
+- `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS`: optional integer idle timeout in hours; `0` or unset keeps default behavior.
+
+Programmatic auth note:
+
+- `POST /api/auth/setup`, `POST /api/auth/login`, and `POST /api/auth/logout` require same-origin headers:
+  - `Origin: http://localhost`
+  - `Referer: http://localhost/`
+  - `Sec-Fetch-Site: same-origin`
 
 ### Binary (prebuilt release)
 
