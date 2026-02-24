@@ -25,6 +25,24 @@ func preserveSessionState(t *testing.T) {
 	})
 }
 
+func preserveRateLimiterState(t *testing.T) {
+	t.Helper()
+	origLogin := loginRateLimiter
+	origSetup := setupRateLimiter
+
+	testLogin := NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+	testSetup := NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	loginRateLimiter = testLogin
+	setupRateLimiter = testSetup
+
+	t.Cleanup(func() {
+		testLogin.Stop()
+		testSetup.Stop()
+		loginRateLimiter = origLogin
+		setupRateLimiter = origSetup
+	})
+}
+
 func markSameOriginAuthRequest(req *http.Request) {
 	if req == nil {
 		return
@@ -198,6 +216,7 @@ func TestMetricsBearerTokenFromEnv(t *testing.T) {
 func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 	preserveDBState(t)
 	preserveSessionState(t)
+	preserveRateLimiterState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-flow.db"))
 
 	sm, err := newSessionManager(getDB())

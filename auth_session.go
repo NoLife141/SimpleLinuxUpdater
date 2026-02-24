@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alexedwards/argon2id"
 	"github.com/alexedwards/scs/sqlite3store"
@@ -38,9 +39,10 @@ const (
 var sessionManager *scs.SessionManager
 
 var (
-	errInvalidCredentials    = errors.New("invalid credentials")
-	errSetupAlreadyCompleted = errors.New("setup already completed")
-	errSetupRequired         = errors.New("setup required")
+	errInvalidCredentials        = errors.New("invalid credentials")
+	errSetupAlreadyCompleted     = errors.New("setup already completed")
+	errSetupRequired             = errors.New("setup required")
+	errMetricsBearerTokenMissing = errors.New("metrics bearer token missing")
 )
 
 type AuthRateBucket struct {
@@ -216,10 +218,10 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 func metricsBearerTokenFromEnv() (string, error) {
 	token := strings.TrimSpace(os.Getenv(metricsBearerTokenEnv))
 	if token == "" {
-		return "", fmt.Errorf("%s must be set", metricsBearerTokenEnv)
+		return "", fmt.Errorf("%w: %s must be set", errMetricsBearerTokenMissing, metricsBearerTokenEnv)
 	}
 	if stringsEqualConstantTime(token, "change-me-metrics-token") {
-		return "", fmt.Errorf("%s must be changed from placeholder value", metricsBearerTokenEnv)
+		return "", fmt.Errorf("%w: %s must be changed from placeholder value", errMetricsBearerTokenMissing, metricsBearerTokenEnv)
 	}
 	return token, nil
 }
@@ -247,10 +249,11 @@ func getSingleUser() (username, passwordHash string, exists bool, err error) {
 }
 
 func validatePasswordPolicy(password string) error {
-	if len(password) < authMinPasswordLen {
+	passwordLen := utf8.RuneCountInString(password)
+	if passwordLen < authMinPasswordLen {
 		return fmt.Errorf("password must be at least %d characters long", authMinPasswordLen)
 	}
-	if len(password) > authMaxPasswordLen {
+	if passwordLen > authMaxPasswordLen {
 		return fmt.Errorf("password must be %d characters or less", authMaxPasswordLen)
 	}
 	hasLetter := false
@@ -334,12 +337,13 @@ func authenticateUser(username, password string) (bool, error) {
 	if !exists {
 		return false, errSetupRequired
 	}
-	if !stringsEqualConstantTime(username, storedUsername) {
-		return false, nil
-	}
+	usernameMatch := stringsEqualConstantTime(username, storedUsername)
 	match, err := argon2id.ComparePasswordAndHash(password, storedHash)
 	if err != nil {
 		return false, err
+	}
+	if !usernameMatch {
+		return false, nil
 	}
 	return match, nil
 }

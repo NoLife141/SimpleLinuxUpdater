@@ -3805,7 +3805,11 @@ func setupRouter() (*gin.Engine, error) {
 
 	metricsToken, err := metricsBearerTokenFromEnv()
 	if err != nil {
-		return nil, fmt.Errorf("invalid metrics bearer configuration: %w", err)
+		if errors.Is(err, errMetricsBearerTokenMissing) {
+			metricsToken = ""
+		} else {
+			return nil, fmt.Errorf("invalid metrics bearer configuration: %w", err)
+		}
 	}
 
 	r.LoadHTMLGlob("templates/*")
@@ -3816,7 +3820,9 @@ func setupRouter() (*gin.Engine, error) {
 	r.POST("/api/auth/setup", handleAuthSetup)
 	r.POST("/api/auth/login", handleAuthLogin)
 	r.GET("/api/auth/status", handleAuthStatus)
-	r.GET("/metrics", metricsBearerMiddleware(metricsToken), handleMetrics)
+	if metricsToken != "" {
+		r.GET("/metrics", metricsBearerMiddleware(metricsToken), handleMetrics)
+	}
 
 	r.Use(authGateMiddleware())
 
@@ -4543,8 +4549,11 @@ func main() {
 	startAuditPruner(context.Background())
 	defer StopAuthRateLimiters()
 	server := &http.Server{
-		Addr:    ":8080",
-		Handler: sessionManager.LoadAndSave(r),
+		Addr:         ":8080",
+		Handler:      sessionManager.LoadAndSave(r),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
