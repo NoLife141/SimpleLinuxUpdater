@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -90,6 +91,32 @@ func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder)
 	}
 	t.Fatalf("session cookie %q not found in response", expectedName)
 	return nil
+}
+
+func assertSecurityHeaders(t *testing.T, h http.Header, wantHSTS bool) {
+	t.Helper()
+	if got := h.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("X-Content-Type-Options = %q, want %q", got, "nosniff")
+	}
+	if got := h.Get("Referrer-Policy"); got != "strict-origin-when-cross-origin" {
+		t.Fatalf("Referrer-Policy = %q, want %q", got, "strict-origin-when-cross-origin")
+	}
+	if got := h.Get("X-Frame-Options"); got != "DENY" {
+		t.Fatalf("X-Frame-Options = %q, want %q", got, "DENY")
+	}
+	if got := strings.TrimSpace(h.Get("Content-Security-Policy")); got != defaultContentSecurityPolicy {
+		t.Fatalf("Content-Security-Policy = %q, want %q", got, defaultContentSecurityPolicy)
+	}
+
+	if wantHSTS {
+		if got := h.Get("Strict-Transport-Security"); got != "max-age=31536000; includeSubDomains" {
+			t.Fatalf("Strict-Transport-Security = %q, want %q", got, "max-age=31536000; includeSubDomains")
+		}
+		return
+	}
+	if got := h.Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("Strict-Transport-Security = %q, want empty", got)
+	}
 }
 
 func TestValidatePasswordPolicy(t *testing.T) {
@@ -626,4 +653,53 @@ func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("metrics after clear status = %d, want %d", rec.Code, http.StatusNotFound)
 	}
+}
+
+func TestSecurityHeadersMiddleware(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "security-headers.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionManager.LoadAndSave(r)
+
+	t.Run("http response has hardening headers", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		assertSecurityHeaders(t, rec.Header(), false)
+	})
+
+	t.Run("https response sets HSTS", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		req.TLS = &tls.ConnectionState{}
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		assertSecurityHeaders(t, rec.Header(), true)
+	})
+
+	t.Run("forwarded https sets HSTS", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+		req.Header.Set("X-Forwarded-Proto", "https")
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("auth status code = %d, want %d", rec.Code, http.StatusOK)
+		}
+		assertSecurityHeaders(t, rec.Header(), true)
+	})
 }

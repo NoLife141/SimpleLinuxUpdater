@@ -37,6 +37,12 @@ SimpleLinuxUpdater uses:
 - Argon2id password hashing (`auth_users` table in SQLite)
 - Server-side sessions stored in SQLite (`sessions` table)
 - Session cookies with `HttpOnly` and `SameSite=Lax`
+- Response hardening headers:
+  - `Content-Security-Policy`
+  - `X-Content-Type-Options: nosniff`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `X-Frame-Options: DENY`
+  - `Strict-Transport-Security` (HSTS) for HTTPS deployments
 
 Setup enforces a password policy for the local admin user in `auth_users`:
 
