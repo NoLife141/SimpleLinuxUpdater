@@ -66,6 +66,10 @@ Scrapers must send:
 Authorization: Bearer <token>
 ```
 
+Operational note:
+
+- Auth and metrics rate limiting is in-memory per process. In multi-instance deployments, enforce global limits at the load balancer/API gateway.
+
 ## Encryption at rest
 
 Secrets are stored encrypted in SQLite.

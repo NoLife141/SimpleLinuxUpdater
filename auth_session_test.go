@@ -31,17 +31,22 @@ func preserveRateLimiterState(t *testing.T) {
 	t.Helper()
 	origLogin := loginRateLimiter
 	origSetup := setupRateLimiter
+	origMetrics := metricsRateLimiter
 
 	testLogin := NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
 	testSetup := NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	testMetrics := NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
 	loginRateLimiter = testLogin
 	setupRateLimiter = testSetup
+	metricsRateLimiter = testMetrics
 
 	t.Cleanup(func() {
 		testLogin.Stop()
 		testSetup.Stop()
+		testMetrics.Stop()
 		loginRateLimiter = origLogin
 		setupRateLimiter = origSetup
+		metricsRateLimiter = origMetrics
 	})
 }
 
@@ -180,6 +185,7 @@ func TestSetupRequiredAndSingleUserLifecycle(t *testing.T) {
 
 func TestMetricsBearerMiddleware(t *testing.T) {
 	preserveDBState(t)
+	preserveRateLimiterState(t)
 	preserveMetricsTokenState(t)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "metrics-middleware.db"))
 	_ = getDB()
@@ -230,6 +236,32 @@ func TestMetricsBearerMiddleware(t *testing.T) {
 				t.Fatalf("status = %d, want %d (body=%s)", rec.Code, tc.wantHTTPCode, rec.Body.String())
 			}
 		})
+	}
+
+	// Use a tiny threshold so this test can deterministically assert 429 behavior.
+	testMetrics := NewAuthRateLimiter(metricsRateLimitWindow, 2)
+	prevMetrics := metricsRateLimiter
+	metricsRateLimiter = testMetrics
+	t.Cleanup(func() {
+		testMetrics.Stop()
+		metricsRateLimiter = prevMetrics
+	})
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("rate-limit setup request %d status = %d, want %d", i+1, rec.Code, http.StatusOK)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limit status = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 }
 

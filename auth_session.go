@@ -31,7 +31,9 @@ const (
 	authMaxPasswordLen            = 64
 	authLoginRateLimitMaxAttempts = 10
 	authSetupRateLimitMaxAttempts = 5
+	metricsRateLimitMaxAttempts   = 120
 	authRateLimitWindow           = 10 * time.Minute
+	metricsRateLimitWindow        = time.Minute
 	defaultSessionLifetime        = 30 * 24 * time.Hour
 )
 
@@ -140,8 +142,9 @@ func (l *AuthRateLimiter) allow(key string) bool {
 }
 
 var (
-	loginRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
-	setupRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	loginRateLimiter   = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+	setupRateLimiter   = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	metricsRateLimiter = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
 )
 
 func StopAuthRateLimiters() {
@@ -150,6 +153,9 @@ func StopAuthRateLimiters() {
 	}
 	if setupRateLimiter != nil {
 		setupRateLimiter.Stop()
+	}
+	if metricsRateLimiter != nil {
+		metricsRateLimiter.Stop()
 	}
 }
 
@@ -192,6 +198,9 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 	secureCookie, err := parseBoolEnv(sessionCookieSecureEnv, false)
 	if err != nil {
 		return nil, err
+	}
+	if !secureCookie {
+		log.Printf("%s=false; session cookie Secure flag is disabled (acceptable for local HTTP only). Set true behind HTTPS.", sessionCookieSecureEnv)
 	}
 	idleTimeout, err := parseSessionIdleTimeout()
 	if err != nil {
@@ -405,6 +414,10 @@ func metricsBearerMiddleware() gin.HandlerFunc {
 		tokenHash := strings.TrimSpace(getMetricsBearerTokenHash())
 		if tokenHash == "" {
 			c.AbortWithStatus(http.StatusNotFound)
+			return
+		}
+		if metricsRateLimiter != nil && !metricsRateLimiter.allow(rateLimitClientIP(c)) {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many requests"})
 			return
 		}
 

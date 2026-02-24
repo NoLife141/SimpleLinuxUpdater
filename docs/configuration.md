@@ -40,6 +40,7 @@ Behavior:
 - Disabled by default.
 - Enabled only after generating a token from the Manage page.
 - Token is shown once on create/rotate; if lost, rotate again.
+- Scrape requests are rate-limited per client IP (in-memory, per app instance).
 
 Prometheus must send:
 
