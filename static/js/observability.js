@@ -1,8 +1,8 @@
 const windowSelect = document.getElementById('window-select');
-const refreshBtn = document.getElementById('refresh-btn');
-const errorBanner = document.getElementById('error-banner');
-const rangeLabel = document.getElementById('range-label');
-let refreshIntervalId = null;
+        const refreshBtn = document.getElementById('refresh-btn');
+        const errorBanner = document.getElementById('error-banner');
+        const rangeLabel = document.getElementById('range-label');
+        let refreshIntervalId = null;
 
         function showError(message) {
             errorBanner.style.display = 'block';

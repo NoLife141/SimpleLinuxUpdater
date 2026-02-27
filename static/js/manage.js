@@ -90,23 +90,12 @@ let serverCache = {};
 
         async function fetchManageServers() {
             const pageScroll = saveWindowScroll();
-            try {
-                const response = await fetch('/api/servers');
-                if (!response.ok) {
-                    throw new Error(await parseErrorResponse(response, 'Failed to load servers.'));
-                }
-                const servers = await response.json();
-                if (!Array.isArray(servers)) {
-                    throw new Error('Invalid server list response.');
-                }
-                manageServers = servers;
-                const tbody = document.querySelector('#manage-servers-table tbody');
-                tbody.innerHTML = '';
-                renderTable();
-                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
-            } catch (error) {
-                alert(error?.message || 'Failed to load servers.');
-            }
+            const response = await fetch('/api/servers');
+            manageServers = await response.json();
+            const tbody = document.querySelector('#manage-servers-table tbody');
+            tbody.innerHTML = '';
+            renderTable();
+            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
         }
 
         function sortServers(servers) {
@@ -309,22 +298,6 @@ let serverCache = {};
             return tags.map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join(' ');
         }
 
-        function safeStatusClassToken(status) {
-            const normalized = String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
-            switch (normalized) {
-                case 'success':
-                case 'failure':
-                case 'started':
-                case 'ignored':
-                case 'error':
-                case 'pending':
-                case 'unknown':
-                    return normalized;
-                default:
-                    return 'unknown';
-            }
-        }
-
         function renderAuditTable() {
             const tbody = document.querySelector('#audit-table tbody');
             if (!tbody) return;
@@ -337,7 +310,7 @@ let serverCache = {};
                 auditEvents.forEach(evt => {
                     const row = document.createElement('tr');
                     const status = escapeHtml(evt.status || 'unknown');
-                    const statusClass = `status-${safeStatusClassToken(evt.status)}`;
+                    const statusClass = `status-${String(evt.status || '').toLowerCase()}`;
                     row.innerHTML = `
                         <td>${escapeHtml(evt.created_at || '')}</td>
                         <td>${escapeHtml(evt.actor || '')}</td>
@@ -450,15 +423,8 @@ let serverCache = {};
 
         async function deleteServer(name) {
             if (confirm('Delete server?')) {
-                try {
-                    const response = await fetch(`/api/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
-                    if (!response.ok) {
-                        throw new Error(await parseErrorResponse(response, 'Failed to delete server.'));
-                    }
-                    await fetchManageServers();
-                } catch (error) {
-                    alert(error?.message || 'Failed to delete server.');
-                }
+                await fetch(`/api/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                fetchManageServers();
             }
         }
 
