@@ -42,7 +42,13 @@ SimpleLinuxUpdater uses:
   - `X-Content-Type-Options: nosniff`
   - `Referrer-Policy: strict-origin-when-cross-origin`
   - `X-Frame-Options: DENY`
-  - `Strict-Transport-Security` (HSTS) for HTTPS deployments
+  - `Strict-Transport-Security` (HSTS) when requests are HTTPS (`TLS` or `X-Forwarded-Proto: https`)
+  - UI assets enforce strict CSP by design:
+    - No inline `<script>` blocks
+    - No inline `<style>` blocks
+    - No inline `on*=` handlers
+    - No inline `style=` attributes
+  - CI includes strict-CSP template checks and fails on inline regressions
 
 Setup enforces a password policy for the local admin user in `auth_users`:
 

@@ -34,6 +34,7 @@ Notes:
 
 - Sessions are server-side and stored in SQLite.
 - `/metrics` is not tied to UI sessions; it uses a dedicated bearer token managed from `/manage`.
+- UI pages are CSP-hardened and load JavaScript/CSS from external `/static` assets only (no inline scripts/styles/handlers).
 - Programmatic setup/login/logout requests must include same-origin headers:
   - `Origin: http://localhost`
   - `Referer: http://localhost/`

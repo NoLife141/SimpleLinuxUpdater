@@ -1,0 +1,5 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+.hidden { display: none !important; }
+button { font: inherit; }
+input, select, textarea { font: inherit; }
