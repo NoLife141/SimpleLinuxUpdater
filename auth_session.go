@@ -225,9 +225,7 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 
 func sessionHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sessionManagerMu.RLock()
-		sm := sessionManager
-		sessionManagerMu.RUnlock()
+		sm := currentSessionManager()
 		if sm == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -362,13 +360,17 @@ func sessionUsername(c *gin.Context) string {
 	if c == nil {
 		return ""
 	}
-	sessionManagerMu.RLock()
-	sm := sessionManager
-	sessionManagerMu.RUnlock()
+	sm := currentSessionManager()
 	if sm == nil {
 		return ""
 	}
 	return strings.TrimSpace(sm.GetString(c.Request.Context(), authSessionUserKey))
+}
+
+func currentSessionManager() *scs.SessionManager {
+	sessionManagerMu.RLock()
+	defer sessionManagerMu.RUnlock()
+	return sessionManager
 }
 
 func setNoStoreHeaders(c *gin.Context) {
@@ -594,9 +596,7 @@ func handleAuthSetup(c *gin.Context) {
 		return
 	}
 
-	sessionManagerMu.RLock()
-	sm := sessionManager
-	sessionManagerMu.RUnlock()
+	sm := currentSessionManager()
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return
@@ -649,9 +649,7 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 
-	sessionManagerMu.RLock()
-	sm := sessionManager
-	sessionManagerMu.RUnlock()
+	sm := currentSessionManager()
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return
@@ -672,9 +670,7 @@ func handleAuthLogout(c *gin.Context) {
 		return
 	}
 	actor := sessionUsername(c)
-	sessionManagerMu.RLock()
-	sm := sessionManager
-	sessionManagerMu.RUnlock()
+	sm := currentSessionManager()
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return

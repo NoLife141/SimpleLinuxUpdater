@@ -447,6 +447,8 @@ func restoreSnapshots(snaps map[string]restoreSnapshot) error {
 }
 
 func resetRuntimeCaches() {
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	if db != nil {
 		_ = db.Close()
 	}
@@ -470,6 +472,24 @@ func resetRuntimeCaches() {
 func reloadRuntimeState() error {
 	_ = getDB()
 	loadServers()
+	mu.Lock()
+	statusMap = make(map[string]*ServerStatus, len(servers))
+	for _, s := range servers {
+		statusMap[s.Name] = &ServerStatus{
+			Name:           s.Name,
+			Host:           s.Host,
+			Port:           normalizePort(s.Port),
+			User:           s.User,
+			Status:         "idle",
+			Logs:           "",
+			Upgradable:     []string{},
+			PendingUpdates: []PendingUpdate{},
+			HasPassword:    s.Pass != "",
+			HasKey:         s.Key != "",
+			Tags:           append([]string(nil), s.Tags...),
+		}
+	}
+	mu.Unlock()
 	_ = getGlobalKey()
 	_ = getMetricsBearerTokenHash()
 	sm, err := newSessionManager(getDB())
@@ -503,10 +523,15 @@ func applyBackupFiles(files map[string][]byte) error {
 	resetRuntimeCaches()
 
 	rollback := func(cause error) error {
-		_ = restoreSnapshots(snaps)
+		errs := []error{cause}
+		if restoreErr := restoreSnapshots(snaps); restoreErr != nil {
+			errs = append(errs, fmt.Errorf("rollback restore snapshots: %w", restoreErr))
+		}
 		resetRuntimeCaches()
-		_ = reloadRuntimeState()
-		return cause
+		if reloadErr := reloadRuntimeState(); reloadErr != nil {
+			errs = append(errs, fmt.Errorf("rollback reload runtime state after reset: %w", reloadErr))
+		}
+		return errors.Join(errs...)
 	}
 
 	if err := writeAtomicFile(dbTarget, files["servers.db"], 0600); err != nil {
