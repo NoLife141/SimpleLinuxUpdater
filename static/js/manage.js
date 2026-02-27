@@ -90,12 +90,24 @@ let serverCache = {};
 
         async function fetchManageServers() {
             const pageScroll = saveWindowScroll();
-            const response = await fetch('/api/servers');
-            manageServers = await response.json();
-            const tbody = document.querySelector('#manage-servers-table tbody');
-            tbody.innerHTML = '';
-            renderTable();
-            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+            try {
+                const response = await fetch('/api/servers');
+                if (!response.ok) {
+                    throw new Error(await parseErrorResponse(response, 'Failed to load servers.'));
+                }
+                const servers = await response.json();
+                if (!Array.isArray(servers)) {
+                    throw new Error('Invalid server list response.');
+                }
+                manageServers = servers;
+                const tbody = document.querySelector('#manage-servers-table tbody');
+                tbody.innerHTML = '';
+                renderTable();
+            } catch (error) {
+                alert(error?.message || 'Failed to load servers.');
+            } finally {
+                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+            }
         }
 
         function sortServers(servers) {
@@ -423,8 +435,15 @@ let serverCache = {};
 
         async function deleteServer(name) {
             if (confirm('Delete server?')) {
-                await fetch(`/api/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
-                fetchManageServers();
+                try {
+                    const response = await fetch(`/api/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
+                    if (!response.ok) {
+                        throw new Error(await parseErrorResponse(response, 'Failed to delete server.'));
+                    }
+                    await fetchManageServers();
+                } catch (error) {
+                    alert(error?.message || 'Failed to delete server.');
+                }
             }
         }
 
