@@ -310,6 +310,10 @@ let serverCache = {};
             return tags.map(tag => `<span class="pill">${escapeHtml(tag)}</span>`).join(' ');
         }
 
+        function safeStatusClassToken(status) {
+            return String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+        }
+
         function renderAuditTable() {
             const tbody = document.querySelector('#audit-table tbody');
             if (!tbody) return;
@@ -322,7 +326,7 @@ let serverCache = {};
                 auditEvents.forEach(evt => {
                     const row = document.createElement('tr');
                     const status = escapeHtml(evt.status || 'unknown');
-                    const statusClass = `status-${String(evt.status || '').toLowerCase()}`;
+                    const statusClass = `status-${safeStatusClassToken(evt.status)}`;
                     row.innerHTML = `
                         <td>${escapeHtml(evt.created_at || '')}</td>
                         <td>${escapeHtml(evt.actor || '')}</td>
