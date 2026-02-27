@@ -3990,6 +3990,9 @@ func setupRouter() (*gin.Engine, error) {
 	r.GET("/api/metrics/token", handleMetricsTokenStatus)
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
+	r.GET("/api/backup/status", handleBackupStatus)
+	r.POST("/api/backup/export", handleBackupExport)
+	r.POST("/api/backup/restore", handleBackupRestore)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
@@ -4703,7 +4706,7 @@ func main() {
 	defer StopAuthRateLimiters()
 	server := &http.Server{
 		Addr:         ":8080",
-		Handler:      sessionManager.LoadAndSave(r),
+		Handler:      sessionHandler(r),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,

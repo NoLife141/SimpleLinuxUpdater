@@ -74,7 +74,6 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 	}
 
 	for _, tc := range checks {
-		tc := tc
 		t.Run(filepath.Base(tc.path), func(t *testing.T) {
 			t.Parallel()
 

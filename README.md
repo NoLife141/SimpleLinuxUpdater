@@ -35,6 +35,7 @@ SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects t
 - Activity history (audit trail) stored in SQLite
 - Observability: `/observability` dashboard and Prometheus `GET /metrics`
 - Built-in single-user login with first-run setup, Argon2id password hashing, and SQLite-backed sessions
+- In-app encrypted backup/restore (DB + config, optional `known_hosts`) for host/container migration
 
 ## Quick start
 
@@ -60,6 +61,16 @@ Metrics token flow:
 - `/metrics` is disabled by default.
 - Sign in, go to `/manage`, then generate or rotate the Metrics API token.
 - The token is shown once. Store it in your scraper secret manager.
+
+Backup/restore flow:
+
+- Sign in and open `/manage` -> **Backup & Restore**.
+- Export creates one encrypted backup file (`.slubkp`) containing:
+  - `servers.db`
+  - `config.json`
+  - optional `known_hosts` (toggle at export time)
+- Restore applies immediately (no restart required) and fully replaces those files.
+- The backup passphrase is not stored by the app; keep it in your secret manager.
 
 Environment variables for auth/session:
 

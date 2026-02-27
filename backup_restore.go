@@ -1,0 +1,646 @@
+package main
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/scrypt"
+)
+
+const (
+	backupFileExtension       = ".slubkp"
+	backupFormatName          = "simplelinuxupdater-backup"
+	backupFormatVersion       = 1
+	backupMaxUploadBytes      = 256 * 1024 * 1024
+	backupMinPassphraseLength = 12
+	backupScryptN             = 32768
+	backupScryptR             = 8
+	backupScryptP             = 1
+	backupKeyLen              = 32
+)
+
+var backupRestoreMu sync.Mutex
+
+var (
+	errBackupInvalidPassphrase = errors.New("passphrase must be at least 12 characters")
+	errBackupMalformed         = errors.New("malformed backup file")
+	errBackupUnsupportedFormat = errors.New("unsupported backup format")
+	errBackupMissingFile       = errors.New("backup missing required file")
+)
+
+type backupExportRequest struct {
+	Passphrase        string `json:"passphrase"`
+	IncludeKnownHosts *bool  `json:"include_known_hosts"`
+}
+
+type backupManifest struct {
+	Format    string                        `json:"format"`
+	Version   int                           `json:"version"`
+	CreatedAt string                        `json:"created_at"`
+	Files     map[string]backupManifestFile `json:"files"`
+}
+
+type backupManifestFile struct {
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type backupKDFSpec struct {
+	Name    string `json:"name"`
+	N       int    `json:"N"`
+	R       int    `json:"r"`
+	P       int    `json:"p"`
+	SaltB64 string `json:"salt_b64"`
+}
+
+type backupCipherSpec struct {
+	Name     string `json:"name"`
+	NonceB64 string `json:"nonce_b64"`
+}
+
+type backupEnvelope struct {
+	Format     string           `json:"format"`
+	Version    int              `json:"version"`
+	CreatedAt  string           `json:"created_at"`
+	KDF        backupKDFSpec    `json:"kdf"`
+	Cipher     backupCipherSpec `json:"cipher"`
+	PayloadB64 string           `json:"payload_b64"`
+}
+
+type backupStatusResponse struct {
+	DBPath           string `json:"db_path"`
+	ConfigPath       string `json:"config_path"`
+	KnownHostsPath   string `json:"known_hosts_path"`
+	KnownHostsExists bool   `json:"known_hosts_exists"`
+}
+
+type restoreSnapshot struct {
+	Path   string
+	Exists bool
+	Data   []byte
+}
+
+func validateBackupPassphrase(passphrase string) error {
+	if len(strings.TrimSpace(passphrase)) < backupMinPassphraseLength {
+		return errBackupInvalidPassphrase
+	}
+	return nil
+}
+
+func sqliteStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+func createDBBackupSnapshot() ([]byte, error) {
+	tmp, err := os.CreateTemp("", "slu-backup-db-*.sqlite")
+	if err != nil {
+		return nil, err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return nil, err
+	}
+	defer os.Remove(tmpPath)
+
+	vacuumSQL := "VACUUM INTO " + sqliteStringLiteral(tmpPath)
+	if _, err := getDB().Exec(vacuumSQL); err != nil {
+		return nil, fmt.Errorf("snapshot database: %w", err)
+	}
+
+	data, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return nil, fmt.Errorf("read db snapshot: %w", err)
+	}
+	return data, nil
+}
+
+func knownHostsBackupPath() (string, bool) {
+	if p, err := knownHostsWritePath(); err == nil {
+		if st, statErr := os.Stat(p); statErr == nil && !st.IsDir() {
+			return p, true
+		}
+	}
+	defaultPath := filepath.Join(filepath.Dir(dbPath()), "known_hosts")
+	if st, err := os.Stat(defaultPath); err == nil && !st.IsDir() {
+		return defaultPath, true
+	}
+	return defaultPath, false
+}
+
+func buildBackupTarGz(files map[string][]byte) ([]byte, error) {
+	manifest := backupManifest{
+		Format:    backupFormatName,
+		Version:   backupFormatVersion,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		Files:     make(map[string]backupManifestFile, len(files)),
+	}
+
+	for name, data := range files {
+		sum := sha256.Sum256(data)
+		manifest.Files[name] = backupManifestFile{
+			Size:   int64(len(data)),
+			SHA256: hex.EncodeToString(sum[:]),
+		}
+	}
+
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		return nil, err
+	}
+	files["manifest.json"] = manifestData
+
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	tw := tar.NewWriter(gz)
+
+	for _, name := range []string{"manifest.json", "servers.db", "config.json", "known_hosts"} {
+		data, ok := files[name]
+		if !ok {
+			continue
+		}
+		hdr := &tar.Header{
+			Name:    name,
+			Mode:    0600,
+			Size:    int64(len(data)),
+			ModTime: time.Now().UTC(),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, err
+		}
+	}
+
+	if err := tw.Close(); err != nil {
+		_ = gz.Close()
+		return nil, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	return raw.Bytes(), nil
+}
+
+func encryptBackupPayload(plain []byte, passphrase string) ([]byte, error) {
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, backupScryptN, backupScryptR, backupScryptP, backupKeyLen)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	ciphertext := gcm.Seal(nil, nonce, plain, nil)
+	env := backupEnvelope{
+		Format:    backupFormatName,
+		Version:   backupFormatVersion,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		KDF: backupKDFSpec{
+			Name:    "scrypt",
+			N:       backupScryptN,
+			R:       backupScryptR,
+			P:       backupScryptP,
+			SaltB64: base64.StdEncoding.EncodeToString(salt),
+		},
+		Cipher: backupCipherSpec{
+			Name:     "aes-256-gcm",
+			NonceB64: base64.StdEncoding.EncodeToString(nonce),
+		},
+		PayloadB64: base64.StdEncoding.EncodeToString(ciphertext),
+	}
+	return json.Marshal(env)
+}
+
+func decryptBackupPayload(encrypted []byte, passphrase string) ([]byte, error) {
+	var env backupEnvelope
+	if err := json.Unmarshal(encrypted, &env); err != nil {
+		return nil, errBackupMalformed
+	}
+	if env.Format != backupFormatName || env.Version != backupFormatVersion {
+		return nil, errBackupUnsupportedFormat
+	}
+	if env.KDF.Name != "scrypt" || env.Cipher.Name != "aes-256-gcm" {
+		return nil, errBackupUnsupportedFormat
+	}
+	salt, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env.KDF.SaltB64))
+	if err != nil || len(salt) == 0 {
+		return nil, errBackupMalformed
+	}
+	nonce, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env.Cipher.NonceB64))
+	if err != nil || len(nonce) != 12 {
+		return nil, errBackupMalformed
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env.PayloadB64))
+	if err != nil || len(ciphertext) == 0 {
+		return nil, errBackupMalformed
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, env.KDF.N, env.KDF.R, env.KDF.P, backupKeyLen)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, errors.New("invalid passphrase or corrupted backup")
+	}
+	return plain, nil
+}
+
+func extractBackupTarGz(payload []byte) (map[string][]byte, backupManifest, error) {
+	files := make(map[string][]byte)
+	zr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return nil, backupManifest{}, err
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, backupManifest{}, err
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := filepath.Base(strings.TrimSpace(hdr.Name))
+		if name == "" {
+			continue
+		}
+		if name != "manifest.json" && name != "servers.db" && name != "config.json" && name != "known_hosts" {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(tr, backupMaxUploadBytes))
+		if err != nil {
+			return nil, backupManifest{}, err
+		}
+		files[name] = data
+	}
+
+	manifestData, ok := files["manifest.json"]
+	if !ok {
+		return nil, backupManifest{}, errBackupMalformed
+	}
+	var manifest backupManifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		return nil, backupManifest{}, errBackupMalformed
+	}
+	if manifest.Format != backupFormatName || manifest.Version != backupFormatVersion {
+		return nil, backupManifest{}, errBackupUnsupportedFormat
+	}
+	if _, ok := files["servers.db"]; !ok {
+		return nil, backupManifest{}, fmt.Errorf("%w: servers.db", errBackupMissingFile)
+	}
+	if _, ok := files["config.json"]; !ok {
+		return nil, backupManifest{}, fmt.Errorf("%w: config.json", errBackupMissingFile)
+	}
+	for name, meta := range manifest.Files {
+		data, exists := files[name]
+		if !exists {
+			return nil, backupManifest{}, fmt.Errorf("%w: %s", errBackupMissingFile, name)
+		}
+		if int64(len(data)) != meta.Size {
+			return nil, backupManifest{}, fmt.Errorf("checksum size mismatch for %s", name)
+		}
+		sum := sha256.Sum256(data)
+		if !strings.EqualFold(meta.SHA256, hex.EncodeToString(sum[:])) {
+			return nil, backupManifest{}, fmt.Errorf("checksum mismatch for %s", name)
+		}
+	}
+	return files, manifest, nil
+}
+
+func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+func snapshotExistingFiles(paths []string) (map[string]restoreSnapshot, error) {
+	out := make(map[string]restoreSnapshot, len(paths))
+	for _, p := range paths {
+		st := restoreSnapshot{Path: p, Exists: false}
+		data, err := os.ReadFile(p)
+		if err == nil {
+			st.Exists = true
+			st.Data = data
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		out[p] = st
+	}
+	return out, nil
+}
+
+func restoreSnapshots(snaps map[string]restoreSnapshot) error {
+	for _, snap := range snaps {
+		if snap.Exists {
+			if err := writeAtomicFile(snap.Path, snap.Data, 0600); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.Remove(snap.Path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func resetRuntimeCaches() {
+	if db != nil {
+		_ = db.Close()
+	}
+	db = nil
+	dbOnce = sync.Once{}
+
+	encryptionKey = nil
+	keyOnce = sync.Once{}
+
+	globalKeyMu.Lock()
+	globalKey = ""
+	globalKeyMu.Unlock()
+
+	metricsBearerTokenHashMu.Lock()
+	metricsBearerTokenHash = ""
+	metricsBearerTokenHashLoaded = false
+	metricsBearerTokenHashDBPath = ""
+	metricsBearerTokenHashMu.Unlock()
+}
+
+func reloadRuntimeState() error {
+	_ = getDB()
+	loadServers()
+	_ = getGlobalKey()
+	_ = getMetricsBearerTokenHash()
+	sm, err := newSessionManager(getDB())
+	if err != nil {
+		return err
+	}
+	sessionManager = sm
+	return nil
+}
+
+func applyBackupFiles(files map[string][]byte) error {
+	dbTarget := dbPath()
+	configTarget := configPath()
+	knownHostsTarget := filepath.Join(filepath.Dir(dbPath()), "known_hosts")
+	if p, err := knownHostsWritePath(); err == nil && strings.TrimSpace(p) != "" {
+		knownHostsTarget = p
+	}
+
+	targets := []string{dbTarget, configTarget}
+	if _, ok := files["known_hosts"]; ok {
+		targets = append(targets, knownHostsTarget)
+	}
+
+	snaps, err := snapshotExistingFiles(targets)
+	if err != nil {
+		return err
+	}
+
+	resetRuntimeCaches()
+
+	rollback := func(cause error) error {
+		_ = restoreSnapshots(snaps)
+		resetRuntimeCaches()
+		_ = reloadRuntimeState()
+		return cause
+	}
+
+	if err := writeAtomicFile(dbTarget, files["servers.db"], 0600); err != nil {
+		return rollback(err)
+	}
+	if err := writeAtomicFile(configTarget, files["config.json"], 0600); err != nil {
+		return rollback(err)
+	}
+	if khData, ok := files["known_hosts"]; ok {
+		if err := writeAtomicFile(knownHostsTarget, khData, 0600); err != nil {
+			return rollback(err)
+		}
+	}
+	if err := reloadRuntimeState(); err != nil {
+		return rollback(err)
+	}
+	return nil
+}
+
+func handleBackupStatus(c *gin.Context) {
+	khPath, khExists := knownHostsBackupPath()
+	c.JSON(http.StatusOK, backupStatusResponse{
+		DBPath:           dbPath(),
+		ConfigPath:       configPath(),
+		KnownHostsPath:   khPath,
+		KnownHostsExists: khExists,
+	})
+}
+
+func handleBackupExport(c *gin.Context) {
+	var req backupExportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Invalid backup export payload", nil)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+	if err := validateBackupPassphrase(req.Passphrase); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	includeKnownHosts := true
+	if req.IncludeKnownHosts != nil {
+		includeKnownHosts = *req.IncludeKnownHosts
+	}
+
+	backupRestoreMu.Lock()
+	defer backupRestoreMu.Unlock()
+
+	dbSnapshot, err := createDBBackupSnapshot()
+	if err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Failed to snapshot database", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to snapshot database"})
+		return
+	}
+	_ = getEncryptionKey()
+	configData, err := os.ReadFile(configPath())
+	if err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Failed to read config", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read config"})
+		return
+	}
+
+	files := map[string][]byte{
+		"servers.db":  dbSnapshot,
+		"config.json": configData,
+	}
+	knownHostsIncluded := false
+	if includeKnownHosts {
+		if path, exists := knownHostsBackupPath(); exists {
+			if data, readErr := os.ReadFile(path); readErr == nil {
+				files["known_hosts"] = data
+				knownHostsIncluded = true
+			}
+		}
+	}
+
+	tarGz, err := buildBackupTarGz(files)
+	if err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Failed to build backup payload", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build backup"})
+		return
+	}
+	encrypted, err := encryptBackupPayload(tarGz, req.Passphrase)
+	if err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Failed to encrypt backup", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt backup"})
+		return
+	}
+
+	filename := fmt.Sprintf("simplelinuxupdater-backup-%s%s", time.Now().UTC().Format("20060102T150405Z"), backupFileExtension)
+	c.Header("Content-Type", "application/octet-stream")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	c.Header("Cache-Control", "no-store")
+	c.Data(http.StatusOK, "application/octet-stream", encrypted)
+	audit(c, "backup.export", "backup", "state", "success", "Backup exported", map[string]any{"bytes": len(encrypted), "known_hosts_included": knownHostsIncluded})
+}
+
+func readUploadedBackupFile(file *multipart.FileHeader) ([]byte, error) {
+	if file == nil {
+		return nil, errors.New("missing backup file")
+	}
+	if file.Size > backupMaxUploadBytes {
+		return nil, fmt.Errorf("backup file too large (max %d bytes)", backupMaxUploadBytes)
+	}
+	src, err := file.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer src.Close()
+	data, err := io.ReadAll(io.LimitReader(src, backupMaxUploadBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > backupMaxUploadBytes {
+		return nil, fmt.Errorf("backup file too large (max %d bytes)", backupMaxUploadBytes)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("empty backup file")
+	}
+	return data, nil
+}
+
+func handleBackupRestore(c *gin.Context) {
+	if c.Request != nil && c.Writer != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, backupMaxUploadBytes+1024)
+	}
+	passphrase := strings.TrimSpace(c.PostForm("passphrase"))
+	if err := validateBackupPassphrase(passphrase); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	file, err := c.FormFile("file")
+	if err != nil {
+		audit(c, "backup.restore", "backup", "state", "failure", "Missing backup file", nil)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "backup file is required"})
+		return
+	}
+	blob, err := readUploadedBackupFile(file)
+	if err != nil {
+		audit(c, "backup.restore", "backup", "state", "failure", "Invalid backup file", nil)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	backupRestoreMu.Lock()
+	defer backupRestoreMu.Unlock()
+
+	plain, err := decryptBackupPayload(blob, passphrase)
+	if err != nil {
+		audit(c, "backup.restore", "backup", "state", "failure", "Failed to decrypt backup", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to decrypt backup"})
+		return
+	}
+	files, manifest, err := extractBackupTarGz(plain)
+	if err != nil {
+		audit(c, "backup.restore", "backup", "state", "failure", "Invalid backup payload", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid backup payload"})
+		return
+	}
+	if err := applyBackupFiles(files); err != nil {
+		audit(c, "backup.restore", "backup", "state", "failure", "Failed to apply backup", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply backup"})
+		return
+	}
+
+	audit(c, "backup.restore", "backup", "state", "success", "Backup restored", map[string]any{"manifest_files": len(manifest.Files)})
+	c.JSON(http.StatusOK, gin.H{"message": "backup restored", "restart_required": false})
+}

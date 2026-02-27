@@ -222,6 +222,17 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 	return sm, nil
 }
 
+func sessionHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sm := sessionManager
+		if sm == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		sm.LoadAndSave(next).ServeHTTP(w, r)
+	})
+}
+
 func setupRequired() (bool, error) {
 	db := getDB()
 	var count int

@@ -44,6 +44,26 @@
                 <button class="btn-ghost inline-btn" type="button" id="metrics-token-copy">Copy Token</button>
             </div>
             <hr class="section-sep">
+            <h2>Backup &amp; Restore</h2>
+            <p class="subtle">Export encrypted disaster-recovery backups (DB + config + known_hosts) and restore on another host/container.</p>
+            <div class="backup-grid">
+                <div class="backup-block">
+                    <h3>Export Backup</h3>
+                    <input type="password" id="backup-export-passphrase" placeholder="Backup passphrase (min 12 chars)">
+                    <input type="password" id="backup-export-passphrase-confirm" placeholder="Confirm passphrase">
+                    <label class="checkbox-inline"><input type="checkbox" id="backup-include-known-hosts" checked> Include known_hosts</label>
+                    <button class="btn-success" type="button" id="backup-export-btn">Download Backup</button>
+                </div>
+                <div class="backup-block">
+                    <h3>Restore Backup</h3>
+                    <input class="file-input" type="file" id="backup-restore-file" accept=".slubkp,application/octet-stream">
+                    <label class="file-btn" for="backup-restore-file">Choose backup file</label>
+                    <input type="password" id="backup-restore-passphrase" placeholder="Backup passphrase">
+                    <button class="btn-danger" type="button" id="backup-restore-btn">Restore Backup (Full Replace)</button>
+                </div>
+            </div>
+            <div id="backup-status" class="subtle"></div>
+            <hr class="section-sep">
             <form id="add-server-form" class="add-server-form">
                 <span class="subtle form-note">Auth is password or SSH key (key takes priority). Leave one empty.</span>
                 <input type="text" id="name" placeholder="Name" required>

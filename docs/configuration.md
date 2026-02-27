@@ -6,6 +6,7 @@
 
 - [Authentication and sessions](#authentication-and-sessions)
 - [Metrics API token](#metrics-api-token)
+- [Backup and restore](#backup-and-restore)
 - [Storage paths](#storage-paths)
 - [Retry policy](#retry-policy)
 - [Post-update checks](#post-update-checks)
@@ -47,6 +48,27 @@ Prometheus must send:
 ```text
 Authorization: Bearer <token>
 ```
+
+## Backup and restore
+
+Backup/restore is managed in-app from `/manage` (session-authenticated).
+
+Behavior:
+
+- Export requires a passphrase (minimum 12 characters).
+- Backup payload is encrypted and downloaded as `.slubkp`.
+- Backup contains:
+  - `servers.db`
+  - `config.json`
+  - optional `known_hosts` (controlled by export toggle)
+- Restore requires the backup file + passphrase and applies immediately (no restart required).
+- Restore is a full replace of these files; current runtime state is reloaded.
+
+What backup does not include:
+
+- Reverse-proxy certificates/keys and external proxy config
+- Container runtime settings outside the app data paths
+- Any external secret manager state
 
 ## Storage paths
 
