@@ -405,8 +405,8 @@ func getEncryptionKey() []byte {
 	}
 
 	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	encryptionKey = keyBytes
-	runtimeStateMu.Unlock()
 	return keyBytes
 }
 
@@ -3536,10 +3536,10 @@ func setGlobalKey(key string) error {
 		return err
 	}
 	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	globalKeyMu.Lock()
+	defer globalKeyMu.Unlock()
 	globalKey = key
-	globalKeyMu.Unlock()
-	runtimeStateMu.Unlock()
 	return nil
 }
 
@@ -3549,10 +3549,10 @@ func clearGlobalKey() error {
 		return err
 	}
 	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	globalKeyMu.Lock()
+	defer globalKeyMu.Unlock()
 	globalKey = ""
-	globalKeyMu.Unlock()
-	runtimeStateMu.Unlock()
 	return nil
 }
 
@@ -3625,12 +3625,12 @@ func setMetricsBearerTokenHash(tokenHash string) error {
 		return err
 	}
 	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	metricsBearerTokenHashMu.Lock()
+	defer metricsBearerTokenHashMu.Unlock()
 	metricsBearerTokenHash = tokenHash
 	metricsBearerTokenHashLoaded = true
 	metricsBearerTokenHashDBPath = dbPath()
-	metricsBearerTokenHashMu.Unlock()
-	runtimeStateMu.Unlock()
 	return nil
 }
 
@@ -3640,12 +3640,12 @@ func clearMetricsBearerTokenHash() error {
 		return err
 	}
 	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	metricsBearerTokenHashMu.Lock()
+	defer metricsBearerTokenHashMu.Unlock()
 	metricsBearerTokenHash = ""
 	metricsBearerTokenHashLoaded = true
 	metricsBearerTokenHashDBPath = dbPath()
-	metricsBearerTokenHashMu.Unlock()
-	runtimeStateMu.Unlock()
 	return nil
 }
 

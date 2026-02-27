@@ -699,5 +699,9 @@ func handleBackupRestore(c *gin.Context) {
 	}
 
 	audit(c, "backup.restore", "backup", "state", "success", "Backup restored", map[string]any{"manifest_files": len(manifest.Files)})
-	c.JSON(http.StatusOK, gin.H{"message": "backup restored", "restart_required": false})
+	c.JSON(http.StatusOK, gin.H{
+		"message":              "backup restored",
+		"restart_required":     false,
+		"sessions_invalidated": true,
+	})
 }
