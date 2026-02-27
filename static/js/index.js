@@ -129,7 +129,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 if (state === "ready") {
                     if (cves.length > 0) {
                         badges.push(`<span class="pending-badge pending-badge-cve">${cves.length} CVE${cves.length > 1 ? "s" : ""}</span>`);
-                        cves.slice(0, 3).forEach(cve => badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`));
+                        cves.slice(0, 3).forEach((cve) => {
+                            badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`);
+                        });
                     } else {
                         badges.push(`<span class="pending-badge">No CVE found</span>`);
                     }
@@ -711,25 +713,51 @@ const LOG_BOTTOM_THRESHOLD = 20;
             renderTable();
         });
 
-        document.getElementById('bulk-update').addEventListener('click', async () => {
+        async function runBulkAction(actionPath, actionLabel) {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/update/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            if (names.length === 0) {
+                await fetchServers();
+                return;
+            }
+
+            const jobs = names.map(async (name) => {
+                const response = await fetch(`/api/${actionPath}/${encodeURIComponent(name)}`, { method: 'POST' });
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    const detail = typeof payload.error === 'string' && payload.error.trim()
+                        ? payload.error.trim()
+                        : `${response.status} ${response.statusText}`.trim();
+                    throw new Error(detail || 'Request failed');
+                }
+            });
+
+            const results = await Promise.allSettled(jobs);
+            const failures = [];
+            results.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    failures.push(`${names[index]}: ${result.reason?.message || 'Request failed'}`);
+                }
+            });
+
+            if (failures.length > 0) {
+                console.error(`Bulk ${actionLabel} failures:`, failures);
+                alert(`Bulk ${actionLabel} completed with ${failures.length} failure(s): ${failures.join(', ')}`);
+            }
+
+            await fetchServers();
+        }
+
+        document.getElementById('bulk-update').addEventListener('click', async () => {
+            await runBulkAction('update', 'update');
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/approve/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('approve', 'approve');
         });
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('cancel', 'cancel');
         });
         document.getElementById('bulk-autoremove').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/autoremove/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('autoremove', 'apt autoremove');
         });
 
         async function updateServer(name) {
