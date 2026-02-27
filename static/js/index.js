@@ -129,9 +129,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 if (state === "ready") {
                     if (cves.length > 0) {
                         badges.push(`<span class="pending-badge pending-badge-cve">${cves.length} CVE${cves.length > 1 ? "s" : ""}</span>`);
-                        cves.slice(0, 3).forEach((cve) => {
-                            badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`);
-                        });
+                        cves.slice(0, 3).forEach(cve => badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`));
                     } else {
                         badges.push(`<span class="pending-badge">No CVE found</span>`);
                     }
@@ -610,9 +608,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         function applyHoverClass() {
             const tbody = document.querySelector('#servers-table tbody');
-            tbody.querySelectorAll('tr').forEach((tr) => {
-                tr.classList.remove('row-hover');
-            });
+            tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('row-hover'));
             if (!hoveredName) return;
             const row = tbody.querySelector(`tr[data-name="${CSS.escape(hoveredName)}"]`);
             if (row) {
@@ -715,50 +711,25 @@ const LOG_BOTTOM_THRESHOLD = 20;
             renderTable();
         });
 
-        async function runBulkAction(actionPath, actionLabel) {
-            const names = Array.from(selectedServers);
-            if (names.length === 0) {
-                return;
-            }
-
-            const jobs = names.map(async (name) => {
-                const response = await fetch(`/api/${actionPath}/${encodeURIComponent(name)}`, { method: 'POST' });
-                if (!response.ok) {
-                    const payload = await response.json().catch(() => ({}));
-                    const detail = typeof payload.error === 'string' && payload.error.trim()
-                        ? payload.error.trim()
-                        : `${response.status} ${response.statusText}`.trim();
-                    throw new Error(detail || 'Request failed');
-                }
-            });
-
-            const results = await Promise.allSettled(jobs);
-            const failures = [];
-            results.forEach((result, index) => {
-                if (result.status === 'rejected') {
-                    failures.push(`${names[index]}: ${result.reason?.message || 'Request failed'}`);
-                }
-            });
-
-            if (failures.length > 0) {
-                console.error(`Bulk ${actionLabel} failures:`, failures);
-                alert(`Bulk ${actionLabel} completed with ${failures.length} failure(s): ${failures.join(', ')}`);
-            }
-
-            await fetchServers();
-        }
-
         document.getElementById('bulk-update').addEventListener('click', async () => {
-            await runBulkAction('update', 'update');
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/update/${encodeURIComponent(name)}`, { method: 'POST' })));
+            fetchServers();
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
-            await runBulkAction('approve', 'approve');
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/approve/${encodeURIComponent(name)}`, { method: 'POST' })));
+            fetchServers();
         });
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
-            await runBulkAction('cancel', 'cancel');
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' })));
+            fetchServers();
         });
         document.getElementById('bulk-autoremove').addEventListener('click', async () => {
-            await runBulkAction('autoremove', 'apt autoremove');
+            const names = Array.from(selectedServers);
+            await Promise.all(names.map(name => fetch(`/api/autoremove/${encodeURIComponent(name)}`, { method: 'POST' })));
+            fetchServers();
         });
 
         async function updateServer(name) {
