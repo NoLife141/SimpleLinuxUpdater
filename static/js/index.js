@@ -610,7 +610,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         function applyHoverClass() {
             const tbody = document.querySelector('#servers-table tbody');
-            tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('row-hover'));
+            tbody.querySelectorAll('tr').forEach((tr) => {
+                tr.classList.remove('row-hover');
+            });
             if (!hoveredName) return;
             const row = tbody.querySelector(`tr[data-name="${CSS.escape(hoveredName)}"]`);
             if (row) {
