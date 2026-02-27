@@ -141,6 +141,9 @@ func createDBBackupSnapshot() ([]byte, error) {
 		return nil, err
 	}
 
+	// SQLite VACUUM INTO does not accept bind parameters. This is safe because tmpPath
+	// comes from os.CreateTemp and validateBackupSnapshotPath enforces absolute temp-root
+	// location and rejects quotes/newlines before SQL assembly.
 	vacuumSQL := "VACUUM INTO '" + tmpPath + "'"
 	if _, err := getDB().Exec(vacuumSQL); err != nil {
 		return nil, fmt.Errorf("snapshot database: %w", err)
