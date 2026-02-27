@@ -703,3 +703,28 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		assertSecurityHeaders(t, rec.Header(), true)
 	})
 }
+
+func TestAuthGateAllowsStaticAssetsUnauthenticated(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-gate-static.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionManager.LoadAndSave(r)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/static/auth.js", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("static asset status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if ctype := rec.Header().Get("Content-Type"); !strings.Contains(ctype, "javascript") {
+		t.Fatalf("static asset content-type = %q, want javascript", ctype)
+	}
+}

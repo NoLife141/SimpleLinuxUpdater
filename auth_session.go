@@ -447,6 +447,10 @@ func metricsBearerMiddleware() gin.HandlerFunc {
 
 func authGateMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
+			c.Next()
+			return
+		}
 		username := sessionUsername(c)
 		if username != "" {
 			c.Set("actor", username)

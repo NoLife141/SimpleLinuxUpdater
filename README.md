@@ -108,6 +108,12 @@ Choosing between SimpleLinuxUpdater, scripts, and Ansible: see [docs/usage.md](d
 
 This project can run apt commands via `sudo` on remote hosts and stores SSH credentials encrypted in SQLite. Do not expose the UI to the public internet. See [docs/security.md](docs/security.md).
 
+Frontend CSP policy:
+
+- UI pages run with strict CSP (`script-src 'self'`, `style-src 'self'`).
+- Inline `<script>`, inline `<style>`, inline `on*=` handlers, and inline `style=` attributes are prohibited.
+- CI tests fail if these inline patterns are reintroduced in the main UI templates.
+
 ## Contributing
 
 See [docs/contributing.md](docs/contributing.md).
