@@ -718,7 +718,6 @@ const LOG_BOTTOM_THRESHOLD = 20;
         async function runBulkAction(actionPath, actionLabel) {
             const names = Array.from(selectedServers);
             if (names.length === 0) {
-                await fetchServers();
                 return;
             }
 
