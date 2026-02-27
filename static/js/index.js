@@ -721,31 +721,30 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 return;
             }
 
-            const failures = [];
-            await Promise.all(names.map(async (name) => {
-                try {
-                    const response = await fetch(`/api/${actionPath}/${encodeURIComponent(name)}`, { method: 'POST' });
-                    if (!response.ok) {
-                        let details = `${response.status} ${response.statusText}`.trim();
-                        const payload = await response.json().catch(() => null);
-                        if (payload && typeof payload.error === 'string' && payload.error.trim()) {
-                            details = payload.error.trim();
-                        }
-                        failures.push(`${name}: ${details}`);
-                    }
-                } catch (error) {
-                    failures.push(`${name}: ${error?.message || 'Network error'}`);
+            const jobs = names.map(async (name) => {
+                const response = await fetch(`/api/${actionPath}/${encodeURIComponent(name)}`, { method: 'POST' });
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    const detail = typeof payload.error === 'string' && payload.error.trim()
+                        ? payload.error.trim()
+                        : `${response.status} ${response.statusText}`.trim();
+                    throw new Error(detail || 'Request failed');
                 }
-            }));
+            });
 
-            const successCount = names.length - failures.length;
-            if (successCount === 0) {
-                alert(`Bulk ${actionLabel} failed. ${failures[0] || 'Unknown error.'}`);
-                return;
-            }
+            const results = await Promise.allSettled(jobs);
+            const failures = [];
+            results.forEach((result, index) => {
+                if (result.status === 'rejected') {
+                    failures.push(`${names[index]}: ${result.reason?.message || 'Request failed'}`);
+                }
+            });
+
             if (failures.length > 0) {
-                alert(`Bulk ${actionLabel} completed with ${failures.length} failure(s). First error: ${failures[0]}`);
+                console.error(`Bulk ${actionLabel} failures:`, failures);
+                alert(`Bulk ${actionLabel} completed with ${failures.length} failure(s): ${failures.join(', ')}`);
             }
+
             await fetchServers();
         }
 
