@@ -3960,7 +3960,9 @@ func setupRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
 	}
+	sessionManagerMu.Lock()
 	sessionManager = sm
+	sessionManagerMu.Unlock()
 
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")

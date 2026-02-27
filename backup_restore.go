@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -106,8 +107,23 @@ func validateBackupPassphrase(passphrase string) error {
 	return nil
 }
 
-func sqliteStringLiteral(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+func validateBackupSnapshotPath(path string) error {
+	cleanPath := filepath.Clean(strings.TrimSpace(path))
+	if cleanPath == "" || !filepath.IsAbs(cleanPath) {
+		return errors.New("invalid backup snapshot path")
+	}
+	if strings.ContainsRune(cleanPath, '\'') || strings.ContainsAny(cleanPath, "\r\n") {
+		return errors.New("invalid backup snapshot path")
+	}
+	tempRoot := filepath.Clean(os.TempDir())
+	rel, err := filepath.Rel(tempRoot, cleanPath)
+	if err != nil {
+		return errors.New("invalid backup snapshot path")
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return errors.New("invalid backup snapshot path")
+	}
+	return nil
 }
 
 func createDBBackupSnapshot() ([]byte, error) {
@@ -121,8 +137,11 @@ func createDBBackupSnapshot() ([]byte, error) {
 		return nil, err
 	}
 	defer os.Remove(tmpPath)
+	if err := validateBackupSnapshotPath(tmpPath); err != nil {
+		return nil, err
+	}
 
-	vacuumSQL := "VACUUM INTO " + sqliteStringLiteral(tmpPath)
+	vacuumSQL := "VACUUM INTO '" + tmpPath + "'"
 	if _, err := getDB().Exec(vacuumSQL); err != nil {
 		return nil, fmt.Errorf("snapshot database: %w", err)
 	}
@@ -259,6 +278,12 @@ func decryptBackupPayload(encrypted []byte, passphrase string) ([]byte, error) {
 	if env.KDF.Name != "scrypt" || env.Cipher.Name != "aes-256-gcm" {
 		return nil, errBackupUnsupportedFormat
 	}
+	if env.KDF.N <= 0 || env.KDF.R <= 0 || env.KDF.P <= 0 {
+		return nil, errBackupUnsupportedFormat
+	}
+	if env.KDF.N != backupScryptN || env.KDF.R != backupScryptR || env.KDF.P != backupScryptP {
+		return nil, errBackupUnsupportedFormat
+	}
 	salt, err := base64.StdEncoding.DecodeString(strings.TrimSpace(env.KDF.SaltB64))
 	if err != nil || len(salt) == 0 {
 		return nil, errBackupMalformed
@@ -271,7 +296,7 @@ func decryptBackupPayload(encrypted []byte, passphrase string) ([]byte, error) {
 	if err != nil || len(ciphertext) == 0 {
 		return nil, errBackupMalformed
 	}
-	key, err := scrypt.Key([]byte(passphrase), salt, env.KDF.N, env.KDF.R, env.KDF.P, backupKeyLen)
+	key, err := scrypt.Key([]byte(passphrase), salt, backupScryptN, backupScryptR, backupScryptP, backupKeyLen)
 	if err != nil {
 		return nil, err
 	}
@@ -285,6 +310,7 @@ func decryptBackupPayload(encrypted []byte, passphrase string) ([]byte, error) {
 	}
 	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
+		log.Printf("decryptBackupPayload: gcm open failed: %v", err)
 		return nil, errors.New("invalid passphrase or corrupted backup")
 	}
 	return plain, nil
@@ -447,7 +473,9 @@ func reloadRuntimeState() error {
 	if err != nil {
 		return err
 	}
+	sessionManagerMu.Lock()
 	sessionManager = sm
+	sessionManagerMu.Unlock()
 	return nil
 }
 
@@ -512,6 +540,7 @@ func handleBackupExport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 		return
 	}
+	req.Passphrase = strings.TrimSpace(req.Passphrase)
 	if err := validateBackupPassphrase(req.Passphrase); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
