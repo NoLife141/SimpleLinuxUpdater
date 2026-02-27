@@ -129,7 +129,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 if (state === "ready") {
                     if (cves.length > 0) {
                         badges.push(`<span class="pending-badge pending-badge-cve">${cves.length} CVE${cves.length > 1 ? "s" : ""}</span>`);
-                        cves.slice(0, 3).forEach(cve => badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`));
+                        cves.slice(0, 3).forEach((cve) => {
+                            badges.push(`<span class="pending-badge">${escapeHtml(cve)}</span>`);
+                        });
                     } else {
                         badges.push(`<span class="pending-badge">No CVE found</span>`);
                     }
@@ -608,7 +610,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         function applyHoverClass() {
             const tbody = document.querySelector('#servers-table tbody');
-            tbody.querySelectorAll('tr').forEach(tr => tr.classList.remove('row-hover'));
+            tbody.querySelectorAll('tr').forEach((tr) => {
+                tr.classList.remove('row-hover');
+            });
             if (!hoveredName) return;
             const row = tbody.querySelector(`tr[data-name="${CSS.escape(hoveredName)}"]`);
             if (row) {
@@ -711,25 +715,51 @@ const LOG_BOTTOM_THRESHOLD = 20;
             renderTable();
         });
 
-        document.getElementById('bulk-update').addEventListener('click', async () => {
+        async function runBulkAction(actionPath, actionLabel) {
             const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/update/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            if (names.length === 0) {
+                return;
+            }
+
+            const failures = [];
+            await Promise.all(names.map(async (name) => {
+                try {
+                    const response = await fetch(`/api/${actionPath}/${encodeURIComponent(name)}`, { method: 'POST' });
+                    if (!response.ok) {
+                        let details = `${response.status} ${response.statusText}`.trim();
+                        const payload = await response.json().catch(() => null);
+                        if (payload && typeof payload.error === 'string' && payload.error.trim()) {
+                            details = payload.error.trim();
+                        }
+                        failures.push(`${name}: ${details}`);
+                    }
+                } catch (error) {
+                    failures.push(`${name}: ${error?.message || 'Network error'}`);
+                }
+            }));
+
+            const successCount = names.length - failures.length;
+            if (successCount === 0) {
+                alert(`Bulk ${actionLabel} failed. ${failures[0] || 'Unknown error.'}`);
+                return;
+            }
+            if (failures.length > 0) {
+                alert(`Bulk ${actionLabel} completed with ${failures.length} failure(s). First error: ${failures[0]}`);
+            }
+            await fetchServers();
+        }
+
+        document.getElementById('bulk-update').addEventListener('click', async () => {
+            await runBulkAction('update', 'update');
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/approve/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('approve', 'approve');
         });
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/cancel/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('cancel', 'cancel');
         });
         document.getElementById('bulk-autoremove').addEventListener('click', async () => {
-            const names = Array.from(selectedServers);
-            await Promise.all(names.map(name => fetch(`/api/autoremove/${encodeURIComponent(name)}`, { method: 'POST' })));
-            fetchServers();
+            await runBulkAction('autoremove', 'apt autoremove');
         });
 
         async function updateServer(name) {
