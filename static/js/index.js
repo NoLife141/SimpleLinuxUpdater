@@ -37,25 +37,6 @@ const LOG_BOTTOM_THRESHOLD = 20;
             "upgrading", "autoremove", "sudoers", "done", "error"
         ]);
 
-        function escapeHtml(value) {
-            return String(value ?? "")
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
-                .replace(/>/g, "&gt;")
-                .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#39;");
-        }
-
-        function escapeJsSingleQuoted(value) {
-            return String(value ?? "")
-                .replace(/\\/g, "\\\\")
-                .replace(/'/g, "\\'")
-                .replace(/\r/g, "\\r")
-                .replace(/\n/g, "\\n")
-                .replace(/\u2028/g, "\\u2028")
-                .replace(/\u2029/g, "\\u2029");
-        }
-
         function safeStatusClass(value) {
             const normalized = String(value ?? "").toLowerCase();
             return allowedStatuses.has(normalized) ? normalized : "error";
