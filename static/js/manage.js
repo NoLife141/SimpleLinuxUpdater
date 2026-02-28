@@ -8,6 +8,7 @@ let serverCache = {};
         let auditPage = 1;
         let auditPageSize = 20;
         let auditTotal = 0;
+        let hostKeyModalResolve = null;
 
         function escapeHtml(value) {
             return String(value ?? "")
@@ -58,16 +59,44 @@ let serverCache = {};
             return res.json();
         }
 
-        async function trustHostKeyFlow(host, port) {
-            const scanned = await scanHostKey(host, port);
-            const confirmed = confirm(
-                `Verify SSH host key before trusting:\n\n` +
+        function hostKeyPromptText(scanned) {
+            return (
                 `Host: ${scanned.host}\n` +
                 `Port: ${scanned.port}\n` +
                 `Algorithm: ${scanned.algorithm}\n` +
                 `Fingerprint: ${scanned.fingerprint_sha256}\n\n` +
                 `Add this key to known_hosts?`
             );
+        }
+
+        function closeHostKeyModal(confirmed) {
+            const modal = document.getElementById('hostkey-modal');
+            if (modal) {
+                modal.classList.remove('active');
+            }
+            const resolver = hostKeyModalResolve;
+            hostKeyModalResolve = null;
+            if (resolver) {
+                resolver(!!confirmed);
+            }
+        }
+
+        function confirmHostKeyWithModal(scanned) {
+            const modal = document.getElementById('hostkey-modal');
+            const details = document.getElementById('hostkey-modal-details');
+            if (!modal || !details) {
+                return Promise.resolve(confirm(`Verify SSH host key before trusting:\n\n${hostKeyPromptText(scanned)}`));
+            }
+            details.textContent = hostKeyPromptText(scanned);
+            modal.classList.add('active');
+            return new Promise((resolve) => {
+                hostKeyModalResolve = resolve;
+            });
+        }
+
+        async function trustHostKeyFlow(host, port) {
+            const scanned = await scanHostKey(host, port);
+            const confirmed = await confirmHostKeyWithModal(scanned);
             if (!confirmed) {
                 throw new Error('Host key trust cancelled.');
             }
@@ -565,6 +594,21 @@ let serverCache = {};
                 clearServerPassword(editingServerName);
             }
         });
+        document.getElementById('hostkey-modal-cancel').addEventListener('click', () => closeHostKeyModal(false));
+        document.getElementById('hostkey-modal-trust').addEventListener('click', () => closeHostKeyModal(true));
+        document.getElementById('hostkey-modal').addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'hostkey-modal') {
+                closeHostKeyModal(false);
+            }
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                const hostKeyModal = document.getElementById('hostkey-modal');
+                if (hostKeyModal && hostKeyModal.classList.contains('active')) {
+                    closeHostKeyModal(false);
+                }
+            }
+        });
 
         async function uploadGlobalKey() {
             const input = document.getElementById('global-key-file');
@@ -602,7 +646,7 @@ let serverCache = {};
             if (!status) return;
             const res = await fetch('/api/keys/global');
             if (!res.ok) {
-                status.textContent = 'Global key status: unknown';
+                status.textContent = `Global key status: ${await parseErrorResponse(res, 'unknown')}`;
                 return;
             }
             const data = await res.json();

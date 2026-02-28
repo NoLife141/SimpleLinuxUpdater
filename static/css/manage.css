@@ -537,6 +537,20 @@
             grid-column: 1 / -1;
         }
 
+        .hostkey-details {
+            margin: 0 0 14px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 13px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
         .modal-actions {
             display: flex;
             gap: 10px;

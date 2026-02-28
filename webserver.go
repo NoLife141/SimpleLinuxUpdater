@@ -120,15 +120,15 @@ const postcheckCustomCmdEnv = "DEBIAN_UPDATER_POSTCHECK_CMD"
 const updatePrecheckMinFreeKB int64 = 1024 * 1024
 const precheckOutputMaxLen = 240
 const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
-const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+const precheckLocksCmd = "sudo -n /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
 const precheckLocksFallbackCmd = "sh -c \"pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x unattended-upgrade >/dev/null\""
-const precheckDpkgAuditCmd = "sudo dpkg --audit"
-const precheckAptCheckCmd = "sudo apt-get check"
-const aptUpdateCmd = "sudo apt-get update"
-const aptUpgradeCmd = "sudo apt-get -y upgrade"
-const aptUpgradeSelectedPrefixCmd = "sudo apt-get -y install --only-upgrade --"
-const aptAutoremoveCmd = "sudo apt-get -y autoremove"
-const aptListUpgradableCmd = "sudo apt-get -s upgrade"
+const precheckDpkgAuditCmd = "sudo -n dpkg --audit"
+const precheckAptCheckCmd = "sudo -n apt-get check"
+const aptUpdateCmd = "sudo -n apt-get update"
+const aptUpgradeCmd = "sudo -n apt-get -y upgrade"
+const aptUpgradeSelectedPrefixCmd = "sudo -n apt-get -y install --only-upgrade --"
+const aptAutoremoveCmd = "sudo -n apt-get -y autoremove"
+const aptListUpgradableCmd = "sudo -n apt-get -s upgrade"
 const defaultSSHCommandTimeout = 5 * time.Minute
 const minSSHCommandTimeout = 1 * time.Second
 const maxSSHCommandTimeout = 30 * time.Minute
@@ -874,16 +874,35 @@ func appendStatusRetryLog(serverName string, format string, args ...any) {
 
 func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolicy, opName string, attemptsUsed *int) (sshConnection, error) {
 	var client sshConnection
+	attempt := 0
 	err := runWithRetry(policy, opName, func() error {
 		if attemptsUsed != nil {
 			*attemptsUsed += 1
 		}
+		attempt++
+		attemptStartedAt := time.Now()
+		appendStatusRetryLog(
+			server.Name,
+			"\n[%s] attempt %d/%d started (connect timeout %s)",
+			opName,
+			attempt,
+			policy.MaxAttempts,
+			sshConnectTimeout,
+		)
 		c, dialErr := dialSSHConnection(server, config)
 		if dialErr == nil {
 			if client != nil {
 				_ = client.Close()
 			}
 			client = c
+			appendStatusRetryLog(
+				server.Name,
+				"\n[%s] attempt %d/%d connected in %s",
+				opName,
+				attempt,
+				policy.MaxAttempts,
+				time.Since(attemptStartedAt).Round(time.Millisecond),
+			)
 		}
 		return dialErr
 	}, func(attempt int, wait time.Duration, retryErr error) {
@@ -915,12 +934,31 @@ func runSSHOperationWithRetry(
 			*attemptsUsed += 1
 		}
 		attempt++
+		attemptStartedAt := time.Now()
+		appendStatusRetryLog(
+			server.Name,
+			"\n[%s] attempt %d/%d started",
+			opName,
+			attempt,
+			policy.MaxAttempts,
+		)
 		if attempt > 1 {
 			if reconnectErr := reconnectSSHClient(server, config, clientRef); reconnectErr != nil {
 				return reconnectErr
 			}
 		}
-		return operation()
+		err := operation()
+		if err == nil {
+			appendStatusRetryLog(
+				server.Name,
+				"\n[%s] attempt %d/%d completed in %s",
+				opName,
+				attempt,
+				policy.MaxAttempts,
+				time.Since(attemptStartedAt).Round(time.Millisecond),
+			)
+		}
+		return err
 	}, func(retryAttempt int, wait time.Duration, retryErr error) {
 		appendStatusRetryLog(
 			server.Name,
@@ -1004,9 +1042,46 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 	if client == nil {
 		return "", "", errors.New("missing SSH connection")
 	}
-	session, err := client.NewSession()
-	if err != nil {
-		return "", "", err
+	type sessionResult struct {
+		session sshSessionRunner
+		err     error
+	}
+	newSessionCh := make(chan sessionResult, 1)
+	go func() {
+		session, err := client.NewSession()
+		newSessionCh <- sessionResult{session: session, err: err}
+	}()
+
+	sessionTimeout := time.NewTimer(timeout)
+	defer sessionTimeout.Stop()
+
+	var session sshSessionRunner
+	select {
+	case result := <-newSessionCh:
+		if result.err != nil {
+			return "", "", result.err
+		}
+		session = result.session
+	case <-sessionTimeout.C:
+		_ = client.Close()
+		select {
+		case result := <-newSessionCh:
+			if result.session != nil {
+				_ = result.session.Close()
+			}
+			if result.err == nil {
+				return "", "", fmt.Errorf("ssh session setup timed out after %s", timeout)
+			}
+			return "", "", fmt.Errorf("ssh session setup timed out after %s: %w", timeout, result.err)
+		case <-time.After(1 * time.Second):
+			go func() {
+				result := <-newSessionCh
+				if result.session != nil {
+					_ = result.session.Close()
+				}
+			}()
+			return "", "", fmt.Errorf("ssh session setup timed out after %s", timeout)
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1471,17 +1546,39 @@ func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig, 
 }
 
 func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
+	return runUpdatePrechecksWithProgress(client, nil)
+}
+
+func runUpdatePrechecksWithProgress(client sshConnection, onProgress func(string)) updatePrecheckSummary {
 	checks := []func(sshConnection) updatePrecheckResult{
 		checkDiskSpace,
 		checkAptLocks,
 		checkAptHealth,
 	}
+	checkNames := []string{
+		"disk_space",
+		"apt_locks",
+		"apt_health",
+	}
 	summary := updatePrecheckSummary{
 		AllPassed: true,
 		Results:   make([]updatePrecheckResult, 0, len(checks)),
 	}
-	for _, check := range checks {
+	for i, check := range checks {
+		checkName := checkNames[i]
+		if onProgress != nil {
+			onProgress(fmt.Sprintf("pre-check %s started", checkName))
+		}
+		startedAt := time.Now()
 		result := check(client)
+		elapsed := time.Since(startedAt).Round(time.Millisecond)
+		if onProgress != nil {
+			state := "PASS"
+			if !result.Passed {
+				state = "FAIL"
+			}
+			onProgress(fmt.Sprintf("pre-check %s %s in %s", checkName, state, elapsed))
+		}
 		summary.Results = append(summary.Results, result)
 		if !result.Passed {
 			summary.AllPassed = false
@@ -2514,18 +2611,22 @@ func (r *withActorRunner) markErrorClass(err error) {
 }
 
 func (r *withActorRunner) setupSSH(dialOpName string) bool {
+	r.appendStatusLog("\n[diag] preparing SSH auth methods...")
 	authMethods, err := buildAuthMethods(r.server)
 	if err != nil {
 		r.lastErrClass = "permanent"
 		r.setErrorLogs(fmt.Sprintf("Auth setup failed: %v", err))
 		return false
 	}
+	r.appendStatusLog(fmt.Sprintf("\n[diag] SSH auth methods ready (%d method(s))", len(authMethods)))
+	r.appendStatusLog("\n[diag] loading known_hosts callback...")
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
 		r.lastErrClass = "permanent"
 		r.setErrorLogs(fmt.Sprintf("Host key verification setup failed: %v", err))
 		return false
 	}
+	r.appendStatusLog("\n[diag] known_hosts callback ready; starting SSH dial retries...")
 	r.config = &ssh.ClientConfig{
 		User:            r.server.User,
 		Auth:            authMethods,
@@ -2595,9 +2696,15 @@ func runWithActorShared(
 		return
 	}
 
+	runner.appendStatusLog("\n[diag] establishing SSH connection...")
+	log.Printf("update[%s] establishing SSH connection", server.Name)
+	sshSetupStartedAt := time.Now()
 	if !runner.setupSSH(dialOpName) {
 		return
 	}
+	sshSetupElapsed := time.Since(sshSetupStartedAt).Round(time.Millisecond)
+	runner.appendStatusLog(fmt.Sprintf("\n[diag] SSH connection established in %s", sshSetupElapsed))
+	log.Printf("update[%s] SSH connection established in %s", server.Name, sshSetupElapsed)
 	defer func() {
 		if runner.client != nil {
 			_ = runner.client.Close()
@@ -2688,9 +2795,13 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		"update.ssh_dial",
 		func(r *withActorRunner) {
 			r.postchecksEnabled = postcheckCfg.Enabled
+			r.appendStatusLog(fmt.Sprintf("\n[diag] command timeout set to %s", r.commandTimeout))
 			r.appendStatusLog("\nRunning pre-checks...")
 
-			precheckSummary := runUpdatePrechecks(r.client)
+			precheckSummary := runUpdatePrechecksWithProgress(r.client, func(msg string) {
+				r.appendStatusLog("\n[diag] " + msg)
+				log.Printf("update[%s] %s", r.server.Name, msg)
+			})
 			r.precheckResults = precheckSummary.Results
 			for _, result := range precheckSummary.Results {
 				state := "PASS"

@@ -179,6 +179,17 @@
             </div>
         </div>
     </div>
+    <div class="modal-backdrop" id="hostkey-modal">
+        <div class="modal">
+            <h3>Trust SSH Host Key</h3>
+            <p class="subtle">Verify this fingerprint before saving it to known_hosts.</p>
+            <pre id="hostkey-modal-details" class="hostkey-details"></pre>
+            <div class="modal-actions">
+                <button class="btn-ghost inline-btn" id="hostkey-modal-cancel" type="button">Cancel</button>
+                <button class="btn-success inline-btn" id="hostkey-modal-trust" type="button">Trust Key</button>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/auth.js"></script>
     <script src="/static/js/common.js"></script>
