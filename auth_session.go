@@ -38,6 +38,7 @@ const (
 )
 
 var sessionManager *scs.SessionManager
+var sessionManagerMu sync.RWMutex
 
 var (
 	errInvalidCredentials    = errors.New("invalid credentials")
@@ -222,6 +223,17 @@ func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
 	return sm, nil
 }
 
+func sessionHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sm := currentSessionManager()
+		if sm == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		sm.LoadAndSave(next).ServeHTTP(w, r)
+	})
+}
+
 func setupRequired() (bool, error) {
 	db := getDB()
 	var count int
@@ -345,10 +357,20 @@ func authenticateUser(username, password string) (bool, error) {
 }
 
 func sessionUsername(c *gin.Context) string {
-	if c == nil || sessionManager == nil {
+	if c == nil {
 		return ""
 	}
-	return strings.TrimSpace(sessionManager.GetString(c.Request.Context(), authSessionUserKey))
+	sm := currentSessionManager()
+	if sm == nil {
+		return ""
+	}
+	return strings.TrimSpace(sm.GetString(c.Request.Context(), authSessionUserKey))
+}
+
+func currentSessionManager() *scs.SessionManager {
+	sessionManagerMu.RLock()
+	defer sessionManagerMu.RUnlock()
+	return sessionManager
 }
 
 func setNoStoreHeaders(c *gin.Context) {
@@ -574,11 +596,16 @@ func handleAuthSetup(c *gin.Context) {
 		return
 	}
 
-	if err := sessionManager.RenewToken(c.Request.Context()); err != nil {
+	sm := currentSessionManager()
+	if sm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
+		return
+	}
+	if err := sm.RenewToken(c.Request.Context()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to initialize session"})
 		return
 	}
-	sessionManager.Put(c.Request.Context(), authSessionUserKey, username)
+	sm.Put(c.Request.Context(), authSessionUserKey, username)
 	c.Set("actor", username)
 	audit(c, "auth.setup", "auth_user", username, "success", "Initial admin user created", nil)
 	c.JSON(http.StatusOK, gin.H{"message": "setup complete"})
@@ -622,11 +649,16 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 
-	if err := sessionManager.RenewToken(c.Request.Context()); err != nil {
+	sm := currentSessionManager()
+	if sm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
+		return
+	}
+	if err := sm.RenewToken(c.Request.Context()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to renew session"})
 		return
 	}
-	sessionManager.Put(c.Request.Context(), authSessionUserKey, username)
+	sm.Put(c.Request.Context(), authSessionUserKey, username)
 	c.Set("actor", username)
 	audit(c, "auth.login", "auth_user", username, "success", "User logged in", nil)
 	c.JSON(http.StatusOK, gin.H{"message": "login successful"})
@@ -638,7 +670,12 @@ func handleAuthLogout(c *gin.Context) {
 		return
 	}
 	actor := sessionUsername(c)
-	if err := sessionManager.Destroy(c.Request.Context()); err != nil {
+	sm := currentSessionManager()
+	if sm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
+		return
+	}
+	if err := sm.Destroy(c.Request.Context()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to logout"})
 		return
 	}

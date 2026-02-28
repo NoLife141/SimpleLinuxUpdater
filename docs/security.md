@@ -8,6 +8,7 @@
 - [Threat model](#threat-model)
 - [Authentication model](#authentication-model)
 - [Metrics endpoint protection](#metrics-endpoint-protection)
+- [Backup and restore artifacts](#backup-and-restore-artifacts)
 - [Encryption at rest](#encryption-at-rest)
 - [Remote sudo behavior](#remote-sudo-behavior)
 - [SSH key handling](#ssh-key-handling)
@@ -81,6 +82,21 @@ Authorization: Bearer <token>
 Operational note:
 
 - Auth and metrics rate limiting is in-memory per process. In multi-instance deployments, enforce global limits at the load balancer/API gateway.
+
+## Backup and restore artifacts
+
+Backup export is available from `/manage` and is session-authenticated.
+
+- Exported backup files (`.slubkp`) are encrypted with a user-provided passphrase.
+- Payload includes `servers.db`, `config.json`, and optional `known_hosts`.
+- Passphrases are not stored by the app.
+- Restoring a backup fully replaces those files immediately.
+
+Recommendations:
+
+- Store backup files and passphrases separately in secure systems.
+- Treat backup files as sensitive infrastructure data even when encrypted.
+- Back up external reverse-proxy TLS/private keys separately (outside app scope).
 
 ## Encryption at rest
 

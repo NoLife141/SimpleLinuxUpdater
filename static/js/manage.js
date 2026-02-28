@@ -103,10 +103,9 @@ let serverCache = {};
                 const tbody = document.querySelector('#manage-servers-table tbody');
                 tbody.innerHTML = '';
                 renderTable();
+                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
             } catch (error) {
                 alert(error?.message || 'Failed to load servers.');
-            } finally {
-                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
             }
         }
 
@@ -311,7 +310,19 @@ let serverCache = {};
         }
 
         function safeStatusClassToken(status) {
-            return String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]+/g, '-');
+            const normalized = String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+            switch (normalized) {
+                case 'success':
+                case 'failure':
+                case 'started':
+                case 'ignored':
+                case 'error':
+                case 'pending':
+                case 'unknown':
+                    return normalized;
+                default:
+                    return 'unknown';
+            }
         }
 
         function renderAuditTable() {
@@ -686,6 +697,104 @@ let serverCache = {};
             }
         }
 
+        function deriveDownloadFilename(contentDisposition) {
+            if (!contentDisposition) return '';
+            const utf8Match = contentDisposition.match(/filename\\*=UTF-8''([^;]+)/i);
+            if (utf8Match && utf8Match[1]) {
+                try {
+                    return decodeURIComponent(utf8Match[1]).replace(/[\\r\\n]/g, '');
+                } catch (_) {
+                    return utf8Match[1].replace(/[\\r\\n]/g, '');
+                }
+            }
+            const simpleMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+            if (!simpleMatch || !simpleMatch[1]) return '';
+            return simpleMatch[1].replace(/[\\r\\n]/g, '');
+        }
+
+        async function fetchBackupStatus() {
+            const status = document.getElementById('backup-status');
+            if (!status) return;
+            const res = await fetch('/api/backup/status');
+            if (!res.ok) {
+                status.textContent = 'Backup status: unavailable';
+                return;
+            }
+            const data = await res.json().catch(() => ({}));
+            const knownHostsState = data.known_hosts_exists ? 'present' : 'missing';
+            status.textContent = `Backup paths: DB=${data.db_path || '-'}, config=${data.config_path || '-'}, known_hosts=${data.known_hosts_path || '-'} (${knownHostsState})`;
+        }
+
+        async function exportBackup() {
+            const pass = document.getElementById('backup-export-passphrase')?.value || '';
+            const confirmPass = document.getElementById('backup-export-passphrase-confirm')?.value || '';
+            const includeKnownHosts = !!document.getElementById('backup-include-known-hosts')?.checked;
+            if (pass.length < 12) {
+                alert('Passphrase must be at least 12 characters.');
+                return;
+            }
+            if (pass !== confirmPass) {
+                alert('Passphrase confirmation does not match.');
+                return;
+            }
+            const res = await fetch('/api/backup/export', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ passphrase: pass, include_known_hosts: includeKnownHosts })
+            });
+            if (!res.ok) {
+                alert(await parseErrorResponse(res, 'Failed to export backup.'));
+                return;
+            }
+            const blob = await res.blob();
+            const filename = deriveDownloadFilename(res.headers.get('Content-Disposition')) || `simplelinuxupdater-backup-${Date.now()}.slubkp`;
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            alert('Backup exported.');
+        }
+
+        async function restoreBackup() {
+            const fileInput = document.getElementById('backup-restore-file');
+            const pass = document.getElementById('backup-restore-passphrase')?.value || '';
+            const file = fileInput?.files?.[0];
+            if (!file) {
+                alert('Choose a backup file first.');
+                return;
+            }
+            if (pass.length < 12) {
+                alert('Passphrase must be at least 12 characters.');
+                return;
+            }
+            if (!window.confirm('Restore will fully replace current DB/config/known_hosts. Continue?')) {
+                return;
+            }
+            const form = new FormData();
+            form.append('file', file);
+            form.append('passphrase', pass);
+            const res = await fetch('/api/backup/restore', {
+                method: 'POST',
+                body: form
+            });
+            if (!res.ok) {
+                alert(await parseErrorResponse(res, 'Failed to restore backup.'));
+                return;
+            }
+            alert('Backup restored successfully.');
+            if (fileInput) {
+                fileInput.value = '';
+                updateFileLabel(fileInput);
+            }
+            await fetchBackupStatus();
+            await fetchManageServers();
+            await fetchAuditEvents();
+        }
+
         document.getElementById('logout-btn').addEventListener('click', () => window.logout());
         document.getElementById('upload-global-key-btn').addEventListener('click', uploadGlobalKey);
         document.getElementById('clear-global-key-btn').addEventListener('click', clearGlobalKey);
@@ -693,8 +802,11 @@ let serverCache = {};
         document.getElementById('metrics-token-rotate').addEventListener('click', () => rotateMetricsToken(true));
         document.getElementById('metrics-token-disable').addEventListener('click', disableMetricsToken);
         document.getElementById('metrics-token-copy').addEventListener('click', copyMetricsToken);
+        document.getElementById('backup-export-btn').addEventListener('click', exportBackup);
+        document.getElementById('backup-restore-btn').addEventListener('click', restoreBackup);
         fetchManageServers();
         fetchGlobalKeyStatus();
         fetchMetricsTokenStatus();
+        fetchBackupStatus();
         fetchAuditEvents();
         setInterval(fetchAuditEvents, 15000);

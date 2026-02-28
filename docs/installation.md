@@ -77,5 +77,5 @@ Transfer `webserver` and the `templates/` and `static/` directories to the host 
 ## Next steps
 
 - Complete first-run setup at `/setup`, then sign in at `/login`
-- Configure storage paths and metrics token: [configuration.md](configuration.md)
+- Configure storage paths, metrics token, and backup/restore behavior: [configuration.md](configuration.md)
 - Add servers and run updates: [usage.md](usage.md)

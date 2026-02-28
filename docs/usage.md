@@ -12,6 +12,7 @@
 - [Logs and status](#logs-and-status)
 - [Audit trail](#audit-trail)
 - [Observability and metrics](#observability-and-metrics)
+- [Backup and restore](#backup-and-restore)
 - [How SimpleLinuxUpdater compares](#how-simplelinuxupdater-compares-to-scripts-and-ansible)
 
 ## Add and manage servers
@@ -161,6 +162,28 @@ Metrics:
   - `DELETE /api/metrics/token` (disable metrics token)
 
 Observability KPIs are computed from `update.complete` audit events.
+
+## Backup and restore
+
+Use `/manage` -> **Backup & Restore** for disaster recovery and host/container migration.
+
+Export:
+
+1. Enter and confirm a backup passphrase (minimum 12 characters).
+2. Choose whether to include `known_hosts`.
+3. Download the encrypted `.slubkp` file.
+
+Restore:
+
+1. Upload a `.slubkp` file.
+2. Enter the backup passphrase.
+3. Confirm full replace.
+
+Notes:
+
+- Restore immediately replaces `servers.db`, `config.json`, and (if present in backup) `known_hosts`.
+- No restart is required after restore.
+- If your deployment depends on external TLS/reverse-proxy config, back that up separately.
 
 ## How SimpleLinuxUpdater compares to scripts and Ansible
 

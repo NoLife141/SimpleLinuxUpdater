@@ -1,34 +1,33 @@
 const form = document.getElementById('setup-form');
 const errorBanner = document.getElementById('error-banner');
 
-function showError(message) {
-    if (!errorBanner) return;
-    errorBanner.textContent = message;
-    errorBanner.style.display = 'block';
-}
-
-async function checkSetupState() {
-    try {
-        const response = await fetch('/api/auth/status', { cache: 'no-store' });
-        if (!response.ok) {
-            return;
-        }
-        const payload = await response.json();
-        if (!payload.setup_required) {
-            if (payload.authenticated) {
-                window.location.href = '/';
-            } else {
-                window.location.href = '/login';
-            }
-        }
-    } catch (_) {
-        // Best effort; user can still submit form.
-    }
-}
-
 if (!form || !errorBanner) {
     console.warn('setup.js: required elements #setup-form or #error-banner were not found.');
 } else {
+    function showError(message) {
+        errorBanner.textContent = message;
+        errorBanner.style.display = 'block';
+    }
+
+    async function checkSetupState() {
+        try {
+            const response = await fetch('/api/auth/status', { cache: 'no-store' });
+            if (!response.ok) {
+                return;
+            }
+            const payload = await response.json();
+            if (!payload.setup_required) {
+                if (payload.authenticated) {
+                    window.location.href = '/';
+                } else {
+                    window.location.href = '/login';
+                }
+            }
+        } catch (_) {
+            // Best effort; user can still submit form.
+        }
+    }
+
     form.addEventListener('submit', async (event) => {
         event.preventDefault();
         errorBanner.style.display = 'none';

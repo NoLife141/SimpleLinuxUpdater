@@ -81,6 +81,7 @@ var db *sql.DB
 var dbOnce sync.Once
 var keyOnce sync.Once
 var encryptionKey []byte
+var runtimeStateMu sync.RWMutex
 var globalKeyMu sync.RWMutex
 var globalKey string
 var metricsBearerTokenHashMu sync.RWMutex
@@ -313,6 +314,16 @@ func configPath() string {
 }
 
 func getDB() *sql.DB {
+	runtimeStateMu.RLock()
+	if db != nil {
+		cached := db
+		runtimeStateMu.RUnlock()
+		return cached
+	}
+	runtimeStateMu.RUnlock()
+
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	dbOnce.Do(func() {
 		path := dbPath()
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -346,48 +357,57 @@ func getDB() *sql.DB {
 }
 
 func getEncryptionKey() []byte {
-	keyOnce.Do(func() {
-		path := configPath()
-		var cfg map[string]string
-		if data, err := os.ReadFile(path); err == nil {
-			if err := json.Unmarshal(data, &cfg); err != nil {
-				log.Fatalf("Failed to parse %s: %v", path, err)
-			}
-		} else if !os.IsNotExist(err) {
-			log.Fatalf("Failed to read %s: %v", path, err)
-		}
+	runtimeStateMu.RLock()
+	if encryptionKey != nil {
+		key := encryptionKey
+		runtimeStateMu.RUnlock()
+		return key
+	}
+	runtimeStateMu.RUnlock()
 
-		keyStr := ""
-		if cfg != nil {
-			keyStr = strings.TrimSpace(cfg["encryption_key"])
+	path := configPath()
+	var cfg map[string]string
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			log.Fatalf("Failed to parse %s: %v", path, err)
 		}
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("Failed to read %s: %v", path, err)
+	}
 
-		if keyStr == "" {
-			keyBytes := make([]byte, 32)
-			if _, err := rand.Read(keyBytes); err != nil {
-				log.Fatalf("Failed to generate encryption key: %v", err)
-			}
-			keyStr = base64.StdEncoding.EncodeToString(keyBytes)
-			cfg = map[string]string{"encryption_key": keyStr}
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-				log.Fatalf("Failed to create config dir: %v", err)
-			}
-			data, err := json.MarshalIndent(cfg, "", "  ")
-			if err != nil {
-				log.Fatalf("Failed to serialize config: %v", err)
-			}
-			if err := os.WriteFile(path, data, 0600); err != nil {
-				log.Fatalf("Failed to write %s: %v", path, err)
-			}
-		}
+	keyStr := ""
+	if cfg != nil {
+		keyStr = strings.TrimSpace(cfg["encryption_key"])
+	}
 
-		keyBytes, err := base64.StdEncoding.DecodeString(keyStr)
-		if err != nil || len(keyBytes) != 32 {
-			log.Fatalf("Invalid encryption_key in %s (must be base64 32 bytes)", path)
+	if keyStr == "" {
+		keyBytes := make([]byte, 32)
+		if _, err := rand.Read(keyBytes); err != nil {
+			log.Fatalf("Failed to generate encryption key: %v", err)
 		}
-		encryptionKey = keyBytes
-	})
-	return encryptionKey
+		keyStr = base64.StdEncoding.EncodeToString(keyBytes)
+		cfg = map[string]string{"encryption_key": keyStr}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			log.Fatalf("Failed to create config dir: %v", err)
+		}
+		data, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			log.Fatalf("Failed to serialize config: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			log.Fatalf("Failed to write %s: %v", path, err)
+		}
+	}
+
+	keyBytes, err := base64.StdEncoding.DecodeString(keyStr)
+	if err != nil || len(keyBytes) != 32 {
+		log.Fatalf("Invalid encryption_key in %s (must be base64 32 bytes)", path)
+	}
+
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
+	encryptionKey = keyBytes
+	return keyBytes
 }
 
 func ensureSchema(db *sql.DB) error {
@@ -3458,6 +3478,8 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 
 func getGlobalKey() string {
 	db := getDB()
+	runtimeStateMu.RLock()
+	defer runtimeStateMu.RUnlock()
 	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
@@ -3513,9 +3535,11 @@ func setGlobalKey(key string) error {
 	if err != nil {
 		return err
 	}
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	globalKeyMu.Lock()
+	defer globalKeyMu.Unlock()
 	globalKey = key
-	globalKeyMu.Unlock()
 	return nil
 }
 
@@ -3524,9 +3548,11 @@ func clearGlobalKey() error {
 	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", globalKeySetting); err != nil {
 		return err
 	}
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	globalKeyMu.Lock()
+	defer globalKeyMu.Unlock()
 	globalKey = ""
-	globalKeyMu.Unlock()
 	return nil
 }
 
@@ -3540,6 +3566,9 @@ func generateMetricsBearerToken() (string, error) {
 
 func getMetricsBearerTokenHash() string {
 	cacheDBPath := dbPath()
+	db := getDB()
+	runtimeStateMu.RLock()
+	defer runtimeStateMu.RUnlock()
 	metricsBearerTokenHashMu.RLock()
 	if metricsBearerTokenHashLoaded && metricsBearerTokenHashDBPath == cacheDBPath {
 		cached := metricsBearerTokenHash
@@ -3552,7 +3581,6 @@ func getMetricsBearerTokenHash() string {
 	}
 	metricsBearerTokenHashMu.RUnlock()
 
-	db := getDB()
 	for attempt := 1; attempt <= 3; attempt++ {
 		var tokenHash string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", metricsBearerTokenHashSetting).Scan(&tokenHash)
@@ -3596,11 +3624,13 @@ func setMetricsBearerTokenHash(tokenHash string) error {
 	if err != nil {
 		return err
 	}
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	metricsBearerTokenHashMu.Lock()
+	defer metricsBearerTokenHashMu.Unlock()
 	metricsBearerTokenHash = tokenHash
 	metricsBearerTokenHashLoaded = true
 	metricsBearerTokenHashDBPath = dbPath()
-	metricsBearerTokenHashMu.Unlock()
 	return nil
 }
 
@@ -3609,11 +3639,13 @@ func clearMetricsBearerTokenHash() error {
 	if _, err := db.Exec("DELETE FROM settings WHERE key = ?", metricsBearerTokenHashSetting); err != nil {
 		return err
 	}
+	runtimeStateMu.Lock()
+	defer runtimeStateMu.Unlock()
 	metricsBearerTokenHashMu.Lock()
+	defer metricsBearerTokenHashMu.Unlock()
 	metricsBearerTokenHash = ""
 	metricsBearerTokenHashLoaded = true
 	metricsBearerTokenHashDBPath = dbPath()
-	metricsBearerTokenHashMu.Unlock()
 	return nil
 }
 
@@ -3960,7 +3992,9 @@ func setupRouter() (*gin.Engine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
 	}
+	sessionManagerMu.Lock()
 	sessionManager = sm
+	sessionManagerMu.Unlock()
 
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
@@ -3990,6 +4024,9 @@ func setupRouter() (*gin.Engine, error) {
 	r.GET("/api/metrics/token", handleMetricsTokenStatus)
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
+	r.GET("/api/backup/status", handleBackupStatus)
+	r.POST("/api/backup/export", handleBackupExport)
+	r.POST("/api/backup/restore", handleBackupRestore)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
@@ -4703,7 +4740,7 @@ func main() {
 	defer StopAuthRateLimiters()
 	server := &http.Server{
 		Addr:         ":8080",
-		Handler:      sessionManager.LoadAndSave(r),
+		Handler:      sessionHandler(r),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
