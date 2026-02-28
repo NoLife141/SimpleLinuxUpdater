@@ -379,11 +379,13 @@ func setNoStoreHeaders(c *gin.Context) {
 	c.Header("Expires", "0")
 }
 
-// sameOriginAuthRequest requires programmatic setup/login/logout clients to send:
+// sameOriginAuthRequest requires setup/login/logout requests to provide matching
+// Origin/Referer host headers. If Sec-Fetch-Site is present, it must indicate
+// same-origin/site context.
 //
 //	Origin: http://localhost
 //	Referer: http://localhost/
-//	Sec-Fetch-Site: same-origin
+//	Sec-Fetch-Site: same-origin (optional)
 func sameOriginAuthRequest(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
 		return false
@@ -416,7 +418,7 @@ func sameOriginAuthRequest(c *gin.Context) bool {
 		return false
 	}
 	secFetchSite := strings.ToLower(strings.TrimSpace(c.GetHeader("Sec-Fetch-Site")))
-	if secFetchSite != "same-origin" && secFetchSite != "same-site" {
+	if secFetchSite != "" && secFetchSite != "same-origin" && secFetchSite != "same-site" {
 		return false
 	}
 	return true

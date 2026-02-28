@@ -47,6 +47,7 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Apply CSP follow-up fixes for manage/login/status assets and related template checks.
 - Improve setup/login/manage styling and JS behavior after CSP migration and backup/restore integration.
+- Allow same-origin setup/login/logout requests when `Sec-Fetch-Site` is absent but `Origin`/`Referer` host checks pass.
 - Handle network exceptions in admin metrics/backup fetch flows with graceful UI fallbacks.
 - Clear backup export/restore passphrase inputs in `finally` blocks to avoid leaving secrets in form state.
 - Correct backup filename parsing regex to reliably extract and sanitize download names.
