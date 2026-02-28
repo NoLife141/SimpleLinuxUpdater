@@ -1,6 +1,6 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.6
+Version: v0.1.7
 
 SimpleLinuxUpdater is a self-hosted web UI that helps you manage apt updates on Debian-based servers over SSH. It provides an approval workflow, health checks, audit history, and basic observability so you can update hosts confidently without logging into each machine.
 
@@ -43,8 +43,8 @@ SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects t
 
 ```bash
 cp .env-template .env
-docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.6
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.7
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```
 
 Open `http://localhost:8080`.
@@ -54,17 +54,17 @@ After setup, sign in at `/login`.
 
 For Prometheus, configure your scraper with:
 
-- `Authorization: Bearer <token-created-in-Manage-page>`
+- `Authorization: Bearer <token-created-in-admin-page>`
 
 Metrics token flow:
 
 - `/metrics` is disabled by default.
-- Sign in, go to `/manage`, then generate or rotate the Metrics API token.
+- Sign in, go to `/admin`, then generate or rotate the Metrics API token.
 - The token is shown once. Store it in your scraper secret manager.
 
 Backup/restore flow:
 
-- Sign in and open `/manage` -> **Backup & Restore**.
+- Sign in and open `/admin` -> **Backup & Restore**.
 - Export creates one encrypted backup file (`.slubkp`) containing:
   - `servers.db`
   - `config.json`
@@ -91,7 +91,7 @@ Download the archive for your platform from GitHub Releases and run the included
 Example (Linux amd64):
 
 ```bash
-VERSION="0.1.6"
+VERSION="0.1.7"
 APP="SimpleLinuxUpdater_${VERSION}"
 ARCHIVE="${APP}_linux_amd64.tar.gz"
 

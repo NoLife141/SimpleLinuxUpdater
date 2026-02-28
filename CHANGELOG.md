@@ -18,6 +18,39 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.7] - 2026-02-28
+
+### Added
+
+- Add built-in single-user authentication with first-run setup (`/setup`), login page (`/login`), and SQLite-backed session management.
+- Add session-focused frontend auth helper (`static/auth.js`) and authenticated routing flow across UI pages.
+- Add strict CSP template guard tests to prevent inline script/style regressions.
+- Add encrypted in-app backup/restore for migration and disaster recovery:
+  - backup export API and UI workflow
+  - backup restore API and UI workflow
+  - backup status API for DB/config/known_hosts visibility
+- Add dedicated authenticated `/admin` page for sensitive operations.
+- Add top-nav `Admin` link across authenticated pages for direct access.
+
+### Changed
+
+- Upgrade baseline modules/tooling for auth/session support and refresh release workflow inputs.
+- Harden session handling defaults and security behavior (cookie/session policy updates).
+- Migrate UI pages to strict CSP-compatible assets (`static/css/*`, `static/js/*`) and remove inline script/style reliance.
+- Update docs (`installation`, `configuration`, `usage`, `security`, `architecture`, `deployment`, `troubleshooting`) to cover auth/session and backup/restore flows.
+- Move Metrics API token management from `/manage` to `/admin`.
+- Move Backup & Restore operations from `/manage` to `/admin`.
+- Keep `/manage` focused on server lifecycle, global key management, and audit history.
+- Refresh shared frontend helper usage to reduce duplicate JS utility logic.
+
+### Fixed
+
+- Apply CSP follow-up fixes for manage/login/status assets and related template checks.
+- Improve setup/login/manage styling and JS behavior after CSP migration and backup/restore integration.
+- Handle network exceptions in admin metrics/backup fetch flows with graceful UI fallbacks.
+- Clear backup export/restore passphrase inputs in `finally` blocks to avoid leaving secrets in form state.
+- Correct backup filename parsing regex to reliably extract and sanitize download names.
+
 ## [v0.1.6] - 2026-02-22
 
 ### Added
