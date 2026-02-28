@@ -4020,6 +4020,10 @@ func setupRouter() (*gin.Engine, error) {
 		c.HTML(http.StatusOK, "observability.html", nil)
 	})
 
+	r.GET("/admin", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "admin.html", nil)
+	})
+
 	r.POST("/api/auth/logout", handleAuthLogout)
 	r.GET("/api/metrics/token", handleMetricsTokenStatus)
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)

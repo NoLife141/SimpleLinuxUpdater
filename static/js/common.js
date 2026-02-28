@@ -20,4 +20,17 @@
             .replace(/\u2028/g, "\\u2028")
             .replace(/\u2029/g, "\\u2029");
     };
+
+    window.parseErrorResponse = window.parseErrorResponse || async function parseErrorResponse(res, fallbackMessage) {
+        const data = await res.json().catch(() => ({}));
+        return data.error || fallbackMessage;
+    };
+
+    window.updateFileLabel = window.updateFileLabel || function updateFileLabel(input, emptyLabel = "Choose file") {
+        if (!input) return;
+        const label = document.querySelector(`label[for="${input.id}"]`);
+        if (!label) return;
+        const file = input.files && input.files[0];
+        label.textContent = file ? file.name : emptyLabel;
+    };
 }());
