@@ -34,12 +34,11 @@ UI/API access uses the built-in local login:
 Notes:
 
 - Sessions are server-side and stored in SQLite.
-- `/metrics` is not tied to UI sessions; it uses a dedicated bearer token managed from `/manage`.
+- `/metrics` is not tied to UI sessions; it uses a dedicated bearer token managed from `/admin`.
 - UI pages are CSP-hardened and load JavaScript/CSS from external `/static` assets only (no inline scripts/styles/handlers).
-- Programmatic setup/login/logout requests must include same-origin headers:
-  - `Origin: http://localhost`
-  - `Referer: http://localhost/`
-  - `Sec-Fetch-Site: same-origin`
+- Programmatic setup/login/logout requests must satisfy same-origin host checks:
+  - `Origin` host matches request host (or `Referer` host matches request host)
+  - `Sec-Fetch-Site: same-origin` is recommended and validated when present
 
 Example (programmatic login):
 
@@ -155,7 +154,7 @@ Summary API:
 Metrics:
 
 - `GET /metrics` (Prometheus text format, bearer token required)
-- Disabled by default until a token is generated in `/manage`
+- Disabled by default until a token is generated in `/admin`
 - Token management API (session-authenticated):
   - `GET /api/metrics/token` (status only)
   - `POST /api/metrics/token` (generate/rotate and return token once)
@@ -165,7 +164,7 @@ Observability KPIs are computed from `update.complete` audit events.
 
 ## Backup and restore
 
-Use `/manage` -> **Backup & Restore** for disaster recovery and host/container migration.
+Use `/admin` -> **Backup & Restore** for disaster recovery and host/container migration.
 
 Export:
 

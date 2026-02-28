@@ -111,6 +111,7 @@ const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
 const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
+const sshCommandTimeoutSecondsEnv = "DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS"
 const postchecksEnabledEnv = "DEBIAN_UPDATER_POSTCHECKS_ENABLED"
 const postcheckBlockOnAptHealthEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH"
 const postcheckBlockOnFailedUnitsEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS"
@@ -128,6 +129,9 @@ const aptUpgradeCmd = "sudo apt-get -y upgrade"
 const aptUpgradeSelectedPrefixCmd = "sudo apt-get -y install --only-upgrade --"
 const aptAutoremoveCmd = "sudo apt-get -y autoremove"
 const aptListUpgradableCmd = "sudo apt-get -s upgrade"
+const defaultSSHCommandTimeout = 5 * time.Minute
+const minSSHCommandTimeout = 1 * time.Second
+const maxSSHCommandTimeout = 30 * time.Minute
 const cveLookupMaxPackages = 25
 const cveLookupMaxPerPackage = 12
 const cveLookupCommandTimeout = 20 * time.Second
@@ -670,6 +674,24 @@ func loadRetryPolicyFromEnv() RetryPolicy {
 	return p
 }
 
+func loadSSHCommandTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(sshCommandTimeoutSecondsEnv))
+	if raw == "" {
+		return defaultSSHCommandTimeout
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, must be an integer in [1,1800], using default %s", sshCommandTimeoutSecondsEnv, raw, defaultSSHCommandTimeout)
+		return defaultSSHCommandTimeout
+	}
+	timeout := time.Duration(seconds) * time.Second
+	if timeout < minSSHCommandTimeout || timeout > maxSSHCommandTimeout {
+		log.Printf("Invalid %s=%d, must be in [1,1800], using default %s", sshCommandTimeoutSecondsEnv, seconds, defaultSSHCommandTimeout)
+		return defaultSSHCommandTimeout
+	}
+	return timeout
+}
+
 func loadPostUpdateCheckConfigFromEnv() PostUpdateCheckConfig {
 	cfg := PostUpdateCheckConfig{
 		Enabled:               true,
@@ -714,6 +736,7 @@ func isRetryableMessage(msg string) bool {
 	retryableHints := []string{
 		"i/o timeout",
 		"timeout",
+		"timed out",
 		"connection reset",
 		"connection refused",
 		"broken pipe",
@@ -955,7 +978,7 @@ func isBenignNoLockStateOutput(msg string) bool {
 	return false
 }
 
-func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+func runSSHCommandNoTimeout(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
 	if client == nil {
 		return "", "", errors.New("missing SSH connection")
 	}
@@ -976,7 +999,7 @@ func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, s
 
 func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader, timeout time.Duration) (string, string, error) {
 	if timeout <= 0 {
-		return runSSHCommand(client, cmd, stdin)
+		return runSSHCommandNoTimeout(client, cmd, stdin)
 	}
 	if client == nil {
 		return "", "", errors.New("missing SSH connection")
@@ -1022,6 +1045,10 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 			return timeoutStdout, timeoutStderr, fmt.Errorf("command timed out after %s", timeout)
 		}
 	}
+}
+
+func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+	return runSSHCommandWithTimeout(client, cmd, stdin, loadSSHCommandTimeoutFromEnv())
 }
 
 func sshExitCode(err error) (int, bool) {
@@ -2419,6 +2446,8 @@ type withActorRunner struct {
 	config *ssh.ClientConfig
 	client sshConnection
 
+	commandTimeout time.Duration
+
 	sshDialAttempts        int
 	aptUpdateAttempts      int
 	listUpgradableAttempts int
@@ -2525,12 +2554,13 @@ func runWithActorShared(
 	runSteps func(*withActorRunner),
 ) {
 	runner := &withActorRunner{
-		server:       server,
-		actor:        actor,
-		clientIP:     clientIP,
-		policy:       policy,
-		lastErrClass: "none",
-		startedAt:    time.Now().UTC(),
+		server:         server,
+		actor:          actor,
+		clientIP:       clientIP,
+		policy:         policy,
+		commandTimeout: loadSSHCommandTimeoutFromEnv(),
+		lastErrClass:   "none",
+		startedAt:      time.Now().UTC(),
 	}
 	if auditMeta == nil {
 		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
@@ -2701,7 +2731,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			}
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2711,20 +2741,12 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\napt update attempt %d/%d failed: %v; retrying in %s",
 				&r.aptUpdateAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(aptUpdateCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, aptUpdateCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -2743,7 +2765,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
 				&r.listUpgradableAttempts,
 				func() error {
-					pending, items, listErr := getUpgradable(r.client)
+					pending, items, listErr := getUpgradable(r.client, r.commandTimeout)
 					if listErr == nil {
 						upgradable = items
 						pendingUpdates = pending
@@ -2836,8 +2858,6 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			})
 
-			stdout.Reset()
-			stderr.Reset()
 			upgradeCmd := aptUpgradeCmd
 			if r.approvalScope == "security" {
 				selectedCmd := buildSelectedUpgradeCmd(r.approvedPackages)
@@ -2860,20 +2880,12 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
 				&r.aptUpgradeAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(upgradeCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, upgradeCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs = r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs = r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -2984,7 +2996,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 			escapedLine := shellEscapeSingleQuotes(line)
 			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2994,20 +3006,12 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 				"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-					return session.Run(cmd)
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, cmd, strings.NewReader(sudoPassword+"\n"), r.commandTimeout)
+					return runErr
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3053,7 +3057,7 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 		func(r *withActorRunner) {
 			cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -3063,20 +3067,12 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 				"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-					return session.Run(cmd)
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, cmd, strings.NewReader(sudoPassword+"\n"), r.commandTimeout)
+					return runErr
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3120,7 +3116,7 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 		doneOnlyOutcome,
 		"autoremove.ssh_dial",
 		func(r *withActorRunner) {
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -3130,20 +3126,12 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 				"\nautoremove attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(aptAutoremoveCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, aptAutoremoveCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3158,21 +3146,12 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 	)
 }
 
-func getUpgradable(client sshConnection) ([]PendingUpdate, []string, error) {
-	session, err := client.NewSession()
+func getUpgradable(client sshConnection, timeout time.Duration) ([]PendingUpdate, []string, error) {
+	stdout, stderr, err := runSSHCommandWithTimeout(client, aptListUpgradableCmd, nil, timeout)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, markRetryableFromOutput(err, stdout+"\n"+stderr)
 	}
-	defer session.Close()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	session.SetStdout(&stdout)
-	session.SetStderr(&stderr)
-	err = session.Run(aptListUpgradableCmd)
-	if err != nil {
-		return nil, nil, err
-	}
-	return parseUpgradableEntries(stdout.String())
+	return parseUpgradableEntries(stdout)
 }
 
 func parseUpgradableEntries(stdout string) ([]PendingUpdate, []string, error) {

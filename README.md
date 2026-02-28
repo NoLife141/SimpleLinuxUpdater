@@ -79,10 +79,10 @@ Environment variables for auth/session:
 
 Programmatic auth note:
 
-- `POST /api/auth/setup`, `POST /api/auth/login`, and `POST /api/auth/logout` require same-origin headers:
-  - `Origin: http://localhost`
-  - `Referer: http://localhost/`
-  - `Sec-Fetch-Site: same-origin`
+- `POST /api/auth/setup`, `POST /api/auth/login`, and `POST /api/auth/logout` require same-origin host checks:
+  - `Origin` host must match request host
+  - `Referer` host must match request host
+  - `Sec-Fetch-Site: same-origin` is recommended and validated when present
 
 ### Binary (prebuilt release)
 
@@ -110,6 +110,7 @@ cp .env-template .env
 - [Deployment](docs/deployment.md)
 - [Security](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Release smoke checklist](docs/release-smoke.md)
 - [Architecture](docs/architecture.md)
 - [Contributing](docs/contributing.md)
 

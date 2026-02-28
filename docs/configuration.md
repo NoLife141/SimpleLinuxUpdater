@@ -39,7 +39,7 @@ Environment variables:
 Behavior:
 
 - Disabled by default.
-- Enabled only after generating a token from the Manage page.
+- Enabled only after generating a token from the Admin page.
 - Token is shown once on create/rotate; if lost, rotate again.
 - Scrape requests are rate-limited per client IP (in-memory, per app instance).
 
@@ -51,7 +51,7 @@ Authorization: Bearer <token>
 
 ## Backup and restore
 
-Backup/restore is managed in-app from `/manage` (session-authenticated).
+Backup/restore is managed in-app from `/admin` (session-authenticated).
 
 Behavior:
 
@@ -106,6 +106,7 @@ Environment variables:
 - `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (default `1000`, must be `> 0`)
 - `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` (default `8000`, must be `> 0`)
 - `DEBIAN_UPDATER_RETRY_JITTER_PCT` (default `20`, allowed `0..50`)
+- `DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS` (default `300`, allowed `1..1800`)
 
 If invalid values are provided, the updater logs a warning and falls back to defaults.
 

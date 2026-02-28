@@ -35,3 +35,33 @@ jobs:
       - name: Show coverage summary
         if: matrix.name == 'cover'
         run: go tool cover -func=coverage.out | tail -n 1
+
+  ui-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Build webserver
+        run: go build -o webserver .
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install E2E dependencies
+        run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright auth E2E
+        run: npm run test:e2e

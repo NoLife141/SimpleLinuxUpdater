@@ -47,6 +47,31 @@ func TestLoadRetryPolicyFromEnvOverrideAndInvalidFallback(t *testing.T) {
 	}
 }
 
+func TestLoadSSHCommandTimeoutFromEnv(t *testing.T) {
+	t.Run("default when unset", func(t *testing.T) {
+		t.Setenv(sshCommandTimeoutSecondsEnv, "")
+		if got := loadSSHCommandTimeoutFromEnv(); got != defaultSSHCommandTimeout {
+			t.Fatalf("loadSSHCommandTimeoutFromEnv() = %v, want %v", got, defaultSSHCommandTimeout)
+		}
+	})
+
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv(sshCommandTimeoutSecondsEnv, "30")
+		if got := loadSSHCommandTimeoutFromEnv(); got != 30*time.Second {
+			t.Fatalf("loadSSHCommandTimeoutFromEnv() = %v, want %v", got, 30*time.Second)
+		}
+	})
+
+	t.Run("invalid values fallback to default", func(t *testing.T) {
+		for _, value := range []string{"0", "1801", "abc"} {
+			t.Setenv(sshCommandTimeoutSecondsEnv, value)
+			if got := loadSSHCommandTimeoutFromEnv(); got != defaultSSHCommandTimeout {
+				t.Fatalf("loadSSHCommandTimeoutFromEnv(%q) = %v, want %v", value, got, defaultSSHCommandTimeout)
+			}
+		}
+	})
+}
+
 func TestIsRetryableError(t *testing.T) {
 	retryable := []error{
 		errors.New("dial tcp: connection refused"),

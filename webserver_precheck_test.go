@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -31,6 +32,7 @@ type scriptedResponse struct {
 	stdout string
 	stderr string
 	err    error
+	delay  time.Duration
 }
 
 type scriptedSSHConnection struct {
@@ -80,6 +82,9 @@ func (s *scriptedSSHSession) Run(cmd string) error {
 			idx = len(seq) - 1
 		}
 		resp := seq[idx]
+		if resp.delay > 0 {
+			time.Sleep(resp.delay)
+		}
 		if s.stdout != nil && resp.stdout != "" {
 			_, _ = io.WriteString(s.stdout, resp.stdout)
 		}
@@ -91,6 +96,9 @@ func (s *scriptedSSHSession) Run(cmd string) error {
 	resp, ok := s.conn.responses[cmd]
 	if !ok {
 		return errors.New("unexpected command: " + cmd)
+	}
+	if resp.delay > 0 {
+		time.Sleep(resp.delay)
 	}
 	if s.stdout != nil && resp.stdout != "" {
 		_, _ = io.WriteString(s.stdout, resp.stdout)

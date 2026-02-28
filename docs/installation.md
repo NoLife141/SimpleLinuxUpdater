@@ -47,7 +47,7 @@ docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-upda
 1. Build:
 
 ```bash
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 2. Run:
@@ -69,7 +69,7 @@ From a Windows shell in the repo:
 ```bat
 set GOOS=linux
 set GOARCH=amd64
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 Transfer `webserver` and the `templates/` and `static/` directories to the host you will run it from.
