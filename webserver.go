@@ -874,35 +874,16 @@ func appendStatusRetryLog(serverName string, format string, args ...any) {
 
 func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolicy, opName string, attemptsUsed *int) (sshConnection, error) {
 	var client sshConnection
-	attempt := 0
 	err := runWithRetry(policy, opName, func() error {
 		if attemptsUsed != nil {
 			*attemptsUsed += 1
 		}
-		attempt++
-		attemptStartedAt := time.Now()
-		appendStatusRetryLog(
-			server.Name,
-			"\n[%s] attempt %d/%d started (connect timeout %s)",
-			opName,
-			attempt,
-			policy.MaxAttempts,
-			sshConnectTimeout,
-		)
 		c, dialErr := dialSSHConnection(server, config)
 		if dialErr == nil {
 			if client != nil {
 				_ = client.Close()
 			}
 			client = c
-			appendStatusRetryLog(
-				server.Name,
-				"\n[%s] attempt %d/%d connected in %s",
-				opName,
-				attempt,
-				policy.MaxAttempts,
-				time.Since(attemptStartedAt).Round(time.Millisecond),
-			)
 		}
 		return dialErr
 	}, func(attempt int, wait time.Duration, retryErr error) {
@@ -934,31 +915,12 @@ func runSSHOperationWithRetry(
 			*attemptsUsed += 1
 		}
 		attempt++
-		attemptStartedAt := time.Now()
-		appendStatusRetryLog(
-			server.Name,
-			"\n[%s] attempt %d/%d started",
-			opName,
-			attempt,
-			policy.MaxAttempts,
-		)
 		if attempt > 1 {
 			if reconnectErr := reconnectSSHClient(server, config, clientRef); reconnectErr != nil {
 				return reconnectErr
 			}
 		}
-		err := operation()
-		if err == nil {
-			appendStatusRetryLog(
-				server.Name,
-				"\n[%s] attempt %d/%d completed in %s",
-				opName,
-				attempt,
-				policy.MaxAttempts,
-				time.Since(attemptStartedAt).Round(time.Millisecond),
-			)
-		}
-		return err
+		return operation()
 	}, func(retryAttempt int, wait time.Duration, retryErr error) {
 		appendStatusRetryLog(
 			server.Name,
@@ -1546,39 +1508,17 @@ func runPostUpdateHealthChecks(client sshConnection, cfg PostUpdateCheckConfig, 
 }
 
 func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
-	return runUpdatePrechecksWithProgress(client, nil)
-}
-
-func runUpdatePrechecksWithProgress(client sshConnection, onProgress func(string)) updatePrecheckSummary {
 	checks := []func(sshConnection) updatePrecheckResult{
 		checkDiskSpace,
 		checkAptLocks,
 		checkAptHealth,
 	}
-	checkNames := []string{
-		"disk_space",
-		"apt_locks",
-		"apt_health",
-	}
 	summary := updatePrecheckSummary{
 		AllPassed: true,
 		Results:   make([]updatePrecheckResult, 0, len(checks)),
 	}
-	for i, check := range checks {
-		checkName := checkNames[i]
-		if onProgress != nil {
-			onProgress(fmt.Sprintf("pre-check %s started", checkName))
-		}
-		startedAt := time.Now()
+	for _, check := range checks {
 		result := check(client)
-		elapsed := time.Since(startedAt).Round(time.Millisecond)
-		if onProgress != nil {
-			state := "PASS"
-			if !result.Passed {
-				state = "FAIL"
-			}
-			onProgress(fmt.Sprintf("pre-check %s %s in %s", checkName, state, elapsed))
-		}
 		summary.Results = append(summary.Results, result)
 		if !result.Passed {
 			summary.AllPassed = false
@@ -2611,22 +2551,18 @@ func (r *withActorRunner) markErrorClass(err error) {
 }
 
 func (r *withActorRunner) setupSSH(dialOpName string) bool {
-	r.appendStatusLog("\n[diag] preparing SSH auth methods...")
 	authMethods, err := buildAuthMethods(r.server)
 	if err != nil {
 		r.lastErrClass = "permanent"
 		r.setErrorLogs(fmt.Sprintf("Auth setup failed: %v", err))
 		return false
 	}
-	r.appendStatusLog(fmt.Sprintf("\n[diag] SSH auth methods ready (%d method(s))", len(authMethods)))
-	r.appendStatusLog("\n[diag] loading known_hosts callback...")
 	hostKeyCallback, err := getHostKeyCallback()
 	if err != nil {
 		r.lastErrClass = "permanent"
 		r.setErrorLogs(fmt.Sprintf("Host key verification setup failed: %v", err))
 		return false
 	}
-	r.appendStatusLog("\n[diag] known_hosts callback ready; starting SSH dial retries...")
 	r.config = &ssh.ClientConfig{
 		User:            r.server.User,
 		Auth:            authMethods,
@@ -2696,15 +2632,9 @@ func runWithActorShared(
 		return
 	}
 
-	runner.appendStatusLog("\n[diag] establishing SSH connection...")
-	log.Printf("update[%s] establishing SSH connection", server.Name)
-	sshSetupStartedAt := time.Now()
 	if !runner.setupSSH(dialOpName) {
 		return
 	}
-	sshSetupElapsed := time.Since(sshSetupStartedAt).Round(time.Millisecond)
-	runner.appendStatusLog(fmt.Sprintf("\n[diag] SSH connection established in %s", sshSetupElapsed))
-	log.Printf("update[%s] SSH connection established in %s", server.Name, sshSetupElapsed)
 	defer func() {
 		if runner.client != nil {
 			_ = runner.client.Close()
@@ -2795,13 +2725,9 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		"update.ssh_dial",
 		func(r *withActorRunner) {
 			r.postchecksEnabled = postcheckCfg.Enabled
-			r.appendStatusLog(fmt.Sprintf("\n[diag] command timeout set to %s", r.commandTimeout))
 			r.appendStatusLog("\nRunning pre-checks...")
 
-			precheckSummary := runUpdatePrechecksWithProgress(r.client, func(msg string) {
-				r.appendStatusLog("\n[diag] " + msg)
-				log.Printf("update[%s] %s", r.server.Name, msg)
-			})
+			precheckSummary := runUpdatePrechecks(r.client)
 			r.precheckResults = precheckSummary.Results
 			for _, result := range precheckSummary.Results {
 				state := "PASS"
@@ -3908,17 +3834,17 @@ func knownHostsHostToken(host string, port int) string {
 	return fmt.Sprintf("[%s]:%d", cleanHost, normalizePort(port))
 }
 
-func appendKnownHostLine(line string) error {
+func appendKnownHostLine(line string) (bool, error) {
 	cleanLine := strings.TrimSpace(line)
 	if cleanLine == "" {
-		return errors.New("empty known_hosts line")
+		return false, errors.New("empty known_hosts line")
 	}
 	path, err := knownHostsWritePath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create known_hosts dir: %w", err)
+		return false, fmt.Errorf("create known_hosts dir: %w", err)
 	}
 
 	knownHostsMu.Lock()
@@ -3926,20 +3852,20 @@ func appendKnownHostLine(line string) error {
 
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read known_hosts: %w", err)
+		return false, fmt.Errorf("read known_hosts: %w", err)
 	}
 	if strings.Contains("\n"+string(data)+"\n", "\n"+cleanLine+"\n") {
-		return nil
+		return false, nil
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("open known_hosts for append: %w", err)
+		return false, fmt.Errorf("open known_hosts for append: %w", err)
 	}
 	defer f.Close()
 	if _, err := f.WriteString(cleanLine + "\n"); err != nil {
-		return fmt.Errorf("append known_hosts line: %w", err)
+		return false, fmt.Errorf("append known_hosts line: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 func scanHostKey(host string, port int) (ssh.PublicKey, error) {
@@ -3985,20 +3911,39 @@ func buildKnownHostsLine(host string, port int, key ssh.PublicKey) string {
 	return knownhosts.Line([]string{knownHostsHostToken(host, port)}, key)
 }
 
-func trustHostKey(host string, port int, expectedFingerprint string) (string, string, error) {
+func isHostKeyTrusted(host string, port int, key ssh.PublicKey) (bool, error) {
+	cb, err := getHostKeyCallback()
+	if err != nil {
+		return false, err
+	}
+	hostToken := knownHostsHostToken(host, port)
+	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: normalizePort(port)}
+	err = cb(hostToken, addr, key)
+	if err == nil {
+		return true, nil
+	}
+	var keyErr *knownhosts.KeyError
+	if errors.As(err, &keyErr) {
+		return false, nil
+	}
+	return false, err
+}
+
+func trustHostKey(host string, port int, expectedFingerprint string) (string, string, bool, error) {
 	key, err := scanHostKeyFunc(host, port)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	fingerprint := ssh.FingerprintSHA256(key)
 	if strings.TrimSpace(expectedFingerprint) != "" && !stringsEqualConstantTime(fingerprint, strings.TrimSpace(expectedFingerprint)) {
-		return "", "", errFingerprintMismatch
+		return "", "", false, errFingerprintMismatch
 	}
 	line := buildKnownHostsLine(host, port, key)
-	if err := appendKnownHostLine(line); err != nil {
-		return "", "", err
+	added, err := appendKnownHostLine(line)
+	if err != nil {
+		return "", "", false, err
 	}
-	return fingerprint, line, nil
+	return fingerprint, line, !added, nil
 }
 
 func shellEscapeSingleQuotes(input string) string {
@@ -4523,13 +4468,20 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
 			return
 		}
-		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type()})
+		alreadyTrusted := false
+		if trusted, trustedErr := isHostKeyTrusted(host, port, key); trustedErr == nil {
+			alreadyTrusted = trusted
+		} else {
+			log.Printf("hostkey.scan trusted-check failed for %s:%d: %v", host, port, trustedErr)
+		}
+		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type(), "already_trusted": alreadyTrusted})
 		c.JSON(http.StatusOK, gin.H{
 			"host":               host,
 			"port":               port,
 			"algorithm":          key.Type(),
 			"fingerprint_sha256": ssh.FingerprintSHA256(key),
 			"known_hosts_line":   buildKnownHostsLine(host, port, key),
+			"already_trusted":    alreadyTrusted,
 		})
 	})
 
@@ -4557,7 +4509,7 @@ func setupRouter() (*gin.Engine, error) {
 			return
 		}
 		port := normalizePort(req.Port)
-		fingerprint, line, err := trustHostKey(host, port, expectedFingerprint)
+		fingerprint, line, alreadyTrusted, err := trustHostKey(host, port, expectedFingerprint)
 		if err != nil {
 			if errors.Is(err, errFingerprintMismatch) {
 				audit(c, "hostkey.trust", "hostkey", host, "failure", "Host key fingerprint mismatch", map[string]any{"port": port})
@@ -4568,13 +4520,18 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to trust host key: %v", err)})
 			return
 		}
-		audit(c, "hostkey.trust", "hostkey", host, "success", "Host key trusted", map[string]any{"port": port, "fingerprint_sha256": fingerprint})
+		message := "Host key trusted"
+		if alreadyTrusted {
+			message = "Host key already trusted"
+		}
+		audit(c, "hostkey.trust", "hostkey", host, "success", message, map[string]any{"port": port, "fingerprint_sha256": fingerprint, "already_trusted": alreadyTrusted})
 		c.JSON(http.StatusOK, gin.H{
-			"message":            "Host key trusted",
+			"message":            message,
 			"host":               host,
 			"port":               port,
 			"fingerprint_sha256": fingerprint,
 			"known_hosts_line":   line,
+			"already_trusted":    alreadyTrusted,
 		})
 	})
 

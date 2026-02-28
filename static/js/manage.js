@@ -9,6 +9,7 @@ let serverCache = {};
         let auditPageSize = 20;
         let auditTotal = 0;
         let hostKeyModalResolve = null;
+        let editSaveInProgress = false;
 
         function escapeHtml(value) {
             return String(value ?? "")
@@ -94,13 +95,29 @@ let serverCache = {};
             });
         }
 
-        async function trustHostKeyFlow(host, port) {
+        async function trustHostKeyFlow(host, port, hooks = {}) {
+            if (typeof hooks.onScanning === 'function') {
+                hooks.onScanning();
+            }
             const scanned = await scanHostKey(host, port);
+            if (typeof hooks.onScanned === 'function') {
+                hooks.onScanned(scanned);
+            }
+            if (scanned && scanned.already_trusted) {
+                if (typeof hooks.onAlreadyTrusted === 'function') {
+                    hooks.onAlreadyTrusted(scanned);
+                }
+                return { alreadyTrusted: true, scanned };
+            }
             const confirmed = await confirmHostKeyWithModal(scanned);
             if (!confirmed) {
                 throw new Error('Host key trust cancelled.');
             }
-            await trustHostKey(scanned.host, scanned.port, scanned.fingerprint_sha256);
+            if (typeof hooks.onTrusting === 'function') {
+                hooks.onTrusting(scanned);
+            }
+            const trusted = await trustHostKey(scanned.host, scanned.port, scanned.fingerprint_sha256);
+            return { alreadyTrusted: !!trusted?.already_trusted, scanned, trusted };
         }
 
         function saveWindowScroll() {
@@ -481,6 +498,7 @@ let serverCache = {};
 
         function editServer(name) {
             const current = serverCache[name] || {};
+            editSaveInProgress = false;
             editingServerName = name;
             document.getElementById('edit-name').value = current.name || name;
             document.getElementById('edit-host').value = current.host || '';
@@ -494,16 +512,37 @@ let serverCache = {};
                 keyInput.value = '';
                 updateFileLabel(keyInput, 'Click to upload key');
             }
+            setEditHostKeyStatus('');
+            setEditSaveButtonState(false);
             document.getElementById('edit-modal').classList.add('active');
         }
 
         function closeEditModal() {
             document.getElementById('edit-modal').classList.remove('active');
+            setEditHostKeyStatus('');
+            setEditSaveButtonState(false);
             editingServerName = null;
         }
 
+        function setEditHostKeyStatus(message) {
+            const el = document.getElementById('edit-hostkey-status');
+            if (!el) return;
+            el.textContent = String(message || '').trim();
+        }
+
+        function setEditSaveButtonState(isBusy, label) {
+            const saveBtn = document.getElementById('edit-save');
+            const cancelBtn = document.getElementById('edit-cancel');
+            if (!saveBtn) return;
+            saveBtn.disabled = !!isBusy;
+            saveBtn.textContent = isBusy ? (label || 'Saving...') : 'Save';
+            if (cancelBtn) {
+                cancelBtn.disabled = !!isBusy;
+            }
+        }
+
         async function saveServerEdit() {
-            if (!editingServerName) return;
+            if (!editingServerName || editSaveInProgress) return;
             const newName = document.getElementById('edit-name').value.trim();
             const newHost = document.getElementById('edit-host').value.trim();
             const portValue = document.getElementById('edit-port').value;
@@ -516,7 +555,13 @@ let serverCache = {};
             const current = serverCache[editingServerName] || {};
             const currentPort = normalizePort(current.port, 22);
             const targetPort = normalizePort(newPort || currentPort, 22);
-            if (newName && newHost && newUser) {
+            if (!newName || !newHost || !newUser) {
+                return;
+            }
+            editSaveInProgress = true;
+            setEditSaveButtonState(true, 'Saving...');
+            setEditHostKeyStatus('Saving server...');
+            try {
                 const res = await fetch(`/api/servers/${encodeURIComponent(editingServerName)}`, {
                     method: 'PUT',
                     headers: { 'Content-Type': 'application/json' },
@@ -524,17 +569,42 @@ let serverCache = {};
                 });
                 if (!res.ok) {
                     alert(await parseErrorResponse(res, 'Failed to save server.'));
+                    setEditHostKeyStatus('');
                     return;
                 }
                 if (trustHostNow) {
                     try {
-                        await trustHostKeyFlow(newHost, targetPort);
+                        const trustResult = await trustHostKeyFlow(newHost, targetPort, {
+                            onScanning: () => {
+                                setEditSaveButtonState(true, 'Scanning host key...');
+                                setEditHostKeyStatus('Scanning host key...');
+                            },
+                            onScanned: () => {
+                                setEditSaveButtonState(true, 'Waiting confirmation...');
+                                setEditHostKeyStatus('Waiting for host key confirmation...');
+                            },
+                            onAlreadyTrusted: () => {
+                                setEditSaveButtonState(true, 'Key already trusted');
+                                setEditHostKeyStatus('Host key already saved in known_hosts.');
+                            },
+                            onTrusting: () => {
+                                setEditSaveButtonState(true, 'Trusting key...');
+                                setEditHostKeyStatus('Trusting host key...');
+                            }
+                        });
+                        if (!trustResult?.alreadyTrusted) {
+                            setEditHostKeyStatus('Host key trusted.');
+                        }
                     } catch (err) {
                         alert(`Server saved, but host key was not trusted: ${err.message || 'unknown error'}`);
+                        setEditHostKeyStatus('');
                     }
                 }
                 closeEditModal();
                 fetchManageServers();
+            } finally {
+                editSaveInProgress = false;
+                setEditSaveButtonState(false);
             }
         }
 

@@ -235,9 +235,12 @@ func TestTrustHostKeyWritesKnownHosts(t *testing.T) {
 
 	expectedFingerprint := ssh.FingerprintSHA256(signer.PublicKey())
 
-	gotFingerprint, line, err := trustHostKey("example.com", 2222, expectedFingerprint)
+	gotFingerprint, line, alreadyTrusted, err := trustHostKey("example.com", 2222, expectedFingerprint)
 	if err != nil {
 		t.Fatalf("trustHostKey() unexpected error: %v", err)
+	}
+	if alreadyTrusted {
+		t.Fatalf("trustHostKey() alreadyTrusted = true, want false on first trust")
 	}
 	if gotFingerprint != expectedFingerprint {
 		t.Fatalf("trustHostKey() fingerprint = %q, want %q", gotFingerprint, expectedFingerprint)
@@ -255,9 +258,12 @@ func TestTrustHostKeyWritesKnownHosts(t *testing.T) {
 		t.Fatalf("known_hosts missing trusted line")
 	}
 
-	_, _, err = trustHostKey("example.com", 2222, expectedFingerprint)
+	_, _, alreadyTrusted, err = trustHostKey("example.com", 2222, expectedFingerprint)
 	if err != nil {
 		t.Fatalf("trustHostKey() duplicate unexpected error: %v", err)
+	}
+	if !alreadyTrusted {
+		t.Fatalf("trustHostKey() duplicate alreadyTrusted = false, want true")
 	}
 	raw, err = os.ReadFile(knownHosts)
 	if err != nil {
@@ -291,7 +297,7 @@ func TestTrustHostKeyFingerprintMismatch(t *testing.T) {
 		scanHostKeyFunc = origScanner
 	})
 
-	_, _, err = trustHostKey("example.com", 22, "SHA256:not-the-real-fingerprint")
+	_, _, _, err = trustHostKey("example.com", 22, "SHA256:not-the-real-fingerprint")
 	if !errors.Is(err, errFingerprintMismatch) {
 		t.Fatalf("trustHostKey() err = %v, want %v", err, errFingerprintMismatch)
 	}
