@@ -22,8 +22,8 @@ Use the published image from GHCR (recommended):
 
 ```bash
 cp .env-template .env
-docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.6
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.7
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```
 
 Open the UI:
@@ -47,7 +47,7 @@ docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data debian-upda
 1. Build:
 
 ```bash
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 2. Run:
@@ -69,7 +69,7 @@ From a Windows shell in the repo:
 ```bat
 set GOOS=linux
 set GOARCH=amd64
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 Transfer `webserver` and the `templates/` and `static/` directories to the host you will run it from.

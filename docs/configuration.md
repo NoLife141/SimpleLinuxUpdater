@@ -39,7 +39,7 @@ Environment variables:
 Behavior:
 
 - Disabled by default.
-- Enabled only after generating a token from the Manage page.
+- Enabled only after generating a token from the Admin page.
 - Token is shown once on create/rotate; if lost, rotate again.
 - Scrape requests are rate-limited per client IP (in-memory, per app instance).
 
@@ -51,7 +51,7 @@ Authorization: Bearer <token>
 
 ## Backup and restore
 
-Backup/restore is managed in-app from `/manage` (session-authenticated).
+Backup/restore is managed in-app from `/admin` (session-authenticated).
 
 Behavior:
 
@@ -106,6 +106,7 @@ Environment variables:
 - `DEBIAN_UPDATER_RETRY_BASE_DELAY_MS` (default `1000`, must be `> 0`)
 - `DEBIAN_UPDATER_RETRY_MAX_DELAY_MS` (default `8000`, must be `> 0`)
 - `DEBIAN_UPDATER_RETRY_JITTER_PCT` (default `20`, allowed `0..50`)
+- `DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS` (default `300`, allowed `1..1800`)
 
 If invalid values are provided, the updater logs a warning and falls back to defaults.
 
@@ -127,6 +128,12 @@ See [usage.md](usage.md) for behavior details and interpretation of failures.
 
 The app maintains SSH known-hosts entries and can scan/trust a host key from the UI before first connection.
 
+Edit Server also provides **Known host management** actions:
+
+- Check whether the current host/port is already present in `known_hosts`.
+- Clear the matching known-host entry for the current host/port.
+- Save bypasses redundant host-key trust prompts when the same host/port was already confirmed as trusted in the active edit session.
+
 Override search path:
 
 - `DEBIAN_UPDATER_KNOWN_HOSTS` (colon-separated paths)
@@ -141,5 +148,5 @@ Default behavior:
 For Docker, `.env` is not automatically loaded unless you pass it:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```

@@ -206,6 +206,11 @@
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
         }
 
+        input.is-invalid {
+            border-color: var(--danger);
+            box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2);
+        }
+
         select {
             appearance: none;
             border: 1px solid var(--border);
@@ -470,6 +475,21 @@
             border-top: 1px dashed rgba(255, 255, 255, 0.18);
         }
 
+        .known-host-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed rgba(255, 255, 255, 0.18);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .known-host-section p {
+            margin: 0;
+            width: 100%;
+        }
+
         .key-section .file-btn {
             width: 100%;
             display: block;
@@ -535,6 +555,27 @@
 
         .modal-grid .full-width {
             grid-column: 1 / -1;
+        }
+
+        .hostkey-details {
+            margin: 0 0 14px;
+            padding: 10px 12px;
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            color: var(--text);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 13px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+        }
+
+        .form-error {
+            color: var(--danger);
+            font-size: 13px;
+            min-height: 18px;
+            margin: 0;
         }
 
         .modal-actions {

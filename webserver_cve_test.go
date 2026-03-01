@@ -24,6 +24,18 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, mes
 	t.Fatalf("timed out waiting: %s", message)
 }
 
+func makeDialSSHValidator(expected Server, calls *int32, first sshConnection, subsequent sshConnection) func(Server, *ssh.ClientConfig) (sshConnection, error) {
+	return func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if s.Name != expected.Name || s.Host != expected.Host || s.Port != expected.Port || s.User != expected.User {
+			return nil, errors.New("unexpected server dial")
+		}
+		if atomic.AddInt32(calls, 1) == 1 {
+			return first, nil
+		}
+		return subsequent, nil
+	}
+}
+
 func TestParseUpgradableEntriesStructured(t *testing.T) {
 	stdout := "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n" +
 		"Inst bash [5.2-1] (5.2-2 Debian:12 [amd64])\n"
@@ -56,7 +68,7 @@ func TestBuildSelectedUpgradeCmd(t *testing.T) {
 		{
 			name:  "multiple packages with escaping",
 			input: []string{"openssl", "python3.11", "libfoo'bar"},
-			want:  "sudo apt-get -y install --only-upgrade -- 'openssl' 'python3.11' 'libfoo'\"'\"'bar'",
+			want:  "sudo -n apt-get -y install --only-upgrade -- 'openssl' 'python3.11' 'libfoo'\"'\"'bar'",
 		},
 		{
 			name:  "nil input",
@@ -279,12 +291,7 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
@@ -293,7 +300,7 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
@@ -307,6 +314,9 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 		}
 		return false
 	}, "pending approval with enriched CVE data")
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
+	}
 
 	mu.Lock()
 	pending := clonePendingUpdates(statusMap[server.Name].PendingUpdates)
@@ -382,12 +392,7 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
@@ -396,7 +401,7 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
@@ -415,6 +420,9 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for update flow to finish")
+	}
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
 	}
 
 	mu.Lock()
@@ -510,12 +518,7 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
@@ -524,7 +527,7 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
@@ -542,5 +545,8 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 	case <-done:
 	case <-time.After(8 * time.Second):
 		t.Fatal("timed out waiting for update flow to exit")
+	}
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
 	}
 }

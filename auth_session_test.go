@@ -78,6 +78,16 @@ func markSameOriginAuthRequest(req *http.Request) {
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 }
 
+func markSameOriginAuthRequestWithoutSecFetch(req *http.Request) {
+	if req == nil {
+		return
+	}
+	req.Host = "localhost"
+	req.Header.Set("Origin", "http://localhost")
+	req.Header.Set("Referer", "http://localhost/")
+	req.Header.Del("Sec-Fetch-Site")
+}
+
 func testSessionCookieFromRecorder(t *testing.T, rec *httptest.ResponseRecorder) *http.Cookie {
 	t.Helper()
 	if sessionManager == nil {
@@ -140,6 +150,40 @@ func TestValidatePasswordPolicy(t *testing.T) {
 			err := validatePasswordPolicy(tc.value)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validatePasswordPolicy(%q) err=%v, wantErr=%v", tc.value, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestSameOriginAuthRequestAllowsOriginOrRefererWithoutSecFetchSite(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name    string
+		origin  string
+		referer string
+		want    bool
+	}{
+		{name: "origin and referer", origin: "http://localhost", referer: "http://localhost/setup", want: true},
+		{name: "origin only", origin: "http://localhost", referer: "", want: true},
+		{name: "referer only", origin: "", referer: "http://localhost/setup", want: true},
+		{name: "missing both", origin: "", referer: "", want: false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(rec)
+			req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", nil)
+			req.Host = "localhost"
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.referer != "" {
+				req.Header.Set("Referer", tt.referer)
+			}
+			ctx.Request = req
+			if got := sameOriginAuthRequest(ctx); got != tt.want {
+				t.Fatalf("sameOriginAuthRequest() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -518,6 +562,107 @@ func TestAuthSetupLoginLogoutAndGate(t *testing.T) {
 		}
 		if got, _ := statusPayload["username"].(string); got != "admin" {
 			t.Fatalf("auth status after login username = %q, want %q", got, "admin")
+		}
+	})
+}
+
+func TestAuthEndpointsAllowMissingSecFetchSite(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-missing-sec-fetch.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionManager.LoadAndSave(r)
+
+	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+	setupRec := httptest.NewRecorder()
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+	markSameOriginAuthRequestWithoutSecFetch(setupReq)
+	setupReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, want %d (body=%s)", setupRec.Code, http.StatusOK, setupRec.Body.String())
+	}
+	sessionCookie := testSessionCookieFromRecorder(t, setupRec)
+
+	logoutRec := httptest.NewRecorder()
+	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	markSameOriginAuthRequestWithoutSecFetch(logoutReq)
+	logoutReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(logoutRec, logoutReq)
+	if logoutRec.Code != http.StatusOK {
+		t.Fatalf("logout status = %d, want %d (body=%s)", logoutRec.Code, http.StatusOK, logoutRec.Body.String())
+	}
+
+	loginBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", loginBody)
+	markSameOriginAuthRequestWithoutSecFetch(loginReq)
+	loginReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, want %d (body=%s)", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+}
+
+func TestAuthSetupRejectsMismatchedOriginAndInvalidSecFetchSite(t *testing.T) {
+	t.Run("rejects mismatched origin host", func(t *testing.T) {
+		preserveDBState(t)
+		preserveSessionState(t)
+		preserveRateLimiterState(t)
+		preserveMetricsTokenState(t)
+		t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-origin-mismatch.db"))
+
+		r, err := setupRouter()
+		if err != nil {
+			t.Fatalf("setupRouter() unexpected error: %v", err)
+		}
+		handler := sessionManager.LoadAndSave(r)
+
+		body := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", body)
+		req.Host = "localhost"
+		req.Header.Set("Origin", "http://evil.local")
+		req.Header.Set("Referer", "http://localhost/setup")
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusForbidden, rec.Body.String())
+		}
+	})
+
+	t.Run("rejects invalid Sec-Fetch-Site when present", func(t *testing.T) {
+		preserveDBState(t)
+		preserveSessionState(t)
+		preserveRateLimiterState(t)
+		preserveMetricsTokenState(t)
+		t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-sec-fetch-invalid.db"))
+
+		r, err := setupRouter()
+		if err != nil {
+			t.Fatalf("setupRouter() unexpected error: %v", err)
+		}
+		handler := sessionManager.LoadAndSave(r)
+
+		body := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", body)
+		req.Host = "localhost"
+		req.Header.Set("Origin", "http://localhost")
+		req.Header.Set("Referer", "http://localhost/setup")
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Content-Type", "application/json")
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusForbidden, rec.Body.String())
 		}
 	})
 }

@@ -20,3 +20,10 @@ id_rsa*
 # local artifacts
 debian-updater
 telemetry-id
+webserver
+
+# e2e artifacts
+node_modules/
+playwright-report/
+test-results/
+.tmp-e2e/

@@ -2,9 +2,30 @@ package main
 
 import (
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 )
+
+type delayedNewSessionConn struct {
+	delay time.Duration
+}
+
+func (c *delayedNewSessionConn) NewSession() (sshSessionRunner, error) {
+	time.Sleep(c.delay)
+	return &noopSession{}, nil
+}
+
+func (c *delayedNewSessionConn) Close() error { return nil }
+
+type noopSession struct{}
+
+func (s *noopSession) SetStdin(io.Reader)  {}
+func (s *noopSession) SetStdout(io.Writer) {}
+func (s *noopSession) SetStderr(io.Writer) {}
+func (s *noopSession) Run(string) error    { return nil }
+func (s *noopSession) Close() error         { return nil }
 
 func TestLoadRetryPolicyFromEnvDefaults(t *testing.T) {
 	t.Setenv(retryMaxAttemptsEnv, "")
@@ -27,6 +48,24 @@ func TestLoadRetryPolicyFromEnvDefaults(t *testing.T) {
 	}
 }
 
+func TestRunSSHCommandWithTimeoutTimesOutBlockedSessionOpen(t *testing.T) {
+	conn := &delayedNewSessionConn{delay: 2 * time.Second}
+	start := time.Now()
+	_, _, err := runSSHCommandWithTimeout(conn, "true", nil, 200*time.Millisecond)
+	if err == nil {
+		t.Fatalf("runSSHCommandWithTimeout() error = nil, want timeout error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timed out") {
+		t.Fatalf("runSSHCommandWithTimeout() error = %v, want timeout message", err)
+	}
+	if !isRetryableError(err) {
+		t.Fatalf("timeout error should be retryable, got: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("runSSHCommandWithTimeout() took too long: %v", elapsed)
+	}
+}
+
 func TestLoadRetryPolicyFromEnvOverrideAndInvalidFallback(t *testing.T) {
 	t.Setenv(retryMaxAttemptsEnv, "5")
 	t.Setenv(retryBaseDelayMSEnv, "250")
@@ -45,6 +84,31 @@ func TestLoadRetryPolicyFromEnvOverrideAndInvalidFallback(t *testing.T) {
 	if p.MaxAttempts != 3 || p.BaseDelay != time.Second || p.MaxDelay != 8*time.Second || p.JitterPct != 20 {
 		t.Fatalf("invalid env should fallback to defaults, got %+v", p)
 	}
+}
+
+func TestLoadSSHCommandTimeoutFromEnv(t *testing.T) {
+	t.Run("default when unset", func(t *testing.T) {
+		t.Setenv(sshCommandTimeoutSecondsEnv, "")
+		if got := loadSSHCommandTimeoutFromEnv(); got != defaultSSHCommandTimeout {
+			t.Fatalf("loadSSHCommandTimeoutFromEnv() = %v, want %v", got, defaultSSHCommandTimeout)
+		}
+	})
+
+	t.Run("valid override", func(t *testing.T) {
+		t.Setenv(sshCommandTimeoutSecondsEnv, "30")
+		if got := loadSSHCommandTimeoutFromEnv(); got != 30*time.Second {
+			t.Fatalf("loadSSHCommandTimeoutFromEnv() = %v, want %v", got, 30*time.Second)
+		}
+	})
+
+	t.Run("invalid values fallback to default", func(t *testing.T) {
+		for _, value := range []string{"0", "1801", "abc"} {
+			t.Setenv(sshCommandTimeoutSecondsEnv, value)
+			if got := loadSSHCommandTimeoutFromEnv(); got != defaultSSHCommandTimeout {
+				t.Fatalf("loadSSHCommandTimeoutFromEnv(%q) = %v, want %v", value, got, defaultSSHCommandTimeout)
+			}
+		}
+	})
 }
 
 func TestIsRetryableError(t *testing.T) {

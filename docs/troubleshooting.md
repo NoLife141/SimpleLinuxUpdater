@@ -46,7 +46,7 @@ Symptom: `/metrics` returns `404` or `401`.
 
 Checks:
 
-- If `404`: metrics token is not configured (generate one from `/manage`).
+- If `404`: metrics token is not configured (generate one from `/admin`).
 - If `401`: scraper must send `Authorization: Bearer <token>`.
 - If token was rotated, update scraper credentials to the newest token.
 
@@ -58,7 +58,8 @@ Fix:
 
 - Use the UI "Trust SSH host key now" to scan and trust the host key.
 - Verify the fingerprint out-of-band before trusting.
-- If you rotate host keys, update the known-hosts entry accordingly.
+- In Edit Server, use **Known host management** to check whether the current host/port is already saved and to clear a stale entry before re-trusting.
+- If you rotate host keys, clear the stale known-host entry and trust the new fingerprint.
 
 ## APT locks and missing fuser
 

@@ -111,6 +111,7 @@ const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
 const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
+const sshCommandTimeoutSecondsEnv = "DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS"
 const postchecksEnabledEnv = "DEBIAN_UPDATER_POSTCHECKS_ENABLED"
 const postcheckBlockOnAptHealthEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH"
 const postcheckBlockOnFailedUnitsEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS"
@@ -119,15 +120,18 @@ const postcheckCustomCmdEnv = "DEBIAN_UPDATER_POSTCHECK_CMD"
 const updatePrecheckMinFreeKB int64 = 1024 * 1024
 const precheckOutputMaxLen = 240
 const precheckDiskSpaceCmd = "df -Pk /var / | awk 'NR>1 {print $4}'"
-const precheckLocksCmd = "sudo /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
+const precheckLocksCmd = "sudo -n /usr/bin/fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock"
 const precheckLocksFallbackCmd = "sh -c \"pgrep -x apt >/dev/null || pgrep -x apt-get >/dev/null || pgrep -x dpkg >/dev/null || pgrep -x unattended-upgrade >/dev/null\""
-const precheckDpkgAuditCmd = "sudo dpkg --audit"
-const precheckAptCheckCmd = "sudo apt-get check"
-const aptUpdateCmd = "sudo apt-get update"
-const aptUpgradeCmd = "sudo apt-get -y upgrade"
-const aptUpgradeSelectedPrefixCmd = "sudo apt-get -y install --only-upgrade --"
-const aptAutoremoveCmd = "sudo apt-get -y autoremove"
-const aptListUpgradableCmd = "sudo apt-get -s upgrade"
+const precheckDpkgAuditCmd = "sudo -n dpkg --audit"
+const precheckAptCheckCmd = "sudo -n apt-get check"
+const aptUpdateCmd = "sudo -n apt-get update"
+const aptUpgradeCmd = "sudo -n apt-get -y upgrade"
+const aptUpgradeSelectedPrefixCmd = "sudo -n apt-get -y install --only-upgrade --"
+const aptAutoremoveCmd = "sudo -n apt-get -y autoremove"
+const aptListUpgradableCmd = "sudo -n apt-get -s upgrade"
+const defaultSSHCommandTimeout = 5 * time.Minute
+const minSSHCommandTimeout = 1 * time.Second
+const maxSSHCommandTimeout = 30 * time.Minute
 const cveLookupMaxPackages = 25
 const cveLookupMaxPerPackage = 12
 const cveLookupCommandTimeout = 20 * time.Second
@@ -670,6 +674,24 @@ func loadRetryPolicyFromEnv() RetryPolicy {
 	return p
 }
 
+func loadSSHCommandTimeoutFromEnv() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(sshCommandTimeoutSecondsEnv))
+	if raw == "" {
+		return defaultSSHCommandTimeout
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("Invalid %s=%q, must be an integer in [1,1800], using default %s", sshCommandTimeoutSecondsEnv, raw, defaultSSHCommandTimeout)
+		return defaultSSHCommandTimeout
+	}
+	timeout := time.Duration(seconds) * time.Second
+	if timeout < minSSHCommandTimeout || timeout > maxSSHCommandTimeout {
+		log.Printf("Invalid %s=%d, must be in [1,1800], using default %s", sshCommandTimeoutSecondsEnv, seconds, defaultSSHCommandTimeout)
+		return defaultSSHCommandTimeout
+	}
+	return timeout
+}
+
 func loadPostUpdateCheckConfigFromEnv() PostUpdateCheckConfig {
 	cfg := PostUpdateCheckConfig{
 		Enabled:               true,
@@ -714,6 +736,7 @@ func isRetryableMessage(msg string) bool {
 	retryableHints := []string{
 		"i/o timeout",
 		"timeout",
+		"timed out",
 		"connection reset",
 		"connection refused",
 		"broken pipe",
@@ -955,7 +978,7 @@ func isBenignNoLockStateOutput(msg string) bool {
 	return false
 }
 
-func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+func runSSHCommandNoTimeout(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
 	if client == nil {
 		return "", "", errors.New("missing SSH connection")
 	}
@@ -976,14 +999,51 @@ func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, s
 
 func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader, timeout time.Duration) (string, string, error) {
 	if timeout <= 0 {
-		return runSSHCommand(client, cmd, stdin)
+		return runSSHCommandNoTimeout(client, cmd, stdin)
 	}
 	if client == nil {
 		return "", "", errors.New("missing SSH connection")
 	}
-	session, err := client.NewSession()
-	if err != nil {
-		return "", "", err
+	type sessionResult struct {
+		session sshSessionRunner
+		err     error
+	}
+	newSessionCh := make(chan sessionResult, 1)
+	go func() {
+		session, err := client.NewSession()
+		newSessionCh <- sessionResult{session: session, err: err}
+	}()
+
+	sessionTimeout := time.NewTimer(timeout)
+	defer sessionTimeout.Stop()
+
+	var session sshSessionRunner
+	select {
+	case result := <-newSessionCh:
+		if result.err != nil {
+			return "", "", result.err
+		}
+		session = result.session
+	case <-sessionTimeout.C:
+		_ = client.Close()
+		select {
+		case result := <-newSessionCh:
+			if result.session != nil {
+				_ = result.session.Close()
+			}
+			if result.err == nil {
+				return "", "", fmt.Errorf("ssh session setup timed out after %s", timeout)
+			}
+			return "", "", fmt.Errorf("ssh session setup timed out after %s: %w", timeout, result.err)
+		case <-time.After(1 * time.Second):
+			go func() {
+				result := <-newSessionCh
+				if result.session != nil {
+					_ = result.session.Close()
+				}
+			}()
+			return "", "", fmt.Errorf("ssh session setup timed out after %s", timeout)
+		}
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1007,10 +1067,10 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 		return stdout.String(), stderr.String(), runErr
 	case <-timer.C:
 		_ = session.Close()
-		timeoutStdout := stdout.String()
-		timeoutStderr := stderr.String()
 		select {
 		case runErr := <-runErrCh:
+			timeoutStdout := stdout.String()
+			timeoutStderr := stderr.String()
 			if runErr == nil {
 				runErr = fmt.Errorf("command timed out after %s", timeout)
 			} else {
@@ -1019,9 +1079,13 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 			return timeoutStdout, timeoutStderr, runErr
 		case <-time.After(1 * time.Second):
 			go func() { <-runErrCh }()
-			return timeoutStdout, timeoutStderr, fmt.Errorf("command timed out after %s", timeout)
+			return "", "", fmt.Errorf("command timed out after %s", timeout)
 		}
 	}
+}
+
+func runSSHCommand(client sshConnection, cmd string, stdin io.Reader) (string, string, error) {
+	return runSSHCommandWithTimeout(client, cmd, stdin, loadSSHCommandTimeoutFromEnv())
 }
 
 func sshExitCode(err error) (int, bool) {
@@ -1277,6 +1341,17 @@ func parseFailedSystemdUnits(output string) []string {
 		units = append(units, unit)
 	}
 	return units
+}
+
+func summarizeUnitNames(units []string, maxShown int) string {
+	if len(units) == 0 {
+		return ""
+	}
+	if maxShown <= 0 || maxShown >= len(units) {
+		return strings.Join(units, ", ")
+	}
+	remaining := len(units) - maxShown
+	return fmt.Sprintf("%s (+%d more)", strings.Join(units[:maxShown], ", "), remaining)
 }
 
 func listFailedSystemdUnits(client sshConnection) ([]string, string, error) {
@@ -2419,6 +2494,8 @@ type withActorRunner struct {
 	config *ssh.ClientConfig
 	client sshConnection
 
+	commandTimeout time.Duration
+
 	sshDialAttempts        int
 	aptUpdateAttempts      int
 	listUpgradableAttempts int
@@ -2525,12 +2602,13 @@ func runWithActorShared(
 	runSteps func(*withActorRunner),
 ) {
 	runner := &withActorRunner{
-		server:       server,
-		actor:        actor,
-		clientIP:     clientIP,
-		policy:       policy,
-		lastErrClass: "none",
-		startedAt:    time.Now().UTC(),
+		server:         server,
+		actor:          actor,
+		clientIP:       clientIP,
+		policy:         policy,
+		commandTimeout: loadSSHCommandTimeoutFromEnv(),
+		lastErrClass:   "none",
+		startedAt:      time.Now().UTC(),
 	}
 	if auditMeta == nil {
 		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
@@ -2697,11 +2775,15 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					preUpdateFailedUnitsMap[unit] = struct{}{}
 				}
 				if len(preUpdateFailedUnits) > 0 {
-					r.appendStatusLog(fmt.Sprintf("\nDetected %d pre-existing failed systemd unit(s) before upgrade.", len(preUpdateFailedUnits)))
+					r.appendStatusLog(fmt.Sprintf(
+						"\nDetected %d pre-existing failed systemd unit(s) before upgrade: %s.",
+						len(preUpdateFailedUnits),
+						summarizeUnitNames(preUpdateFailedUnits, 6),
+					))
 				}
 			}
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2711,20 +2793,12 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\napt update attempt %d/%d failed: %v; retrying in %s",
 				&r.aptUpdateAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(aptUpdateCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, aptUpdateCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -2743,7 +2817,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\nlist upgradable attempt %d/%d failed: %v; retrying in %s",
 				&r.listUpgradableAttempts,
 				func() error {
-					pending, items, listErr := getUpgradable(r.client)
+					pending, items, listErr := getUpgradable(r.client, r.commandTimeout)
 					if listErr == nil {
 						upgradable = items
 						pendingUpdates = pending
@@ -2836,8 +2910,6 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			})
 
-			stdout.Reset()
-			stderr.Reset()
 			upgradeCmd := aptUpgradeCmd
 			if r.approvalScope == "security" {
 				selectedCmd := buildSelectedUpgradeCmd(r.approvedPackages)
@@ -2860,20 +2932,12 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				"\napt upgrade attempt %d/%d failed: %v; retrying in %s",
 				&r.aptUpgradeAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(upgradeCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, upgradeCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs = r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs = r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -2984,7 +3048,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 			escapedLine := shellEscapeSingleQuotes(line)
 			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -2994,20 +3058,12 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 				"\nsudoers enable attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-					return session.Run(cmd)
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, cmd, strings.NewReader(sudoPassword+"\n"), r.commandTimeout)
+					return runErr
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3053,7 +3109,7 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 		func(r *withActorRunner) {
 			cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -3063,20 +3119,12 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 				"\nsudoers disable attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					session.SetStdin(strings.NewReader(sudoPassword + "\n"))
-					return session.Run(cmd)
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, cmd, strings.NewReader(sudoPassword+"\n"), r.commandTimeout)
+					return runErr
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3120,7 +3168,7 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 		doneOnlyOutcome,
 		"autoremove.ssh_dial",
 		func(r *withActorRunner) {
-			var stdout, stderr bytes.Buffer
+			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
 				r.config,
@@ -3130,20 +3178,12 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 				"\nautoremove attempt %d/%d failed: %v; retrying in %s",
 				&r.commandAttempts,
 				func() error {
-					session, sessionErr := r.client.NewSession()
-					if sessionErr != nil {
-						return sessionErr
-					}
-					defer session.Close()
-					stdout.Reset()
-					stderr.Reset()
-					session.SetStdout(&stdout)
-					session.SetStderr(&stderr)
-					runErr := session.Run(aptAutoremoveCmd)
-					return markRetryableFromOutput(runErr, stdout.String()+"\n"+stderr.String())
+					var runErr error
+					stdout, stderr, runErr = runSSHCommandWithTimeout(r.client, aptAutoremoveCmd, nil, r.commandTimeout)
+					return markRetryableFromOutput(runErr, stdout+"\n"+stderr)
 				},
 			)
-			logs := r.currentLogs() + "\n" + stdout.String() + stderr.String()
+			logs := r.currentLogs() + "\n" + stdout + stderr
 			if err != nil {
 				r.markErrorClass(err)
 				logs += fmt.Sprintf("\nError: %v", err)
@@ -3158,21 +3198,12 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 	)
 }
 
-func getUpgradable(client sshConnection) ([]PendingUpdate, []string, error) {
-	session, err := client.NewSession()
+func getUpgradable(client sshConnection, timeout time.Duration) ([]PendingUpdate, []string, error) {
+	stdout, stderr, err := runSSHCommandWithTimeout(client, aptListUpgradableCmd, nil, timeout)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, markRetryableFromOutput(err, stdout+"\n"+stderr)
 	}
-	defer session.Close()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	session.SetStdout(&stdout)
-	session.SetStderr(&stderr)
-	err = session.Run(aptListUpgradableCmd)
-	if err != nil {
-		return nil, nil, err
-	}
-	return parseUpgradableEntries(stdout.String())
+	return parseUpgradableEntries(stdout)
 }
 
 func parseUpgradableEntries(stdout string) ([]PendingUpdate, []string, error) {
@@ -3478,8 +3509,12 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 
 func getGlobalKey() string {
 	db := getDB()
-	runtimeStateMu.RLock()
-	defer runtimeStateMu.RUnlock()
+	getCached := func() string {
+		globalKeyMu.RLock()
+		cached := globalKey
+		globalKeyMu.RUnlock()
+		return cached
+	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
@@ -3494,20 +3529,18 @@ func getGlobalKey() string {
 				time.Sleep(75 * time.Millisecond)
 				continue
 			}
-			globalKeyMu.RLock()
-			cached := globalKey
-			globalKeyMu.RUnlock()
+			cached := getCached()
 			log.Printf("Failed to load global SSH key: %v", err)
 			if strings.TrimSpace(cached) != "" {
 				log.Printf("Using cached global SSH key due to read failure")
 			}
 			return cached
 		}
+		// Do not hold runtimeStateMu while decrypting; decrypt may initialize
+		// encryption key and require runtimeStateMu write access.
 		key, decErr := decryptSecret(enc)
 		if decErr != nil {
-			globalKeyMu.RLock()
-			cached := globalKey
-			globalKeyMu.RUnlock()
+			cached := getCached()
 			log.Printf("Failed to decrypt global SSH key: %v", decErr)
 			if strings.TrimSpace(cached) != "" {
 				log.Printf("Using cached global SSH key due to decrypt failure")
@@ -3818,17 +3851,17 @@ func knownHostsHostToken(host string, port int) string {
 	return fmt.Sprintf("[%s]:%d", cleanHost, normalizePort(port))
 }
 
-func appendKnownHostLine(line string) error {
+func appendKnownHostLine(line string) (bool, error) {
 	cleanLine := strings.TrimSpace(line)
 	if cleanLine == "" {
-		return errors.New("empty known_hosts line")
+		return false, errors.New("empty known_hosts line")
 	}
 	path, err := knownHostsWritePath()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return fmt.Errorf("create known_hosts dir: %w", err)
+		return false, fmt.Errorf("create known_hosts dir: %w", err)
 	}
 
 	knownHostsMu.Lock()
@@ -3836,20 +3869,120 @@ func appendKnownHostLine(line string) error {
 
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read known_hosts: %w", err)
+		return false, fmt.Errorf("read known_hosts: %w", err)
 	}
 	if strings.Contains("\n"+string(data)+"\n", "\n"+cleanLine+"\n") {
-		return nil
+		return false, nil
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return fmt.Errorf("open known_hosts for append: %w", err)
+		return false, fmt.Errorf("open known_hosts for append: %w", err)
 	}
 	defer f.Close()
 	if _, err := f.WriteString(cleanLine + "\n"); err != nil {
-		return fmt.Errorf("append known_hosts line: %w", err)
+		return false, fmt.Errorf("append known_hosts line: %w", err)
 	}
-	return nil
+	return true, nil
+}
+
+func knownHostLineExists(line string) (bool, error) {
+	cleanLine := strings.TrimSpace(line)
+	if cleanLine == "" {
+		return false, errors.New("empty known_hosts line")
+	}
+	path, err := knownHostsWritePath()
+	if err != nil {
+		return false, err
+	}
+
+	knownHostsMu.Lock()
+	defer knownHostsMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read known_hosts: %w", err)
+	}
+	return strings.Contains("\n"+string(data)+"\n", "\n"+cleanLine+"\n"), nil
+}
+
+func removeKnownHostEntries(host string, port int) (int, error) {
+	token := knownHostsHostToken(host, port)
+	if strings.TrimSpace(token) == "" {
+		return 0, errors.New("host is required")
+	}
+	path, err := knownHostsWritePath()
+	if err != nil {
+		return 0, err
+	}
+
+	knownHostsMu.Lock()
+	defer knownHostsMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read known_hosts: %w", err)
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			kept = append(kept, line)
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			kept = append(kept, line)
+			continue
+		}
+		hostsField := fields[0]
+		hostTokens := strings.Split(hostsField, ",")
+		keptHostTokens := make([]string, 0, len(hostTokens))
+		removedOnLine := 0
+		for _, hostToken := range hostTokens {
+			trimmedToken := strings.TrimSpace(hostToken)
+			if trimmedToken == "" {
+				continue
+			}
+			if trimmedToken == token {
+				removedOnLine++
+				continue
+			}
+			keptHostTokens = append(keptHostTokens, trimmedToken)
+		}
+		if removedOnLine == 0 {
+			kept = append(kept, line)
+			continue
+		}
+		removed += removedOnLine
+		if len(keptHostTokens) == 0 {
+			continue
+		}
+		fields[0] = strings.Join(keptHostTokens, ",")
+		kept = append(kept, strings.Join(fields, " "))
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+
+	updated := strings.Join(kept, "\n")
+	updated = strings.TrimRight(updated, "\n")
+	if updated != "" {
+		updated += "\n"
+	}
+	if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+		return 0, fmt.Errorf("write known_hosts: %w", err)
+	}
+	return removed, nil
 }
 
 func scanHostKey(host string, port int) (ssh.PublicKey, error) {
@@ -3895,20 +4028,21 @@ func buildKnownHostsLine(host string, port int, key ssh.PublicKey) string {
 	return knownhosts.Line([]string{knownHostsHostToken(host, port)}, key)
 }
 
-func trustHostKey(host string, port int, expectedFingerprint string) (string, string, error) {
+func trustHostKey(host string, port int, expectedFingerprint string) (string, string, bool, error) {
 	key, err := scanHostKeyFunc(host, port)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	fingerprint := ssh.FingerprintSHA256(key)
 	if strings.TrimSpace(expectedFingerprint) != "" && !stringsEqualConstantTime(fingerprint, strings.TrimSpace(expectedFingerprint)) {
-		return "", "", errFingerprintMismatch
+		return "", "", false, errFingerprintMismatch
 	}
 	line := buildKnownHostsLine(host, port, key)
-	if err := appendKnownHostLine(line); err != nil {
-		return "", "", err
+	added, err := appendKnownHostLine(line)
+	if err != nil {
+		return "", "", false, err
 	}
-	return fingerprint, line, nil
+	return fingerprint, line, !added, nil
 }
 
 func shellEscapeSingleQuotes(input string) string {
@@ -4433,13 +4567,21 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
 			return
 		}
-		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type()})
+		line := buildKnownHostsLine(host, port, key)
+		alreadyTrusted := false
+		if trusted, trustedErr := knownHostLineExists(line); trustedErr == nil {
+			alreadyTrusted = trusted
+		} else {
+			log.Printf("hostkey.scan trusted-check failed for %s:%d: %v", host, port, trustedErr)
+		}
+		audit(c, "hostkey.scan", "hostkey", host, "success", "Host key scanned", map[string]any{"port": port, "algorithm": key.Type(), "already_trusted": alreadyTrusted})
 		c.JSON(http.StatusOK, gin.H{
 			"host":               host,
 			"port":               port,
 			"algorithm":          key.Type(),
 			"fingerprint_sha256": ssh.FingerprintSHA256(key),
-			"known_hosts_line":   buildKnownHostsLine(host, port, key),
+			"known_hosts_line":   line,
+			"already_trusted":    alreadyTrusted,
 		})
 	})
 
@@ -4467,7 +4609,7 @@ func setupRouter() (*gin.Engine, error) {
 			return
 		}
 		port := normalizePort(req.Port)
-		fingerprint, line, err := trustHostKey(host, port, expectedFingerprint)
+		fingerprint, line, alreadyTrusted, err := trustHostKey(host, port, expectedFingerprint)
 		if err != nil {
 			if errors.Is(err, errFingerprintMismatch) {
 				audit(c, "hostkey.trust", "hostkey", host, "failure", "Host key fingerprint mismatch", map[string]any{"port": port})
@@ -4478,13 +4620,54 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to trust host key: %v", err)})
 			return
 		}
-		audit(c, "hostkey.trust", "hostkey", host, "success", "Host key trusted", map[string]any{"port": port, "fingerprint_sha256": fingerprint})
+		message := "Host key trusted"
+		if alreadyTrusted {
+			message = "Host key already trusted"
+		}
+		audit(c, "hostkey.trust", "hostkey", host, "success", message, map[string]any{"port": port, "fingerprint_sha256": fingerprint, "already_trusted": alreadyTrusted})
 		c.JSON(http.StatusOK, gin.H{
-			"message":            "Host key trusted",
+			"message":            message,
 			"host":               host,
 			"port":               port,
 			"fingerprint_sha256": fingerprint,
 			"known_hosts_line":   line,
+			"already_trusted":    alreadyTrusted,
+		})
+	})
+
+	r.POST("/api/hostkeys/clear", func(c *gin.Context) {
+		var req struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.clear", "hostkey", "-", "failure", "Invalid request payload", nil)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		host := strings.TrimSpace(req.Host)
+		if host == "" {
+			audit(c, "hostkey.clear", "hostkey", "-", "failure", "Host is required", nil)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+			return
+		}
+		port := normalizePort(req.Port)
+		removed, err := removeKnownHostEntries(host, port)
+		if err != nil {
+			audit(c, "hostkey.clear", "hostkey", host, "failure", "Failed to clear host key entry", map[string]any{"port": port, "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clear host key: %v", err)})
+			return
+		}
+		message := "Known host entry not found"
+		if removed > 0 {
+			message = "Known host entry cleared"
+		}
+		audit(c, "hostkey.clear", "hostkey", host, "success", message, map[string]any{"port": port, "removed_entries": removed})
+		c.JSON(http.StatusOK, gin.H{
+			"message":         message,
+			"host":            host,
+			"port":            port,
+			"removed_entries": removed,
 		})
 	})
 

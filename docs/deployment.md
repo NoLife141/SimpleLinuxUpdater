@@ -17,7 +17,7 @@
 Use a named volume for persistence:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```
 
 ## GHCR images
@@ -30,7 +30,7 @@ Release tags publish images to GitHub Container Registry:
 Example:
 
 ```bash
-docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```
 
 ## Binary deployment
@@ -69,7 +69,7 @@ Only one local user is supported by design.
 
 ## Metrics scraping
 
-`/metrics` is disabled by default. Generate a Metrics API token from `/manage`, then configure your scraper with that token.
+`/metrics` is disabled by default. Generate a Metrics API token from `/admin`, then configure your scraper with that token.
 
 Prometheus example:
 

@@ -46,7 +46,7 @@ If you want to implement a fix or feature:
 Build:
 
 ```bash
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 Run tests:

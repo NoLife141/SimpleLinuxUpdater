@@ -67,7 +67,7 @@ Session hardening options:
 
 `/metrics` is protected by a bearer token, separate from UI sessions.
 
-Configure from the Manage page:
+Configure from the Admin page (`/admin`):
 
 - Generate/rotate the Metrics API token in-app
 - Store the one-time token output securely for your scraper
@@ -85,7 +85,7 @@ Operational note:
 
 ## Backup and restore artifacts
 
-Backup export is available from `/manage` and is session-authenticated.
+Backup export is available from `/admin` and is session-authenticated.
 
 - Exported backup files (`.slubkp`) are encrypted with a user-provided passphrase.
 - Payload includes `servers.db`, `config.json`, and optional `known_hosts`.

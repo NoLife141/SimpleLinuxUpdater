@@ -8,6 +8,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -551,6 +552,19 @@ func applyBackupFiles(files map[string][]byte) error {
 	return nil
 }
 
+func hasPersistedGlobalKey() (bool, error) {
+	db := getDB()
+	var enc string
+	err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(enc) != "", nil
+}
+
 func handleBackupStatus(c *gin.Context) {
 	khPath, khExists := knownHostsBackupPath()
 	c.JSON(http.StatusOK, backupStatusResponse{
@@ -698,10 +712,21 @@ func handleBackupRestore(c *gin.Context) {
 		return
 	}
 
-	audit(c, "backup.restore", "backup", "state", "success", "Backup restored", map[string]any{"manifest_files": len(manifest.Files)})
+	globalKeyPresent, globalKeyErr := hasPersistedGlobalKey()
+	if globalKeyErr != nil {
+		log.Printf("handleBackupRestore: failed to read global key presence after restore: %v", globalKeyErr)
+	}
+	_, knownHostsRestored := files["known_hosts"]
+	audit(c, "backup.restore", "backup", "state", "success", "Backup restored", map[string]any{
+		"manifest_files":       len(manifest.Files),
+		"global_key_present":   globalKeyPresent,
+		"known_hosts_restored": knownHostsRestored,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"message":              "backup restored",
 		"restart_required":     false,
 		"sessions_invalidated": true,
+		"global_key_present":   globalKeyPresent,
+		"known_hosts_restored": knownHostsRestored,
 	})
 }
