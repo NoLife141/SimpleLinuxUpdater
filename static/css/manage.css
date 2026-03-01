@@ -206,6 +206,11 @@
             box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
         }
 
+        input.is-invalid {
+            border-color: var(--danger);
+            box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.2);
+        }
+
         select {
             appearance: none;
             border: 1px solid var(--border);
@@ -563,7 +568,14 @@
             font-size: 13px;
             line-height: 1.45;
             white-space: pre-wrap;
-            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+
+        .form-error {
+            color: var(--danger);
+            font-size: 13px;
+            min-height: 18px;
+            margin: 0;
         }
 
         .modal-actions {

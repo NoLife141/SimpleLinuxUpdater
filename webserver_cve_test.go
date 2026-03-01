@@ -280,7 +280,7 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 	origDial := dialSSHConnection
 	var dialCalls int32
 	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name {
+		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
 			return nil, errors.New("unexpected server dial")
 		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {
@@ -310,6 +310,9 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 		}
 		return false
 	}, "pending approval with enriched CVE data")
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
+	}
 
 	mu.Lock()
 	pending := clonePendingUpdates(statusMap[server.Name].PendingUpdates)
@@ -386,7 +389,7 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 	origDial := dialSSHConnection
 	var dialCalls int32
 	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name {
+		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
 			return nil, errors.New("unexpected server dial")
 		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {
@@ -517,7 +520,7 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 	origDial := dialSSHConnection
 	var dialCalls int32
 	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name {
+		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
 			return nil, errors.New("unexpected server dial")
 		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {

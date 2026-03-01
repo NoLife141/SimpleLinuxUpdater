@@ -50,12 +50,14 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
 
 		server := Server{Name: "srv-update-route", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
-		mu.Lock()
-		servers = []Server{server}
-		statusMap = map[string]*ServerStatus{
-			server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
-		}
-		mu.Unlock()
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			servers = []Server{server}
+			statusMap = map[string]*ServerStatus{
+				server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+			}
+		}()
 
 		origDial := dialSSHConnection
 		dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {

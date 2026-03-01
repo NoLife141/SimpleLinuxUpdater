@@ -9,6 +9,7 @@ let serverCache = {};
         let auditPageSize = 20;
 	        let auditTotal = 0;
 	        let hostKeyModalResolve = null;
+	        let hostKeyModalPromise = null;
 	        let editSaveInProgress = false;
 	        let editKnownHostState = { host: '', port: 0, checked: false, alreadyTrusted: false, fingerprint: '' };
 	        let editKnownHostCheckPromise = null;
@@ -115,6 +116,7 @@ let serverCache = {};
             }
             const resolver = hostKeyModalResolve;
             hostKeyModalResolve = null;
+            hostKeyModalPromise = null;
             if (resolver) {
                 resolver(!!confirmed);
             }
@@ -127,10 +129,14 @@ let serverCache = {};
                 return Promise.resolve(confirm(`Verify SSH host key before trusting:\n\n${hostKeyPromptText(scanned)}`));
             }
             details.textContent = hostKeyPromptText(scanned);
+            if (hostKeyModalPromise) {
+                return hostKeyModalPromise;
+            }
             modal.classList.add('active');
-            return new Promise((resolve) => {
+            hostKeyModalPromise = new Promise((resolve) => {
                 hostKeyModalResolve = resolve;
             });
+            return hostKeyModalPromise;
         }
 
         async function trustHostKeyFlow(host, port, hooks = {}) {
@@ -552,6 +558,7 @@ let serverCache = {};
                 updateFileLabel(keyInput, 'Click to upload key');
 	            }
 	            setEditHostKeyStatus('');
+	            clearEditValidationState();
 	            setEditSaveButtonState(false);
 	            setEditKnownHostButtonsState(false);
 	            document.getElementById('edit-modal').classList.add('active');
@@ -561,6 +568,7 @@ let serverCache = {};
 	        function closeEditModal() {
 	            document.getElementById('edit-modal').classList.remove('active');
 	            setEditHostKeyStatus('');
+	            clearEditValidationState();
 	            setEditSaveButtonState(false);
 	            setEditKnownHostButtonsState(false);
 	            editingServerName = null;
@@ -572,6 +580,41 @@ let serverCache = {};
             if (!el) return;
             el.textContent = String(message || '').trim();
         }
+
+	        function setEditValidationError(message) {
+	            const el = document.getElementById('edit-error');
+	            if (!el) return;
+	            el.textContent = String(message || '').trim();
+	        }
+
+	        function setEditFieldInvalidState(fieldId, isInvalid) {
+	            const input = document.getElementById(fieldId);
+	            if (!input) return;
+	            input.classList.toggle('is-invalid', !!isInvalid);
+	            if (isInvalid) {
+	                input.setAttribute('aria-invalid', 'true');
+	            } else {
+	                input.removeAttribute('aria-invalid');
+	            }
+	        }
+
+	        function maybeClearEditValidationError() {
+	            const requiredFields = ['edit-name', 'edit-host', 'edit-user'];
+	            const hasInvalid = requiredFields.some((fieldId) => {
+	                const input = document.getElementById(fieldId);
+	                return !!input && input.classList.contains('is-invalid');
+	            });
+	            if (!hasInvalid) {
+	                setEditValidationError('');
+	            }
+	        }
+
+	        function clearEditValidationState() {
+	            setEditValidationError('');
+	            setEditFieldInvalidState('edit-name', false);
+	            setEditFieldInvalidState('edit-host', false);
+	            setEditFieldInvalidState('edit-user', false);
+	        }
 
 	        function setEditSaveButtonState(isBusy, label) {
 	            const saveBtn = document.getElementById('edit-save');
@@ -685,8 +728,23 @@ let serverCache = {};
             const current = serverCache[editingServerName] || {};
             const currentPort = normalizePort(current.port, 22);
             const targetPort = normalizePort(newPort || currentPort, 22);
-            if (!newName || !newHost || !newUser) {
-                return;
+	            clearEditValidationState();
+	            const missing = [];
+	            if (!newName) missing.push({ id: 'edit-name', label: 'Name' });
+	            if (!newHost) missing.push({ id: 'edit-host', label: 'Host' });
+	            if (!newUser) missing.push({ id: 'edit-user', label: 'User' });
+	            if (missing.length > 0) {
+	                for (const field of missing) {
+	                    setEditFieldInvalidState(field.id, true);
+	                }
+	                const labels = missing.map((field) => field.label).join(', ');
+	                const verb = missing.length === 1 ? 'is' : 'are';
+	                setEditValidationError(`${labels} ${verb} required.`);
+	                const firstInvalid = document.getElementById(missing[0].id);
+	                if (firstInvalid) {
+	                    firstInvalid.focus();
+	                }
+	                return;
 	            }
 	            editSaveInProgress = true;
 	            setEditSaveButtonState(true, 'Saving...');
@@ -798,7 +856,13 @@ let serverCache = {};
 	                clearServerPassword(editingServerName);
 	            }
 	        });
+	        document.getElementById('edit-name').addEventListener('input', () => {
+	            setEditFieldInvalidState('edit-name', false);
+	            maybeClearEditValidationError();
+	        });
 	        document.getElementById('edit-host').addEventListener('input', () => {
+	            setEditFieldInvalidState('edit-host', false);
+	            maybeClearEditValidationError();
 	            if (editingServerName) {
 	                editKnownHostCheckPromise = null;
 	                resetEditKnownHostState();
@@ -811,6 +875,10 @@ let serverCache = {};
 	                resetEditKnownHostState();
 	                setEditHostKeyStatus('Host/port changed. Click "Check Known Host" to refresh status.');
 	            }
+	        });
+	        document.getElementById('edit-user').addEventListener('input', () => {
+	            setEditFieldInvalidState('edit-user', false);
+	            maybeClearEditValidationError();
 	        });
 	        document.getElementById('edit-check-known-host').addEventListener('click', () => {
 	            if (editingServerName) {

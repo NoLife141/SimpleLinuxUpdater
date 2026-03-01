@@ -1,6 +1,6 @@
-[README](../README.md) | [Installation](installation.md) | [Configuration](configuration.md) | [Usage](usage.md) | [Deployment](deployment.md) | [Security](security.md) | [Troubleshooting](troubleshooting.md) | [Architecture](architecture.md) | [Contributing](contributing.md)
-
 # Release Smoke Checklist
+
+[README](../README.md) | [Installation](installation.md) | [Configuration](configuration.md) | [Usage](usage.md) | [Deployment](deployment.md) | [Security](security.md) | [Troubleshooting](troubleshooting.md) | [Architecture](architecture.md) | [Contributing](contributing.md)
 
 Run this checklist on a real target host before creating a release tag.
 
@@ -68,6 +68,6 @@ Evidence to capture:
 
 ## 5) Final Gate
 
-- `go test ./...` passes locally
-- `npm run test:e2e` passes locally
+- `go test ./...` passes
+- `npm run test:e2e` passes
 - CI (`unit`, `race`, `cover`, `ui-e2e`) is green on the release commit
