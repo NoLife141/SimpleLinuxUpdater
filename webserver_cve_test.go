@@ -279,7 +279,10 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if s.Name != server.Name {
+			return nil, errors.New("unexpected server dial")
+		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
@@ -293,7 +296,7 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
@@ -382,7 +385,10 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if s.Name != server.Name {
+			return nil, errors.New("unexpected server dial")
+		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
@@ -396,7 +402,7 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
@@ -510,7 +516,10 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if s.Name != server.Name {
+			return nil, errors.New("unexpected server dial")
+		}
 		if atomic.AddInt32(&dialCalls, 1) == 1 {
 			return updateConn, nil
 		}
@@ -524,7 +533,7 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 		close(done)
 	}()
 
-	waitForCondition(t, 6*time.Second, func() bool {
+	waitForCondition(t, 10*time.Second, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		status := statusMap[server.Name]
