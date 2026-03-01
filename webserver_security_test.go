@@ -388,6 +388,37 @@ func TestRemoveKnownHostEntries(t *testing.T) {
 	}
 }
 
+func TestRemoveKnownHostEntriesPreservesOtherAliasesOnSameLine(t *testing.T) {
+	tmpDir := t.TempDir()
+	knownHosts := filepath.Join(tmpDir, "known_hosts")
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHosts)
+
+	content := "example.com,alias.example ssh-ed25519 AAAAMULTI\n"
+	if err := os.WriteFile(knownHosts, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() unexpected error: %v", err)
+	}
+
+	removed, err := removeKnownHostEntries("example.com", 22)
+	if err != nil {
+		t.Fatalf("removeKnownHostEntries() unexpected error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removeKnownHostEntries() removed=%d, want 1", removed)
+	}
+
+	raw, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatalf("ReadFile() unexpected error: %v", err)
+	}
+	updated := string(raw)
+	if strings.Contains(updated, "example.com,alias.example") {
+		t.Fatalf("target host token still present after clear")
+	}
+	if !strings.Contains(updated, "alias.example ssh-ed25519 AAAAMULTI") {
+		t.Fatalf("remaining alias should be preserved after clear")
+	}
+}
+
 func TestGetGlobalKeyDoesNotDeadlockWhenEncryptionKeyIsCold(t *testing.T) {
 	preserveDBState(t)
 	preserveEncryptionState(t)

@@ -1067,10 +1067,10 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 		return stdout.String(), stderr.String(), runErr
 	case <-timer.C:
 		_ = session.Close()
-		timeoutStdout := stdout.String()
-		timeoutStderr := stderr.String()
 		select {
 		case runErr := <-runErrCh:
+			timeoutStdout := stdout.String()
+			timeoutStderr := stderr.String()
 			if runErr == nil {
 				runErr = fmt.Errorf("command timed out after %s", timeout)
 			} else {
@@ -1079,7 +1079,7 @@ func runSSHCommandWithTimeout(client sshConnection, cmd string, stdin io.Reader,
 			return timeoutStdout, timeoutStderr, runErr
 		case <-time.After(1 * time.Second):
 			go func() { <-runErrCh }()
-			return timeoutStdout, timeoutStderr, fmt.Errorf("command timed out after %s", timeout)
+			return "", "", fmt.Errorf("command timed out after %s", timeout)
 		}
 	}
 }
@@ -3945,18 +3945,30 @@ func removeKnownHostEntries(host string, port int) (int, error) {
 			continue
 		}
 		hostsField := fields[0]
-		matched := false
-		for _, hostToken := range strings.Split(hostsField, ",") {
-			if strings.TrimSpace(hostToken) == token {
-				matched = true
-				break
+		hostTokens := strings.Split(hostsField, ",")
+		keptHostTokens := make([]string, 0, len(hostTokens))
+		removedOnLine := 0
+		for _, hostToken := range hostTokens {
+			trimmedToken := strings.TrimSpace(hostToken)
+			if trimmedToken == "" {
+				continue
 			}
+			if trimmedToken == token {
+				removedOnLine++
+				continue
+			}
+			keptHostTokens = append(keptHostTokens, trimmedToken)
 		}
-		if matched {
-			removed++
+		if removedOnLine == 0 {
+			kept = append(kept, line)
 			continue
 		}
-		kept = append(kept, line)
+		removed += removedOnLine
+		if len(keptHostTokens) == 0 {
+			continue
+		}
+		fields[0] = strings.Join(keptHostTokens, ",")
+		kept = append(kept, strings.Join(fields, " "))
 	}
 	if removed == 0 {
 		return 0, nil
