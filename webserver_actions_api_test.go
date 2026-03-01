@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,5 +221,72 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	handler.ServeHTTP(cancelAgainRec, cancelAgainReq)
 	if cancelAgainRec.Code != http.StatusConflict {
 		t.Fatalf("cancel conflict status = %d, want %d (body=%s)", cancelAgainRec.Code, http.StatusConflict, cancelAgainRec.Body.String())
+	}
+}
+
+func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-bulk-update-concurrent.db")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	serverCount := 16
+	localServers := make([]Server, 0, serverCount)
+	localStatus := make(map[string]*ServerStatus, serverCount)
+	for i := 0; i < serverCount; i++ {
+		name := fmt.Sprintf("srv-bulk-%02d", i)
+		s := Server{Name: name, Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+		localServers = append(localServers, s)
+		localStatus[name] = &ServerStatus{Name: name, Status: "idle", Upgradable: []string{}}
+	}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = localServers
+		statusMap = localStatus
+	}()
+
+	origDial := dialSSHConnection
+	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return &slowSSHConnection{delay: 2 * time.Second}, nil
+	}
+	t.Cleanup(func() { dialSSHConnection = origDial })
+	t.Setenv(sshCommandTimeoutSecondsEnv, "1")
+	t.Setenv(retryMaxAttemptsEnv, "1")
+
+	var wg sync.WaitGroup
+	type result struct {
+		name string
+		code int
+		body string
+	}
+	resultsCh := make(chan result, serverCount)
+	for _, s := range localServers {
+		wg.Add(1)
+		go func(serverName string) {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/update/"+serverName, nil)
+			req.AddCookie(sessionCookie)
+			handler.ServeHTTP(rec, req)
+			resultsCh <- result{name: serverName, code: rec.Code, body: rec.Body.String()}
+		}(s.Name)
+	}
+	wg.Wait()
+	close(resultsCh)
+
+	for res := range resultsCh {
+		if res.code != http.StatusOK {
+			t.Fatalf("bulk update start for %s status = %d, want %d (body=%s)", res.name, res.code, http.StatusOK, res.body)
+		}
 	}
 }

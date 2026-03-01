@@ -138,6 +138,7 @@ const cveLookupCommandTimeout = 20 * time.Second
 const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
 const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
 const postcheckNameAptHealth = "post_apt_health"
+const sqliteBusyTimeoutMS = 5000
 const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
@@ -337,6 +338,19 @@ func getDB() *sql.DB {
 		db, err = sql.Open("sqlite", path)
 		if err != nil {
 			log.Fatalf("Failed to open sqlite db: %v", err)
+		}
+		// Keep a single connection and set a busy timeout to avoid SQLITE_BUSY
+		// errors when multiple API requests concurrently touch sessions/audit.
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
+			log.Fatalf("Failed to set sqlite busy_timeout: %v", err)
+		}
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			log.Fatalf("Failed to set sqlite journal_mode: %v", err)
+		}
+		if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+			log.Fatalf("Failed to set sqlite synchronous mode: %v", err)
 		}
 		_, err = db.Exec(`
 			CREATE TABLE IF NOT EXISTS servers (
