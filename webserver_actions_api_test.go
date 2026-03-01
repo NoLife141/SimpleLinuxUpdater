@@ -93,12 +93,14 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
 
 		server := Server{Name: "srv-update-conflict", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
-		mu.Lock()
-		servers = []Server{server}
-		statusMap = map[string]*ServerStatus{
-			server.Name: {Name: server.Name, Status: "updating", Upgradable: []string{}},
-		}
-		mu.Unlock()
+		func() {
+			mu.Lock()
+			defer mu.Unlock()
+			servers = []Server{server}
+			statusMap = map[string]*ServerStatus{
+				server.Name: {Name: server.Name, Status: "updating", Upgradable: []string{}},
+			}
+		}()
 
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
@@ -122,18 +124,20 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	server := Server{Name: "srv-approval-route", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
 	pending := []PendingUpdate{{Package: "openssl", Security: true}}
 
-	mu.Lock()
-	servers = []Server{server}
-	statusMap = map[string]*ServerStatus{
-		server.Name: {
-			Name:           server.Name,
-			Status:         "pending_approval",
-			Upgradable:     []string{"openssl"},
-			PendingUpdates: clonePendingUpdates(pending),
-			Logs:           "pending",
-		},
-	}
-	mu.Unlock()
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
 
 	approveRec := httptest.NewRecorder()
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
@@ -142,9 +146,12 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	if approveRec.Code != http.StatusOK {
 		t.Fatalf("approve status = %d, want %d (body=%s)", approveRec.Code, http.StatusOK, approveRec.Body.String())
 	}
-	mu.Lock()
-	approvedStatus := statusMap[server.Name]
-	mu.Unlock()
+	var approvedStatus *ServerStatus
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		approvedStatus = statusMap[server.Name]
+	}()
 	if approvedStatus == nil || approvedStatus.Status != "approved" {
 		t.Fatalf("status after approve = %+v, want approved", approvedStatus)
 	}
@@ -157,14 +164,16 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 		t.Fatalf("approve conflict status = %d, want %d (body=%s)", approveAgainRec.Code, http.StatusConflict, approveAgainRec.Body.String())
 	}
 
-	mu.Lock()
-	status := statusMap[server.Name]
-	status.Status = "pending_approval"
-	status.ApprovalScope = ""
-	status.Upgradable = []string{"openssl"}
-	status.PendingUpdates = clonePendingUpdates(pending)
-	status.Logs = "pending"
-	mu.Unlock()
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		status := statusMap[server.Name]
+		status.Status = "pending_approval"
+		status.ApprovalScope = ""
+		status.Upgradable = []string{"openssl"}
+		status.PendingUpdates = clonePendingUpdates(pending)
+		status.Logs = "pending"
+	}()
 
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
@@ -173,9 +182,12 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	if cancelRec.Code != http.StatusOK {
 		t.Fatalf("cancel status = %d, want %d (body=%s)", cancelRec.Code, http.StatusOK, cancelRec.Body.String())
 	}
-	mu.Lock()
-	cancelledStatus := statusMap[server.Name]
-	mu.Unlock()
+	var cancelledStatus *ServerStatus
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		cancelledStatus = statusMap[server.Name]
+	}()
 	if cancelledStatus == nil || cancelledStatus.Status != "cancelled" {
 		t.Fatalf("status after cancel = %+v, want cancelled", cancelledStatus)
 	}

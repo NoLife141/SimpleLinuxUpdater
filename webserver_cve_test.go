@@ -24,6 +24,18 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool, mes
 	t.Fatalf("timed out waiting: %s", message)
 }
 
+func makeDialSSHValidator(expected Server, calls *int32, first sshConnection, subsequent sshConnection) func(Server, *ssh.ClientConfig) (sshConnection, error) {
+	return func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if s.Name != expected.Name || s.Host != expected.Host || s.Port != expected.Port || s.User != expected.User {
+			return nil, errors.New("unexpected server dial")
+		}
+		if atomic.AddInt32(calls, 1) == 1 {
+			return first, nil
+		}
+		return subsequent, nil
+	}
+}
+
 func TestParseUpgradableEntriesStructured(t *testing.T) {
 	stdout := "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n" +
 		"Inst bash [5.2-1] (5.2-2 Debian:12 [amd64])\n"
@@ -279,15 +291,7 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
-			return nil, errors.New("unexpected server dial")
-		}
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
@@ -388,15 +392,7 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
-			return nil, errors.New("unexpected server dial")
-		}
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
@@ -519,15 +515,7 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 
 	origDial := dialSSHConnection
 	var dialCalls int32
-	dialSSHConnection = func(s Server, _ *ssh.ClientConfig) (sshConnection, error) {
-		if s.Name != server.Name || s.Host != server.Host || s.Port != server.Port || s.User != server.User {
-			return nil, errors.New("unexpected server dial")
-		}
-		if atomic.AddInt32(&dialCalls, 1) == 1 {
-			return updateConn, nil
-		}
-		return cveConn, nil
-	}
+	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
 	t.Cleanup(func() { dialSSHConnection = origDial })
 
 	done := make(chan struct{})
