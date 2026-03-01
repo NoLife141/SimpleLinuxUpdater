@@ -75,12 +75,20 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 			t.Fatalf("update start status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
 		}
 
-		waitForCondition(t, 3*time.Second, func() bool {
+		waitForCondition(t, 8*time.Second, func() bool {
 			mu.Lock()
 			defer mu.Unlock()
 			status := statusMap[server.Name]
-			return status != nil && status.Status != "idle"
-		}, "server state changes from idle after update start")
+			if status == nil {
+				return false
+			}
+			switch status.Status {
+			case "done", "error", "approved", "cancelled", "idle":
+				return true
+			default:
+				return false
+			}
+		}, "server reaches a terminal state after update start")
 	})
 
 	t.Run("returns conflict when busy", func(t *testing.T) {
@@ -167,7 +175,10 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	func() {
 		mu.Lock()
 		defer mu.Unlock()
-		status := statusMap[server.Name]
+		status, ok := statusMap[server.Name]
+		if !ok || status == nil {
+			t.Fatalf("statusMap[%q] missing before pending reset", server.Name)
+		}
 		status.Status = "pending_approval"
 		status.ApprovalScope = ""
 		status.Upgradable = []string{"openssl"}

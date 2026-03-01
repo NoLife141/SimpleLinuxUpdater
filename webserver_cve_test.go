@@ -421,6 +421,9 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("timed out waiting for update flow to finish")
 	}
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
+	}
 
 	mu.Lock()
 	final := statusMap[server.Name]
@@ -542,5 +545,8 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 	case <-done:
 	case <-time.After(8 * time.Second):
 		t.Fatal("timed out waiting for update flow to exit")
+	}
+	if got := atomic.LoadInt32(&dialCalls); got != 2 {
+		t.Fatalf("dialSSHConnection calls = %d, want 2", got)
 	}
 }

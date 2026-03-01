@@ -8,8 +8,8 @@ let serverCache = {};
         let auditPage = 1;
         let auditPageSize = 20;
             let auditTotal = 0;
-            let hostKeyModalResolve = null;
             let hostKeyModalPromise = null;
+            let hostKeyModalResolvers = [];
             let editSaveInProgress = false;
             let editKnownHostState = { host: '', port: 0, checked: false, alreadyTrusted: false, fingerprint: '' };
             let editKnownHostCheckPromise = null;
@@ -114,10 +114,10 @@ let serverCache = {};
             if (modal) {
                 modal.classList.remove('active');
             }
-            const resolver = hostKeyModalResolve;
-            hostKeyModalResolve = null;
+            const resolvers = hostKeyModalResolvers;
+            hostKeyModalResolvers = [];
             hostKeyModalPromise = null;
-            if (resolver) {
+            for (const resolver of resolvers) {
                 resolver(!!confirmed);
             }
         }
@@ -128,15 +128,14 @@ let serverCache = {};
             if (!modal || !details) {
                 return Promise.resolve(confirm(`Verify SSH host key before trusting:\n\n${hostKeyPromptText(scanned)}`));
             }
-            details.textContent = hostKeyPromptText(scanned);
-            if (hostKeyModalPromise) {
-                return hostKeyModalPromise;
+            if (!hostKeyModalPromise) {
+                details.textContent = hostKeyPromptText(scanned);
+                modal.classList.add('active');
+                hostKeyModalPromise = Promise.resolve(true);
             }
-            modal.classList.add('active');
-            hostKeyModalPromise = new Promise((resolve) => {
-                hostKeyModalResolve = resolve;
+            return new Promise((resolve) => {
+                hostKeyModalResolvers.push(resolve);
             });
-            return hostKeyModalPromise;
         }
 
         async function trustHostKeyFlow(host, port, hooks = {}) {
@@ -674,7 +673,9 @@ let serverCache = {};
                         setEditKnownHostState(host, port, false, false, '');
                         setEditHostKeyStatus(`Known host check failed: ${err.message || 'unknown error'}`);
                     } finally {
-                        setEditKnownHostButtonsState(false);
+                        if (editKnownHostCheckPromise === currentCheck) {
+                            setEditKnownHostButtonsState(false);
+                        }
                     }
                 })();
                 editKnownHostCheckPromise = currentCheck;
@@ -683,6 +684,7 @@ let serverCache = {};
                 } finally {
                     if (editKnownHostCheckPromise === currentCheck) {
                         editKnownHostCheckPromise = null;
+                        setEditKnownHostButtonsState(false);
                     }
                 }
             }
