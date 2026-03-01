@@ -75,6 +75,13 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 			t.Fatalf("update start status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
 		}
 
+		waitForCondition(t, 3*time.Second, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			status := statusMap[server.Name]
+			return status != nil && status.Status != "idle"
+		}, "server leaves idle state after update start")
+
 		waitForCondition(t, 8*time.Second, func() bool {
 			mu.Lock()
 			defer mu.Unlock()
@@ -88,7 +95,7 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 			default:
 				return false
 			}
-		}, "server reaches a terminal state after update start")
+		}, "server returns to terminal state after update start")
 	})
 
 	t.Run("returns conflict when busy", func(t *testing.T) {

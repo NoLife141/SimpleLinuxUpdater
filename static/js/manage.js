@@ -128,14 +128,15 @@ let serverCache = {};
             if (!modal || !details) {
                 return Promise.resolve(confirm(`Verify SSH host key before trusting:\n\n${hostKeyPromptText(scanned)}`));
             }
-            if (!hostKeyModalPromise) {
-                details.textContent = hostKeyPromptText(scanned);
-                modal.classList.add('active');
-                hostKeyModalPromise = Promise.resolve(true);
+            if (hostKeyModalPromise) {
+                return Promise.resolve(false);
             }
-            return new Promise((resolve) => {
-                hostKeyModalResolvers.push(resolve);
+            details.textContent = hostKeyPromptText(scanned);
+            modal.classList.add('active');
+            hostKeyModalPromise = new Promise((resolve) => {
+                hostKeyModalResolvers = [resolve];
             });
+            return hostKeyModalPromise;
         }
 
         async function trustHostKeyFlow(host, port, hooks = {}) {
