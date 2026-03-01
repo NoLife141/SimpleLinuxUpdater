@@ -80,8 +80,8 @@ Environment variables for auth/session:
 Programmatic auth note:
 
 - `POST /api/auth/setup`, `POST /api/auth/login`, and `POST /api/auth/logout` require same-origin host checks:
-  - `Origin` host must match request host
-  - `Referer` host must match request host
+  - At least one of `Origin` or `Referer` must be present
+  - Any provided `Origin`/`Referer` host must match request host
   - `Sec-Fetch-Site: same-origin` is recommended and validated when present
 
 ### Binary (prebuilt release)

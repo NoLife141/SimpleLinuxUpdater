@@ -128,6 +128,12 @@ See [usage.md](usage.md) for behavior details and interpretation of failures.
 
 The app maintains SSH known-hosts entries and can scan/trust a host key from the UI before first connection.
 
+Edit Server also provides **Known host management** actions:
+
+- Check whether the current host/port is already present in `known_hosts`.
+- Clear the matching known-host entry for the current host/port.
+- Save bypasses redundant host-key trust prompts when the same host/port was already confirmed as trusted in the active edit session.
+
 Override search path:
 
 - `DEBIAN_UPDATER_KNOWN_HOSTS` (colon-separated paths)
@@ -142,5 +148,5 @@ Default behavior:
 For Docker, `.env` is not automatically loaded unless you pass it:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.6
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
 ```

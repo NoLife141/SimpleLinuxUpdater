@@ -1343,6 +1343,17 @@ func parseFailedSystemdUnits(output string) []string {
 	return units
 }
 
+func summarizeUnitNames(units []string, maxShown int) string {
+	if len(units) == 0 {
+		return ""
+	}
+	if maxShown <= 0 || maxShown >= len(units) {
+		return strings.Join(units, ", ")
+	}
+	remaining := len(units) - maxShown
+	return fmt.Sprintf("%s (+%d more)", strings.Join(units[:maxShown], ", "), remaining)
+}
+
 func listFailedSystemdUnits(client sshConnection) ([]string, string, error) {
 	stdout, stderr, err := runSSHCommand(client, postcheckFailedUnitsCmd, nil)
 	output := compactCommandOutput(stdout, stderr)
@@ -2764,7 +2775,11 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					preUpdateFailedUnitsMap[unit] = struct{}{}
 				}
 				if len(preUpdateFailedUnits) > 0 {
-					r.appendStatusLog(fmt.Sprintf("\nDetected %d pre-existing failed systemd unit(s) before upgrade.", len(preUpdateFailedUnits)))
+					r.appendStatusLog(fmt.Sprintf(
+						"\nDetected %d pre-existing failed systemd unit(s) before upgrade: %s.",
+						len(preUpdateFailedUnits),
+						summarizeUnitNames(preUpdateFailedUnits, 6),
+					))
 				}
 			}
 
@@ -3494,8 +3509,12 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 
 func getGlobalKey() string {
 	db := getDB()
-	runtimeStateMu.RLock()
-	defer runtimeStateMu.RUnlock()
+	getCached := func() string {
+		globalKeyMu.RLock()
+		cached := globalKey
+		globalKeyMu.RUnlock()
+		return cached
+	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		var enc string
 		err := db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
@@ -3510,20 +3529,18 @@ func getGlobalKey() string {
 				time.Sleep(75 * time.Millisecond)
 				continue
 			}
-			globalKeyMu.RLock()
-			cached := globalKey
-			globalKeyMu.RUnlock()
+			cached := getCached()
 			log.Printf("Failed to load global SSH key: %v", err)
 			if strings.TrimSpace(cached) != "" {
 				log.Printf("Using cached global SSH key due to read failure")
 			}
 			return cached
 		}
+		// Do not hold runtimeStateMu while decrypting; decrypt may initialize
+		// encryption key and require runtimeStateMu write access.
 		key, decErr := decryptSecret(enc)
 		if decErr != nil {
-			globalKeyMu.RLock()
-			cached := globalKey
-			globalKeyMu.RUnlock()
+			cached := getCached()
 			log.Printf("Failed to decrypt global SSH key: %v", decErr)
 			if strings.TrimSpace(cached) != "" {
 				log.Printf("Using cached global SSH key due to decrypt failure")
@@ -3868,6 +3885,94 @@ func appendKnownHostLine(line string) (bool, error) {
 	return true, nil
 }
 
+func knownHostLineExists(line string) (bool, error) {
+	cleanLine := strings.TrimSpace(line)
+	if cleanLine == "" {
+		return false, errors.New("empty known_hosts line")
+	}
+	path, err := knownHostsWritePath()
+	if err != nil {
+		return false, err
+	}
+
+	knownHostsMu.Lock()
+	defer knownHostsMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read known_hosts: %w", err)
+	}
+	return strings.Contains("\n"+string(data)+"\n", "\n"+cleanLine+"\n"), nil
+}
+
+func removeKnownHostEntries(host string, port int) (int, error) {
+	token := knownHostsHostToken(host, port)
+	if strings.TrimSpace(token) == "" {
+		return 0, errors.New("host is required")
+	}
+	path, err := knownHostsWritePath()
+	if err != nil {
+		return 0, err
+	}
+
+	knownHostsMu.Lock()
+	defer knownHostsMu.Unlock()
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read known_hosts: %w", err)
+	}
+
+	content := strings.ReplaceAll(string(data), "\r\n", "\n")
+	lines := strings.Split(content, "\n")
+	kept := make([]string, 0, len(lines))
+	removed := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			kept = append(kept, line)
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			kept = append(kept, line)
+			continue
+		}
+		hostsField := fields[0]
+		matched := false
+		for _, hostToken := range strings.Split(hostsField, ",") {
+			if strings.TrimSpace(hostToken) == token {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			removed++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+
+	updated := strings.Join(kept, "\n")
+	updated = strings.TrimRight(updated, "\n")
+	if updated != "" {
+		updated += "\n"
+	}
+	if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+		return 0, fmt.Errorf("write known_hosts: %w", err)
+	}
+	return removed, nil
+}
+
 func scanHostKey(host string, port int) (ssh.PublicKey, error) {
 	cleanHost := strings.TrimSpace(host)
 	if cleanHost == "" {
@@ -3909,24 +4014,6 @@ func scanHostKey(host string, port int) (ssh.PublicKey, error) {
 
 func buildKnownHostsLine(host string, port int, key ssh.PublicKey) string {
 	return knownhosts.Line([]string{knownHostsHostToken(host, port)}, key)
-}
-
-func isHostKeyTrusted(host string, port int, key ssh.PublicKey) (bool, error) {
-	cb, err := getHostKeyCallback()
-	if err != nil {
-		return false, err
-	}
-	hostToken := knownHostsHostToken(host, port)
-	addr := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: normalizePort(port)}
-	err = cb(hostToken, addr, key)
-	if err == nil {
-		return true, nil
-	}
-	var keyErr *knownhosts.KeyError
-	if errors.As(err, &keyErr) {
-		return false, nil
-	}
-	return false, err
 }
 
 func trustHostKey(host string, port int, expectedFingerprint string) (string, string, bool, error) {
@@ -4468,8 +4555,9 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
 			return
 		}
+		line := buildKnownHostsLine(host, port, key)
 		alreadyTrusted := false
-		if trusted, trustedErr := isHostKeyTrusted(host, port, key); trustedErr == nil {
+		if trusted, trustedErr := knownHostLineExists(line); trustedErr == nil {
 			alreadyTrusted = trusted
 		} else {
 			log.Printf("hostkey.scan trusted-check failed for %s:%d: %v", host, port, trustedErr)
@@ -4480,7 +4568,7 @@ func setupRouter() (*gin.Engine, error) {
 			"port":               port,
 			"algorithm":          key.Type(),
 			"fingerprint_sha256": ssh.FingerprintSHA256(key),
-			"known_hosts_line":   buildKnownHostsLine(host, port, key),
+			"known_hosts_line":   line,
 			"already_trusted":    alreadyTrusted,
 		})
 	})
@@ -4532,6 +4620,42 @@ func setupRouter() (*gin.Engine, error) {
 			"fingerprint_sha256": fingerprint,
 			"known_hosts_line":   line,
 			"already_trusted":    alreadyTrusted,
+		})
+	})
+
+	r.POST("/api/hostkeys/clear", func(c *gin.Context) {
+		var req struct {
+			Host string `json:"host"`
+			Port int    `json:"port"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			audit(c, "hostkey.clear", "hostkey", "-", "failure", "Invalid request payload", nil)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		host := strings.TrimSpace(req.Host)
+		if host == "" {
+			audit(c, "hostkey.clear", "hostkey", "-", "failure", "Host is required", nil)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "host is required"})
+			return
+		}
+		port := normalizePort(req.Port)
+		removed, err := removeKnownHostEntries(host, port)
+		if err != nil {
+			audit(c, "hostkey.clear", "hostkey", host, "failure", "Failed to clear host key entry", map[string]any{"port": port, "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clear host key: %v", err)})
+			return
+		}
+		message := "Known host entry not found"
+		if removed > 0 {
+			message = "Known host entry cleared"
+		}
+		audit(c, "hostkey.clear", "hostkey", host, "success", message, map[string]any{"port": port, "removed_entries": removed})
+		c.JSON(http.StatusOK, gin.H{
+			"message":         message,
+			"host":            host,
+			"port":            port,
+			"removed_entries": removed,
 		})
 	})
 

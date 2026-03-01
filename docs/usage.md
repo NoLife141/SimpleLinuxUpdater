@@ -61,6 +61,12 @@ In the Add/Edit server form, use "Trust SSH host key now" to:
 
 This helps avoid first-connection failures due to unknown host keys.
 
+In Edit Server, use **Known host management** to:
+
+- Check whether the current host/port is already saved in `known_hosts`.
+- Clear an existing known-host entry for the current host/port (for key rotation/replacement).
+- Avoid redundant trust prompts on Save when the same host/port was already confirmed as trusted in that edit session.
+
 ## Run updates with approval
 
 Typical workflow:

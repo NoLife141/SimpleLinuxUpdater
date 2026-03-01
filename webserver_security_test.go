@@ -303,6 +303,148 @@ func TestTrustHostKeyFingerprintMismatch(t *testing.T) {
 	}
 }
 
+func TestKnownHostLineExists(t *testing.T) {
+	tmpDir := t.TempDir()
+	knownHosts := filepath.Join(tmpDir, "known_hosts")
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHosts)
+
+	line := "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMockKnownHostLine1234567890"
+	exists, err := knownHostLineExists(line)
+	if err != nil {
+		t.Fatalf("knownHostLineExists() unexpected error: %v", err)
+	}
+	if exists {
+		t.Fatalf("knownHostLineExists() = true before write, want false")
+	}
+
+	added, err := appendKnownHostLine(line)
+	if err != nil {
+		t.Fatalf("appendKnownHostLine() unexpected error: %v", err)
+	}
+	if !added {
+		t.Fatalf("appendKnownHostLine() = false, want true on first append")
+	}
+
+	exists, err = knownHostLineExists(line)
+	if err != nil {
+		t.Fatalf("knownHostLineExists() after append unexpected error: %v", err)
+	}
+	if !exists {
+		t.Fatalf("knownHostLineExists() = false after append, want true")
+	}
+}
+
+func TestRemoveKnownHostEntries(t *testing.T) {
+	tmpDir := t.TempDir()
+	knownHosts := filepath.Join(tmpDir, "known_hosts")
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHosts)
+
+	content := strings.Join([]string{
+		"example.com ssh-ed25519 AAAAEXAMPLE",
+		"[example.com]:2222 ssh-ed25519 AAAAEXAMPLE2222",
+		"other.example ssh-ed25519 AAAAOTHER",
+	}, "\n") + "\n"
+	if err := os.WriteFile(knownHosts, []byte(content), 0600); err != nil {
+		t.Fatalf("WriteFile() unexpected error: %v", err)
+	}
+
+	removed, err := removeKnownHostEntries("example.com", 22)
+	if err != nil {
+		t.Fatalf("removeKnownHostEntries(port22) unexpected error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removeKnownHostEntries(port22) removed=%d, want 1", removed)
+	}
+
+	removed, err = removeKnownHostEntries("example.com", 2222)
+	if err != nil {
+		t.Fatalf("removeKnownHostEntries(port2222) unexpected error: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removeKnownHostEntries(port2222) removed=%d, want 1", removed)
+	}
+
+	raw, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatalf("ReadFile() unexpected error: %v", err)
+	}
+	updated := string(raw)
+	if strings.Contains(updated, "example.com ssh-ed25519 AAAAEXAMPLE") {
+		t.Fatalf("port 22 entry still present after clear")
+	}
+	if strings.Contains(updated, "[example.com]:2222 ssh-ed25519 AAAAEXAMPLE2222") {
+		t.Fatalf("port 2222 entry still present after clear")
+	}
+	if !strings.Contains(updated, "other.example ssh-ed25519 AAAAOTHER") {
+		t.Fatalf("unrelated entry unexpectedly removed")
+	}
+
+	removed, err = removeKnownHostEntries("example.com", 22)
+	if err != nil {
+		t.Fatalf("removeKnownHostEntries(no-op) unexpected error: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removeKnownHostEntries(no-op) removed=%d, want 0", removed)
+	}
+}
+
+func TestGetGlobalKeyDoesNotDeadlockWhenEncryptionKeyIsCold(t *testing.T) {
+	preserveDBState(t)
+	preserveEncryptionState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "global-key.db"))
+
+	want := "-----BEGIN PRIVATE KEY-----\nmock\n-----END PRIVATE KEY-----"
+	enc, err := encryptSecret(want)
+	if err != nil {
+		t.Fatalf("encryptSecret() unexpected error: %v", err)
+	}
+	if _, err := getDB().Exec(
+		"INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		globalKeySetting,
+		enc,
+	); err != nil {
+		t.Fatalf("insert global key setting unexpected error: %v", err)
+	}
+
+	globalKeyMu.Lock()
+	globalKey = ""
+	globalKeyMu.Unlock()
+	runtimeStateMu.Lock()
+	encryptionKey = nil
+	keyOnce = sync.Once{}
+	runtimeStateMu.Unlock()
+
+	resultCh := make(chan string, 1)
+	go func() {
+		resultCh <- getGlobalKey()
+	}()
+
+	select {
+	case got := <-resultCh:
+		if got != want {
+			t.Fatalf("getGlobalKey() = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("getGlobalKey() timed out; possible deadlock")
+	}
+}
+
+func TestSummarizeUnitNames(t *testing.T) {
+	units := []string{"a.service", "b.service", "c.service"}
+	if got := summarizeUnitNames(units, 0); got != "a.service, b.service, c.service" {
+		t.Fatalf("summarizeUnitNames(max=0) = %q", got)
+	}
+	if got := summarizeUnitNames(units, 3); got != "a.service, b.service, c.service" {
+		t.Fatalf("summarizeUnitNames(max=3) = %q", got)
+	}
+	if got := summarizeUnitNames(units, 2); got != "a.service, b.service (+1 more)" {
+		t.Fatalf("summarizeUnitNames(max=2) = %q", got)
+	}
+	if got := summarizeUnitNames(nil, 2); got != "" {
+		t.Fatalf("summarizeUnitNames(nil) = %q, want empty", got)
+	}
+}
+
 func TestKnownHostsPathsDefaultUsesDataDir(t *testing.T) {
 	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", "")
 	tmpDir := t.TempDir()

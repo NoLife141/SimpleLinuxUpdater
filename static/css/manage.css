@@ -470,6 +470,21 @@
             border-top: 1px dashed rgba(255, 255, 255, 0.18);
         }
 
+        .known-host-section {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px dashed rgba(255, 255, 255, 0.18);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .known-host-section p {
+            margin: 0;
+            width: 100%;
+        }
+
         .key-section .file-btn {
             width: 100%;
             display: block;

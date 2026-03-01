@@ -15,7 +15,7 @@
 - Web server: Go + Gin, server-rendered templates
 - SSH layer: connects to targets and executes commands (per-action sessions)
 - State: in-memory status map for live UI, persisted server config in SQLite
-- UI: Status/Manage/Observability pages backed by JSON APIs
+- UI: Status/Manage/Observability/Admin pages backed by JSON APIs
 
 ## Data storage
 

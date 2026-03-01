@@ -159,7 +159,7 @@
                     <input type="password" id="edit-pass" placeholder="New password">
                 </div>
                 <div class="field full-width">
-                    <label class="checkbox-inline"><input type="checkbox" id="edit-trust-host-key" checked> Trust SSH host key now (confirm fingerprint)</label>
+                    <label class="checkbox-inline"><input type="checkbox" id="edit-trust-host-key" checked> Trust SSH host key on save when missing (confirm fingerprint)</label>
                 </div>
                 <div class="field">
                     <label>&nbsp;</label>
@@ -171,6 +171,12 @@
                     <label class="file-btn small" for="edit-key">Click to upload key</label>
                     <button class="btn-success" id="edit-upload-key">Upload Key</button>
                     <button class="btn-danger" id="edit-clear-key">Clear Key</button>
+                </div>
+                <div class="known-host-section full-width">
+                    <div class="subtle">Known host management</div>
+                    <p class="subtle">Checks and clears known_hosts for the current host and SSH port in this form.</p>
+                    <button class="btn-ghost" id="edit-check-known-host" type="button">Check Known Host</button>
+                    <button class="btn-danger" id="edit-clear-known-host" type="button">Clear Known Host</button>
                 </div>
                 <div id="edit-hostkey-status" class="subtle full-width" aria-live="polite"></div>
             </div>
