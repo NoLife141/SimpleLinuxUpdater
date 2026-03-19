@@ -308,11 +308,11 @@ func TestRunUpdateWithActorPrecheckFailureStopsBeforeAptUpdate(t *testing.T) {
 			precheckDiskSpaceCmd: {stdout: "1024\n2048000\n"},
 		},
 	}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	runUpdateWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 

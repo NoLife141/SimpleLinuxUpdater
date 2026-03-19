@@ -179,11 +179,11 @@ func TestRunUpdateWithActorPostcheckBlockingFailureSetsError(t *testing.T) {
 			},
 		},
 	}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	done := make(chan struct{})
 	go func() {

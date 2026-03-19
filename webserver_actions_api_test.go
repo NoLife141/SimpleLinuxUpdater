@@ -61,11 +61,11 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 			}
 		}()
 
-		origDial := dialSSHConnection
-		dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		origDial := getDialSSHConnection()
+		setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 			return &slowSSHConnection{delay: 3 * time.Second}, nil
-		}
-		t.Cleanup(func() { dialSSHConnection = origDial })
+		})
+		t.Cleanup(func() { setDialSSHConnection(origDial) })
 		t.Setenv(sshCommandTimeoutSecondsEnv, "1")
 		t.Setenv(retryMaxAttemptsEnv, "1")
 
@@ -255,11 +255,11 @@ func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 		statusMap = localStatus
 	}()
 
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return &slowSSHConnection{delay: 2 * time.Second}, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 	t.Setenv(sshCommandTimeoutSecondsEnv, "1")
 	t.Setenv(retryMaxAttemptsEnv, "1")
 

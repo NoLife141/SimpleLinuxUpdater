@@ -84,11 +84,11 @@ func TestRunUpdateWithActorCommandTimeoutSetsError(t *testing.T) {
 			aptUpdateCmd:            {delay: 3 * time.Second},
 		},
 	}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	runUpdateWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 
@@ -131,11 +131,11 @@ func TestRunAutoremoveWithActorCommandTimeoutSetsError(t *testing.T) {
 	mu.Unlock()
 
 	conn := &slowSSHConnection{delay: 3 * time.Second}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	runAutoremoveWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 
@@ -163,11 +163,11 @@ func TestRunSudoersBootstrapWithActorCommandTimeoutSetsError(t *testing.T) {
 	mu.Unlock()
 
 	conn := &slowSSHConnection{delay: 3 * time.Second}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	runSudoersBootstrapWithActor(server, "pw", "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 
@@ -195,11 +195,11 @@ func TestRunSudoersDisableWithActorCommandTimeoutSetsError(t *testing.T) {
 	mu.Unlock()
 
 	conn := &slowSSHConnection{delay: 3 * time.Second}
-	origDial := dialSSHConnection
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		return conn, nil
-	}
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	runSudoersDisableWithActor(server, "pw", "tester", "127.0.0.1", loadRetryPolicyFromEnv())
 
