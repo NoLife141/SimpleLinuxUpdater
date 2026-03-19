@@ -60,8 +60,8 @@ func (c *fakeSSHConnection) Close() error {
 }
 
 func TestRetryReconnectsSSHConnectionBeforeSecondAttempt(t *testing.T) {
-	origDial := dialSSHConnection
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	origDial := getDialSSHConnection()
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	firstConn := &fakeSSHConnection{
 		sessionFactory: func() sshSessionRunner {
@@ -78,18 +78,19 @@ func TestRetryReconnectsSSHConnectionBeforeSecondAttempt(t *testing.T) {
 	}
 
 	dialCalls := 0
-	dialSSHConnection = func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
 		dialCalls++
 		if dialCalls == 1 {
 			return firstConn, nil
 		}
 		return secondConn, nil
-	}
+	})
 
 	server := Server{Name: "srv", Host: "example.org", Port: 22}
 	var conn sshConnection
 	var err error
-	conn, err = dialSSHConnection(server, nil)
+	dial := getDialSSHConnection()
+	conn, err = dial(server, nil)
 	if err != nil {
 		t.Fatalf("initial dial failed: %v", err)
 	}

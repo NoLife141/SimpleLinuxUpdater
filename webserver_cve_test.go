@@ -289,10 +289,10 @@ func TestRunUpdateWithActorCVEEnrichmentReadyAndClearedOnCancel(t *testing.T) {
 		},
 	}
 
-	origDial := dialSSHConnection
+	origDial := getDialSSHConnection()
 	var dialCalls int32
-	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	done := make(chan struct{})
 	go func() {
@@ -390,10 +390,10 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 		},
 	}
 
-	origDial := dialSSHConnection
+	origDial := getDialSSHConnection()
 	var dialCalls int32
-	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	done := make(chan struct{})
 	go func() {
@@ -516,10 +516,10 @@ func TestRunUpdateWithActorCVEEnrichmentUnavailable(t *testing.T) {
 		},
 	}
 
-	origDial := dialSSHConnection
+	origDial := getDialSSHConnection()
 	var dialCalls int32
-	dialSSHConnection = makeDialSSHValidator(server, &dialCalls, updateConn, cveConn)
-	t.Cleanup(func() { dialSSHConnection = origDial })
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
 	done := make(chan struct{})
 	go func() {

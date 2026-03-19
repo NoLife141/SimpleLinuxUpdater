@@ -279,12 +279,39 @@ func (c *realSSHConnection) Close() error {
 	return c.client.Close()
 }
 
+var dialSSHConnectionMu sync.RWMutex
 var dialSSHConnection = func(server Server, config *ssh.ClientConfig) (sshConnection, error) {
 	client, err := ssh.Dial("tcp", net.JoinHostPort(server.Host, strconv.Itoa(normalizePort(server.Port))), config)
 	if err != nil {
 		return nil, err
 	}
 	return &realSSHConnection{client: client}, nil
+}
+
+func getDialSSHConnection() func(Server, *ssh.ClientConfig) (sshConnection, error) {
+	dialSSHConnectionMu.RLock()
+	defer dialSSHConnectionMu.RUnlock()
+	return dialSSHConnection
+}
+
+func setDialSSHConnection(fn func(Server, *ssh.ClientConfig) (sshConnection, error)) {
+	dialSSHConnectionMu.Lock()
+	defer dialSSHConnectionMu.Unlock()
+	dialSSHConnection = fn
+}
+
+var updateRunnerWG sync.WaitGroup
+
+func startUpdateRunner(server Server, actor, clientIP string, policy RetryPolicy) {
+	updateRunnerWG.Add(1)
+	go func() {
+		defer updateRunnerWG.Done()
+		runUpdateWithActor(server, actor, clientIP, policy)
+	}()
+}
+
+func waitForUpdateRunners() {
+	updateRunnerWG.Wait()
 }
 
 func (e retryableTaggedError) Error() string {
@@ -866,7 +893,8 @@ func reconnectSSHClient(server Server, config *ssh.ClientConfig, clientRef *sshC
 		(*clientRef).Close()
 		*clientRef = nil
 	}
-	conn, err := dialSSHConnection(server, config)
+	dial := getDialSSHConnection()
+	conn, err := dial(server, config)
 	if err != nil {
 		return err
 	}
@@ -892,7 +920,8 @@ func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolic
 		if attemptsUsed != nil {
 			*attemptsUsed += 1
 		}
-		c, dialErr := dialSSHConnection(server, config)
+			dial := getDialSSHConnection()
+			c, dialErr := dial(server, config)
 		if dialErr == nil {
 			if client != nil {
 				_ = client.Close()
@@ -3486,11 +3515,13 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 	configCopy.Auth = append([]ssh.AuthMethod(nil), config.Auth...)
 
 	go func() {
-		cveClient, err := dialSSHConnection(server, &configCopy)
+			dial := getDialSSHConnection()
+			cveClient, err := dial(server, &configCopy)
 		if err != nil {
 			log.Printf("CVE enrichment dial attempt 1 failed for server %q: %v", server.Name, err)
 			time.Sleep(250 * time.Millisecond)
-			cveClient, err = dialSSHConnection(server, &configCopy)
+				dial := getDialSSHConnection()
+				cveClient, err = dial(server, &configCopy)
 			if err != nil {
 				log.Printf("CVE enrichment dial attempt 2 failed for server %q: %v", server.Name, err)
 				for _, pkg := range packages {
@@ -4715,10 +4746,10 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		go runUpdateWithActor(server, actor, ip, retryPolicy)
-		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
-		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
-	})
+			startUpdateRunner(server, actor, ip, retryPolicy)
+			audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
+			c.JSON(http.StatusOK, gin.H{"message": "Update started"})
+		})
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
