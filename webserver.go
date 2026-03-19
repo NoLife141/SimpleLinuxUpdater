@@ -296,8 +296,22 @@ func getDialSSHConnection() func(Server, *ssh.ClientConfig) (sshConnection, erro
 
 func setDialSSHConnection(fn func(Server, *ssh.ClientConfig) (sshConnection, error)) {
 	dialSSHConnectionMu.Lock()
+	defer dialSSHConnectionMu.Unlock()
 	dialSSHConnection = fn
-	dialSSHConnectionMu.Unlock()
+}
+
+var updateRunnerWG sync.WaitGroup
+
+func startUpdateRunner(server Server, actor, clientIP string, policy RetryPolicy) {
+	updateRunnerWG.Add(1)
+	go func() {
+		defer updateRunnerWG.Done()
+		runUpdateWithActor(server, actor, clientIP, policy)
+	}()
+}
+
+func waitForUpdateRunners() {
+	updateRunnerWG.Wait()
 }
 
 func (e retryableTaggedError) Error() string {
@@ -4732,10 +4746,10 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		go runUpdateWithActor(server, actor, ip, retryPolicy)
-		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
-		c.JSON(http.StatusOK, gin.H{"message": "Update started"})
-	})
+			startUpdateRunner(server, actor, ip, retryPolicy)
+			audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
+			c.JSON(http.StatusOK, gin.H{"message": "Update started"})
+		})
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
