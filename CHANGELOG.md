@@ -18,6 +18,28 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.8] - 2026-03-19
+
+### Added
+
+- No entries yet.
+
+### Changed
+
+- Upgrade release dependencies and container/workflow tooling:
+- `golang:1.26.0-alpine` -> `golang:1.26.1-alpine`
+- `docker/setup-buildx-action` `v3` -> `v4`
+- `docker/login-action` `v3` -> `v4`
+- `docker/metadata-action` `v5` -> `v6`
+- `docker/build-push-action` `v6` -> `v7`
+- `github.com/gin-gonic/gin` `v1.11.0` -> `v1.12.0`
+- `golang.org/x/crypto` `v0.48.0` -> `v0.49.0`
+- `modernc.org/sqlite` `v1.46.1` -> `v1.47.0`
+
+### Fixed
+
+- Stabilize race-sensitive update tests by making the SSH dial test hook thread-safe and waiting for background update runners before restoring test dialers.
+
 ## [v0.1.7] - 2026-02-28
 
 ### Added
