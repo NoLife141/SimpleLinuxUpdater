@@ -827,6 +827,11 @@ const LOG_BOTTOM_THRESHOLD = 20;
             closePasswordModal();
         });
 
+        document.getElementById('password-modal-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            document.getElementById('password-modal-submit').click();
+        });
+
         document.getElementById('password-modal-input').addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();

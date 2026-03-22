@@ -4,91 +4,133 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/index.css">
 </head>
 <body>
     <div class="page">
         <header class="hero fade-in">
-            <img class="hero-logo" src="/static/logo.png" alt="Linux updates logo">
-            <h1>SimpleLinuxUpdater</h1>
-            <div class="version-pill">Version v0.1.8</div>
-            <div class="nav">
-                <a class="btn-link" href="/manage">Manage Servers</a>
-                <a class="btn-link" href="/observability">Observability</a>
-                <a class="btn-link" href="/admin">Admin</a>
-                <button class="btn-link" type="button" id="logout-btn">Logout</button>
+            <div class="hero-grid">
+                <div class="hero-brand">
+                    <div class="hero-mark">
+                        <img class="hero-logo" src="/static/logo.png" alt="Linux updates logo">
+                    </div>
+                    <div class="hero-copy">
+                        <div class="hero-kicker">Linux Update Control</div>
+                        <h1>SimpleLinuxUpdater</h1>
+                        <p class="hero-summary">Coordinate package updates, approvals, logs, and sudo workflows from one dark operations surface.</p>
+                        <div class="hero-meta">
+                            <div class="version-pill">Version v0.1.8</div>
+                            <div class="hero-meta-text">SSH orchestration</div>
+                            <div class="hero-meta-text">Approval queue</div>
+                            <div class="hero-meta-text">Live run logs</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="hero-side">
+                    <div class="hero-panel">
+                        <div class="hero-panel-label">Workspace</div>
+                        <div class="hero-panel-value">Status Desk</div>
+                        <p class="subtle">Search the fleet, group by status or tag, and take bulk actions without leaving the main screen.</p>
+                    </div>
+                    <div class="nav">
+                        <a class="btn-link" href="/manage">Manage Servers</a>
+                        <a class="btn-link" href="/observability">Observability</a>
+                        <a class="btn-link" href="/admin">Admin</a>
+                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
+                    </div>
+                </div>
             </div>
         </header>
 
-        <section class="card fade-in">
-            <h2>Server Status</h2>
-            <div class="controls">
-                <input type="text" id="search" placeholder="Search name/host/user/tags">
-                <select id="status-filter">
-                    <option value="">All statuses</option>
-                    <option value="idle">Idle</option>
-                    <option value="updating">Updating</option>
-                    <option value="pending_approval">Pending approval</option>
-                    <option value="upgrading">Upgrading</option>
-                    <option value="autoremove">Autoremove</option>
-                    <option value="done">Done</option>
-                    <option value="error">Error</option>
-                </select>
-                <select id="auth-filter">
-                    <option value="">All auth</option>
-                    <option value="password">Has password</option>
-                    <option value="key">Has key</option>
-                </select>
-                <select id="group-by">
-                    <option value="">No grouping</option>
-                    <option value="status">Group by status</option>
-                    <option value="tag">Group by tag</option>
-                </select>
-                <select id="page-size">
-                    <option value="25">25 per page</option>
-                    <option value="50">50 per page</option>
-                    <option value="100">100 per page</option>
-                </select>
+        <section class="workspace fade-in">
+            <div class="workspace-head">
+                <div>
+                    <div class="section-kicker">Control Surface</div>
+                    <h2>Server Status</h2>
+                </div>
+                <p class="subtle workspace-note">Filter the fleet, launch actions, and inspect live server detail from the same workspace.</p>
             </div>
-            <div class="bulk-actions">
-                <label><input type="checkbox" id="select-all"> Select page</label>
-                <button class="inline-btn" id="bulk-update">Bulk update</button>
-                <button class="inline-btn" id="bulk-approve">Bulk approve</button>
-                <button class="inline-btn" id="bulk-cancel">Bulk cancel</button>
-                <button class="inline-btn" id="bulk-autoremove">Bulk apt autoremove</button>
+
+            <div class="control-strip">
+                <div class="controls">
+                    <input type="text" id="search" placeholder="Search name, host, user, or tags">
+                    <select id="status-filter">
+                        <option value="">All statuses</option>
+                        <option value="idle">Idle</option>
+                        <option value="updating">Updating</option>
+                        <option value="pending_approval">Pending approval</option>
+                        <option value="upgrading">Upgrading</option>
+                        <option value="autoremove">Autoremove</option>
+                        <option value="done">Done</option>
+                        <option value="error">Error</option>
+                    </select>
+                    <select id="auth-filter">
+                        <option value="">All auth</option>
+                        <option value="password">Has password</option>
+                        <option value="key">Has key</option>
+                    </select>
+                    <select id="group-by">
+                        <option value="">No grouping</option>
+                        <option value="status">Group by status</option>
+                        <option value="tag">Group by tag</option>
+                    </select>
+                    <select id="page-size">
+                        <option value="25">25 per page</option>
+                        <option value="50">50 per page</option>
+                        <option value="100">100 per page</option>
+                    </select>
+                </div>
+                <div class="bulk-actions">
+                    <label><input type="checkbox" id="select-all"> Select page</label>
+                    <button class="inline-btn" id="bulk-update">Bulk update</button>
+                    <button class="inline-btn" id="bulk-approve">Bulk approve</button>
+                    <button class="inline-btn" id="bulk-cancel">Bulk cancel</button>
+                    <button class="inline-btn" id="bulk-autoremove">Bulk apt autoremove</button>
+                </div>
             </div>
-            <div class="table-wrap">
-                <table id="servers-table">
-                    <colgroup>
-                        <col data-col-key="select" class="col-select">
-                        <col data-col-key="name" class="col-name">
-                        <col data-col-key="status" class="col-status">
-                        <col data-col-key="actions" class="col-actions">
-                    </colgroup>
-                    <thead>
-                        <tr>
-                            <th class="select-col"></th>
-                            <th class="sortable name-col resizable" data-sort-key="name">
-                                <span class="col-title">Server</span>
-                                <span class="col-resize-handle" data-col-key="name" aria-hidden="true"></span>
-                            </th>
-                            <th class="sortable status-col" data-sort-key="status">
-                                <span class="col-title">Status</span>
-                            </th>
-                            <th class="actions-col resizable">
-                                <span class="col-title">Actions</span>
-                                <span class="col-resize-handle" data-col-key="actions" aria-hidden="true"></span>
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="pagination">
-                <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
-                <span id="page-info" class="subtle"></span>
-                <button class="btn-ghost inline-btn" id="next-page">Next</button>
+
+            <div class="table-shell">
+                <div class="table-shell-head">
+                    <div class="table-shell-title">
+                        <span class="table-shell-label">Fleet View</span>
+                        <span class="table-shell-subtle">Sortable status board with inline actions and live log access.</span>
+                    </div>
+                    <div class="pagination">
+                        <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
+                        <span id="page-info" class="subtle"></span>
+                        <button class="btn-ghost inline-btn" id="next-page">Next</button>
+                    </div>
+                </div>
+                <div class="table-scroll-hint">On smaller screens, swipe horizontally to access all table actions.</div>
+                <div class="table-wrap">
+                    <table id="servers-table">
+                        <colgroup>
+                            <col data-col-key="select" class="col-select">
+                            <col data-col-key="name" class="col-name">
+                            <col data-col-key="status" class="col-status">
+                            <col data-col-key="actions" class="col-actions">
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th class="select-col"></th>
+                                <th class="sortable name-col resizable" data-sort-key="name">
+                                    <span class="col-title">Server</span>
+                                    <span class="col-resize-handle" data-col-key="name" aria-hidden="true"></span>
+                                </th>
+                                <th class="sortable status-col" data-sort-key="status">
+                                    <span class="col-title">Status</span>
+                                </th>
+                                <th class="actions-col resizable">
+                                    <span class="col-title">Actions</span>
+                                    <span class="col-resize-handle" data-col-key="actions" aria-hidden="true"></span>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
             </div>
         </section>
     </div>
@@ -125,17 +167,18 @@
         </div>
     </aside>
 
-    <div class="modal-backdrop" id="password-modal">
-        <div class="modal">
-            <h3 id="password-modal-title">Enter sudo password</h3>
-            <p class="subtle" id="password-modal-message"></p>
-            <input type="password" id="password-modal-input" placeholder="Password">
-            <div class="modal-actions">
-                <button class="btn-ghost inline-btn" id="password-modal-cancel">Cancel</button>
-                <button class="btn-success inline-btn" id="password-modal-submit">Submit</button>
-            </div>
+        <div class="modal-backdrop" id="password-modal">
+            <form class="modal" id="password-modal-form">
+                <h3 id="password-modal-title">Enter sudo password</h3>
+                <p class="subtle" id="password-modal-message"></p>
+                <input type="text" name="username" class="sr-only" tabindex="-1" autocomplete="username" aria-hidden="true">
+                <input type="password" id="password-modal-input" name="password" placeholder="Password" autocomplete="current-password">
+                <div class="modal-actions">
+                    <button class="btn-ghost inline-btn" type="button" id="password-modal-cancel">Cancel</button>
+                    <button class="btn-success inline-btn" type="submit" id="password-modal-submit">Submit</button>
+                </div>
+            </form>
         </div>
-    </div>
 
     <script src="/static/auth.js"></script>
     <script src="/static/js/common.js"></script>
