@@ -4,19 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Manage Servers</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/manage.css">
 </head>
 <body>
     <div class="page">
         <header class="hero fade-in">
-            <h1>Manage Servers</h1>
-            <p class="subtle">Add, edit, and remove servers used by the updater.</p>
-            <div class="nav">
-                <a class="btn-link" href="/">View Status</a>
-                <a class="btn-link" href="/observability">Observability</a>
-                <a class="btn-link" href="/admin">Admin</a>
-                <button class="btn-link" type="button" id="logout-btn">Logout</button>
+            <div class="hero-grid">
+                <div class="hero-copy">
+                    <div class="hero-kicker">Fleet Registry</div>
+                    <h1>Manage Servers</h1>
+                    <p class="subtle hero-summary">Register hosts, tune credentials, rotate keys, and review the activity trail from the same dark operations workflow.</p>
+                </div>
+                <div class="hero-side">
+                    <div class="hero-panel">
+                        <div class="hero-panel-label">Workspace</div>
+                        <div class="hero-panel-value">Server Directory</div>
+                        <p class="subtle">Provision entries, inspect audit activity, and keep SSH access tidy without leaving the page.</p>
+                    </div>
+                    <div class="nav">
+                        <a class="btn-link" href="/">View Status</a>
+                        <a class="btn-link" href="/observability">Observability</a>
+                        <a class="btn-link" href="/admin">Admin</a>
+                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
+                    </div>
+                </div>
             </div>
         </header>
 

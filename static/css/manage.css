@@ -38,7 +38,7 @@ body {
 .hero {
     background: linear-gradient(180deg, var(--card-alt), var(--card));
     border: 1px solid var(--border);
-    padding: 28px 28px 24px;
+    padding: 28px;
     border-radius: 24px;
     box-shadow: var(--shadow);
     margin-bottom: 18px;
@@ -57,13 +57,55 @@ body {
     background: radial-gradient(circle at center, rgba(125, 211, 252, 0.18), transparent 70%);
 }
 
+.hero-grid {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+    gap: 20px;
+    align-items: end;
+}
+
+.hero-copy,
+.hero-side {
+    min-width: 0;
+}
+
+.hero-side {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.hero-kicker,
+.hero-panel-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+}
+
+.hero-kicker::before,
+.hero-panel-label::before {
+    content: "";
+    width: 18px;
+    height: 1px;
+    background: currentColor;
+    opacity: 0.7;
+}
+
 h1, h2 {
     margin: 0 0 12px;
     letter-spacing: -0.02em;
 }
 
 h1 {
-    font-size: 32px;
+    font-size: clamp(2rem, 4vw, 3.2rem);
     font-weight: 700;
 }
 
@@ -76,6 +118,24 @@ h2 {
     color: var(--muted);
     font-size: 14px;
     margin: 0 0 16px;
+}
+
+.hero-summary {
+    margin: 0;
+    max-width: 42rem;
+}
+
+.hero-panel {
+    padding: 18px;
+    border-radius: 20px;
+    border: 1px solid rgba(133, 155, 184, 0.14);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.hero-panel-value {
+    font-size: 1.4rem;
+    font-weight: 700;
+    margin-bottom: 8px;
 }
 
 .card {
@@ -94,7 +154,7 @@ form {
 }
 
 .add-server-form {
-    max-width: 900px;
+    max-width: none;
     grid-template-columns: repeat(4, minmax(180px, 1fr));
 }
 
@@ -182,7 +242,9 @@ input {
     border: 0;
 }
 
-.file-btn {
+.file-btn,
+button,
+.btn-link {
     appearance: none;
     border: 1px solid var(--border);
     background: rgba(10, 17, 28, 0.84);
@@ -191,20 +253,28 @@ input {
     border-radius: 14px;
     font-size: 14px;
     cursor: pointer;
-    transition: border-color 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease;
+    transition: border-color 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease, opacity 0.22s ease;
     box-shadow: none;
+    text-decoration: none;
+}
+
+.file-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
 }
 
-.file-btn:hover { 
+.file-btn:hover,
+button:hover,
+.btn-link:hover,
+select:hover {
     border-color: rgba(125, 211, 252, 0.36);
     transform: translateY(-1px);
     box-shadow: 0 14px 24px rgba(3, 8, 18, 0.24);
 }
 
-input:focus {
+input:focus,
+select:focus {
     border-color: rgba(125, 211, 252, 0.5);
     box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
 }
@@ -226,55 +296,16 @@ select {
     transition: border-color 0.22s ease, box-shadow 0.22s ease;
 }
 
-select:hover,
-button:hover,
-.btn-link:hover {
-    border-color: rgba(125, 211, 252, 0.36);
-    transform: translateY(-1px);
-    box-shadow: 0 14px 24px rgba(3, 8, 18, 0.24);
-}
-
-select:focus {
-    border-color: rgba(125, 211, 252, 0.5);
-    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
-}
-
-button {
-    appearance: none;
-    border: 1px solid var(--border);
-    background: rgba(10, 17, 28, 0.84);
-    color: var(--text);
-    padding: 10px 14px;
-    border-radius: 14px;
-    font-size: 14px;
-    cursor: pointer;
-    transition: border-color 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease, opacity 0.22s ease;
-    box-shadow: none;
-}
-
 button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
 
 .btn-ghost {
     background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text);
-    box-shadow: none;
 }
 
 .btn-link {
-    appearance: none;
-    border: 1px solid var(--border);
-    background: rgba(10, 17, 28, 0.84);
-    color: var(--text);
-    box-shadow: none;
-    text-decoration: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    padding: 10px 14px;
-    border-radius: 14px;
-    font-size: 14px;
-    transition: border-color 0.22s ease, transform 0.22s ease, box-shadow 0.22s ease, opacity 0.22s ease;
 }
 
 .btn-danger {
@@ -290,12 +321,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow
 }
 
 .nav {
-    margin-top: 14px;
     display: flex;
     gap: 10px;
     flex-wrap: wrap;
-    position: relative;
-    z-index: 1;
 }
 
 .key-actions {
@@ -308,28 +336,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow
     margin: 18px 0;
 }
 
-.secret-box {
-    margin-top: 12px;
-    padding: 14px;
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    background: rgba(255, 255, 255, 0.03);
-    display: none;
-}
-
-.secret-box code {
-    display: block;
-    margin: 8px 0 12px;
-    padding: 10px 12px;
-    border-radius: 12px;
-    border: 1px solid var(--border);
-    background: rgba(10, 17, 28, 0.84);
-    color: #dbeafe;
-    word-break: break-all;
-    white-space: pre-wrap;
-}
-
-.controls {
+.controls,
+.audit-controls {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
@@ -337,11 +345,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow
 }
 
 .controls input,
-.controls select {
+.controls select,
+.audit-controls input,
+.audit-controls select {
     min-width: 160px;
 }
 
-.pagination {
+.pagination,
+.audit-pagination {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -405,25 +416,6 @@ th.sortable::after {
 .status-failure { color: #fb7185; }
 .status-started { color: #7dd3fc; }
 .status-ignored { color: #fbbf24; }
-
-.audit-controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 12px;
-}
-
-.audit-controls input,
-.audit-controls select {
-    min-width: 180px;
-}
-
-.audit-pagination {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 12px;
-}
 
 .pill {
     display: inline-flex;
@@ -586,6 +578,7 @@ td button { display: block; margin: 6px 0; width: 100%; }
 }
 
 @media (max-width: 980px) {
+    .hero-grid,
     .add-server-form,
     .form-actions,
     .modal-grid {
@@ -599,6 +592,7 @@ td button { display: block; margin: 6px 0; width: 100%; }
 
 @media (max-width: 720px) {
     .page { padding: 22px 12px 56px; }
+    .hero-grid,
     .modal-grid,
     .add-server-form,
     .form-actions {
