@@ -55,6 +55,7 @@
 
             <div class="control-strip">
                 <div class="controls">
+                    <label class="sr-only" for="search">Search</label>
                     <input type="text" id="search" placeholder="Search name, host, user, or tags">
                     <select id="status-filter">
                         <option value="">All statuses</option>
@@ -84,10 +85,10 @@
                 </div>
                 <div class="bulk-actions">
                     <label><input type="checkbox" id="select-all"> Select page</label>
-                    <button class="inline-btn" id="bulk-update">Bulk update</button>
-                    <button class="inline-btn" id="bulk-approve">Bulk approve</button>
-                    <button class="inline-btn" id="bulk-cancel">Bulk cancel</button>
-                    <button class="inline-btn" id="bulk-autoremove">Bulk apt autoremove</button>
+                    <button class="inline-btn" type="button" id="bulk-update">Bulk update</button>
+                    <button class="inline-btn" type="button" id="bulk-approve">Bulk approve</button>
+                    <button class="inline-btn" type="button" id="bulk-cancel">Bulk cancel</button>
+                    <button class="inline-btn" type="button" id="bulk-autoremove">Bulk apt autoremove</button>
                 </div>
             </div>
 
@@ -98,9 +99,9 @@
                         <span class="table-shell-subtle">Sortable status board with inline actions and live log access.</span>
                     </div>
                     <div class="pagination">
-                        <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
+                        <button class="btn-ghost inline-btn" type="button" id="prev-page">Prev</button>
                         <span id="page-info" class="subtle"></span>
-                        <button class="btn-ghost inline-btn" id="next-page">Next</button>
+                        <button class="btn-ghost inline-btn" type="button" id="next-page">Next</button>
                     </div>
                 </div>
                 <div class="table-scroll-hint">On smaller screens, swipe horizontally to access all table actions.</div>
