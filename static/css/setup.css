@@ -1,12 +1,12 @@
 :root {
     --bg: #070b12;
-    --card: rgba(11, 18, 29, 0.84);
+    --card: rgba(11, 18, 29, 0.82);
     --card-alt: rgba(20, 31, 49, 0.94);
     --text: #ecf3ff;
     --subtle: #8b9db8;
     --accent: #7dd3fc;
     --border: rgba(133, 155, 184, 0.18);
-    --shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+    --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
     --danger: #fb7185;
 }
 

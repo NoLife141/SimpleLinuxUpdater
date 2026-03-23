@@ -772,7 +772,12 @@ const LOG_BOTTOM_THRESHOLD = 20;
         }
 
         async function enablePasswordlessApt(name) {
-            const password = await promptPassword(`Enter sudo password for ${name}`);
+            let password;
+            try {
+                password = await promptPassword(`Enter sudo password for ${name}`);
+            } catch {
+                return;
+            }
             if (!password) return;
             await fetch(`/api/sudoers/${encodeURIComponent(name)}`, {
                 method: 'POST',
@@ -783,7 +788,12 @@ const LOG_BOTTOM_THRESHOLD = 20;
         }
 
         async function disablePasswordlessApt(name) {
-            const password = await promptPassword(`Enter sudo password to disable for ${name}`);
+            let password;
+            try {
+                password = await promptPassword(`Enter sudo password to disable for ${name}`);
+            } catch {
+                return;
+            }
             if (!password) return;
             await fetch(`/api/sudoers/disable/${encodeURIComponent(name)}`, {
                 method: 'POST',
@@ -812,9 +822,18 @@ const LOG_BOTTOM_THRESHOLD = 20;
             backdrop.classList.remove('active');
         }
 
+        function clearPasswordPromptHandlers() {
+            passwordResolve = null;
+            passwordReject = null;
+        }
+
         document.getElementById('password-modal-cancel').addEventListener('click', () => {
-            if (passwordResolve) {
-                passwordResolve('');
+            if (passwordReject) {
+                const reject = passwordReject;
+                clearPasswordPromptHandlers();
+                closePasswordModal();
+                reject(new Error('password prompt cancelled'));
+                return;
             }
             closePasswordModal();
         });
@@ -822,14 +841,26 @@ const LOG_BOTTOM_THRESHOLD = 20;
         document.getElementById('password-modal-submit').addEventListener('click', () => {
             const input = document.getElementById('password-modal-input');
             if (passwordResolve) {
-                passwordResolve(input.value);
+                const resolve = passwordResolve;
+                clearPasswordPromptHandlers();
+                closePasswordModal();
+                resolve(input.value);
+                return;
             }
             closePasswordModal();
         });
 
         document.getElementById('password-modal-form').addEventListener('submit', (e) => {
             e.preventDefault();
-            document.getElementById('password-modal-submit').click();
+            const input = document.getElementById('password-modal-input');
+            if (passwordResolve) {
+                const resolve = passwordResolve;
+                clearPasswordPromptHandlers();
+                closePasswordModal();
+                resolve(input.value);
+                return;
+            }
+            closePasswordModal();
         });
 
         document.getElementById('password-modal-input').addEventListener('keydown', (e) => {

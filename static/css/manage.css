@@ -570,6 +570,8 @@ td button { display: block; margin: 6px 0; width: 100%; }
     border: 1px solid var(--border);
     color: #dbeafe;
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 @keyframes fade-in {

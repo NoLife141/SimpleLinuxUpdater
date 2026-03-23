@@ -57,7 +57,7 @@
                 <div class="controls">
                     <label class="sr-only" for="search">Search</label>
                     <input type="text" id="search" placeholder="Search name, host, user, or tags">
-                    <select id="status-filter">
+                    <select id="status-filter" aria-label="Status">
                         <option value="">All statuses</option>
                         <option value="idle">Idle</option>
                         <option value="updating">Updating</option>
@@ -67,17 +67,17 @@
                         <option value="done">Done</option>
                         <option value="error">Error</option>
                     </select>
-                    <select id="auth-filter">
+                    <select id="auth-filter" aria-label="Authentication">
                         <option value="">All auth</option>
                         <option value="password">Has password</option>
                         <option value="key">Has key</option>
                     </select>
-                    <select id="group-by">
+                    <select id="group-by" aria-label="Group by">
                         <option value="">No grouping</option>
                         <option value="status">Group by status</option>
                         <option value="tag">Group by tag</option>
                     </select>
-                    <select id="page-size">
+                    <select id="page-size" aria-label="Page size">
                         <option value="25">25 per page</option>
                         <option value="50">50 per page</option>
                         <option value="100">100 per page</option>
@@ -173,7 +173,8 @@
                 <h3 id="password-modal-title">Enter sudo password</h3>
                 <p class="subtle" id="password-modal-message"></p>
                 <input type="text" name="username" class="sr-only" tabindex="-1" autocomplete="username" aria-hidden="true">
-                <input type="password" id="password-modal-input" name="password" placeholder="Password" autocomplete="current-password">
+                <label class="sr-only" for="password-modal-input">Sudo password</label>
+                <input type="password" id="password-modal-input" name="password" placeholder="Password" autocomplete="current-password" aria-describedby="password-modal-message">
                 <div class="modal-actions">
                     <button class="btn-ghost inline-btn" type="button" id="password-modal-cancel">Cancel</button>
                     <button class="btn-success inline-btn" type="submit" id="password-modal-submit">Submit</button>
