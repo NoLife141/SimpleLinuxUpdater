@@ -4,19 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Observability</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/observability.css">
 </head>
 <body>
     <div class="page">
         <header class="hero">
-            <h1>Observability</h1>
-            <p class="subtle">Update success rate, average duration, and failure causes over time.</p>
-            <div class="nav">
-                <a class="btn-link" href="/">View Status</a>
-                <a class="btn-link" href="/manage">Manage Servers</a>
-                <a class="btn-link" href="/admin">Admin</a>
-                <button class="btn-link" type="button" id="logout-btn">Logout</button>
+            <div class="hero-grid">
+                <div class="hero-copy">
+                    <div class="hero-kicker">Telemetry Deck</div>
+                    <h1>Observability</h1>
+                    <p class="subtle hero-summary">Track success rate, duration, and failure patterns with the same dark control-room language as the rest of the app.</p>
+                </div>
+                <div class="hero-side">
+                    <div class="hero-panel">
+                        <div class="hero-panel-label">Lens</div>
+                        <div class="hero-panel-value">Update Health</div>
+                        <p class="subtle">Review operational trends and investigate failure shape over the selected time window.</p>
+                    </div>
+                    <div class="nav">
+                        <a class="btn-link" href="/">View Status</a>
+                        <a class="btn-link" href="/manage">Manage Servers</a>
+                        <a class="btn-link" href="/admin">Admin</a>
+                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
+                    </div>
+                </div>
             </div>
         </header>
 

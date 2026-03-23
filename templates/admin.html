@@ -4,19 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Admin</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/admin.css">
 </head>
 <body>
     <div class="page">
         <header class="hero fade-in">
-            <h1>Admin</h1>
-            <p class="subtle">Sensitive operational controls for metrics access and disaster recovery.</p>
-            <div class="nav">
-                <a class="btn-link" href="/">View Status</a>
-                <a class="btn-link" href="/manage">Manage Servers</a>
-                <a class="btn-link" href="/observability">Observability</a>
-                <button class="btn-link" type="button" id="logout-btn">Logout</button>
+            <div class="hero-grid">
+                <div class="hero-copy">
+                    <div class="hero-kicker">Operations Control</div>
+                    <h1>Admin</h1>
+                    <p class="subtle hero-summary">Handle metrics access and disaster-recovery controls with the same restrained operations styling as the main dashboard.</p>
+                </div>
+                <div class="hero-side">
+                    <div class="hero-panel">
+                        <div class="hero-panel-label">Access Tier</div>
+                        <div class="hero-panel-value">Sensitive Controls</div>
+                        <p class="subtle">Token management and encrypted backup workflows live here for deliberate, auditable changes.</p>
+                    </div>
+                    <div class="nav">
+                        <a class="btn-link" href="/">View Status</a>
+                        <a class="btn-link" href="/manage">Manage Servers</a>
+                        <a class="btn-link" href="/observability">Observability</a>
+                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
+                    </div>
+                </div>
             </div>
         </header>
 

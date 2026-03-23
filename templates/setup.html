@@ -4,23 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Setup</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/setup.css">
 </head>
 <body>
-    <main class="card">
-        <h1>Create admin account</h1>
-        <p class="subtle">First-run setup is required. This creates the single local admin user for SimpleLinuxUpdater.</p>
-        <form id="setup-form" autocomplete="on">
-            <label for="username">Username</label>
-            <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
-            <label for="password">Password</label>
-            <input id="password" name="password" type="password" required autocomplete="new-password">
-            <label for="password-confirm">Confirm password</label>
-            <input id="password-confirm" name="password-confirm" type="password" required autocomplete="new-password">
-            <button type="submit">Create account</button>
-        </form>
-        <div id="error-banner" class="error"></div>
+    <main class="auth-shell">
+        <section class="auth-hero">
+            <div class="auth-kicker">First Run Setup</div>
+            <h1>Create admin account</h1>
+            <p class="subtle">Initialize the local operator account that secures SimpleLinuxUpdater on this host.</p>
+        </section>
+        <section class="card">
+            <div class="panel-kicker">Setup</div>
+            <h2>Provision local access</h2>
+            <p class="subtle">This creates the single local admin user used to sign in and operate the updater.</p>
+            <form id="setup-form" autocomplete="on">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" required autocomplete="new-password">
+                <label for="password-confirm">Confirm password</label>
+                <input id="password-confirm" name="password-confirm" type="password" required autocomplete="new-password">
+                <button type="submit">Create account</button>
+            </form>
+            <div id="error-banner" class="error"></div>
+        </section>
     </main>
     <script src="/static/js/common.js"></script>
     <script src="/static/js/setup.js"></script>

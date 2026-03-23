@@ -4,21 +4,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Login</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/css/base.css">
     <link rel="stylesheet" href="/static/css/login.css">
 </head>
 <body>
-    <main class="card">
-        <h1>SimpleLinuxUpdater Login</h1>
-        <p class="subtle">Sign in to manage servers, updates, and observability.</p>
-        <form id="login-form" autocomplete="on">
-            <label for="username">Username</label>
-            <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
-            <label for="password">Password</label>
-            <input id="password" name="password" type="password" required maxlength="64" autocomplete="current-password">
-            <button type="submit">Sign in</button>
-        </form>
-        <div id="error-banner" class="error" role="alert" aria-live="assertive"></div>
+    <main class="auth-shell">
+        <section class="auth-hero">
+            <div class="auth-kicker">Secure Access</div>
+            <h1>SimpleLinuxUpdater</h1>
+            <p class="subtle">Sign in to manage servers, updates, and observability from the same operations workspace.</p>
+        </section>
+        <section class="card">
+            <div class="panel-kicker">Login</div>
+            <h2>Welcome back</h2>
+            <p class="subtle">Use the local admin account created during setup.</p>
+            <form id="login-form" autocomplete="on">
+                <label for="username">Username</label>
+                <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
+                <label for="password">Password</label>
+                <input id="password" name="password" type="password" required maxlength="64" autocomplete="current-password">
+                <button type="submit">Sign in</button>
+            </form>
+            <div id="error-banner" class="error" role="alert" aria-live="assertive"></div>
+        </section>
     </main>
     <script src="/static/js/common.js"></script>
     <script src="/static/js/login.js"></script>
