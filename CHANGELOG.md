@@ -18,6 +18,22 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - No entries yet.
 
+## [v0.1.9] - 2026-03-22
+
+### Added
+
+- No entries yet.
+
+### Changed
+
+- Refresh the app UI with the new ops noir control-room styling across the main dashboard, Manage, Observability, Admin, Login, and Setup pages.
+- Improve layout consistency, hero sections, theme tokens, and responsive presentation across the authenticated and auth/setup surfaces.
+
+### Fixed
+
+- Improve password modal accessibility and submit/cancel handling on the status page.
+- Add follow-up accessibility and lint fixes for homepage controls, select labeling, and host key modal content wrapping.
+
 ## [v0.1.8] - 2026-03-19
 
 ### Added

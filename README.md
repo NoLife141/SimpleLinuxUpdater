@@ -1,6 +1,6 @@
 # SimpleLinuxUpdater
 
-Version: v0.1.8
+Version: v0.1.9
 
 SimpleLinuxUpdater is a self-hosted web UI that helps you manage apt updates on Debian-based servers over SSH. It provides an approval workflow, health checks, audit history, and basic observability so you can update hosts confidently without logging into each machine.
 
@@ -43,8 +43,8 @@ SimpleLinuxUpdater is designed for trusted environments (LAN/VPN). It connects t
 
 ```bash
 cp .env-template .env
-docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.8
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.8
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.9
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.9
 ```
 
 Open `http://localhost:8080`.
@@ -91,7 +91,7 @@ Download the archive for your platform from GitHub Releases and run the included
 Example (Linux amd64):
 
 ```bash
-VERSION="0.1.8"
+VERSION="0.1.9"
 APP="SimpleLinuxUpdater_${VERSION}"
 ARCHIVE="${APP}_linux_amd64.tar.gz"
 
