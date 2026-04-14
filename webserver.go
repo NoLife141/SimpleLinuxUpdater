@@ -4454,8 +4454,8 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/setup", handleSetupPage)
 	r.GET("/login", handleLoginPage)
-	r.POST("/api/auth/setup", handleAuthSetup)
-	r.POST("/api/auth/login", handleAuthLogin)
+	r.POST("/api/auth/setup", sameOriginWriteMiddleware(), handleAuthSetup)
+	r.POST("/api/auth/login", sameOriginWriteMiddleware(), handleAuthLogin)
 	r.GET("/api/auth/status", handleAuthStatus)
 	r.GET("/api/maintenance", handleMaintenanceStatus)
 	r.GET("/metrics", metricsBearerMiddleware(), handleMetrics)
