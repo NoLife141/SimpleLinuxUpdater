@@ -109,9 +109,14 @@ func expireSessionCookie(c *gin.Context) {
 	if sm == nil {
 		return
 	}
+	if sm.Cookie.SameSite == http.SameSiteDefaultMode {
+		c.SetCookie(sm.Cookie.Name, "", -1, sm.Cookie.Path, sm.Cookie.Domain, sm.Cookie.Secure, sm.Cookie.HttpOnly)
+		return
+	}
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     sm.Cookie.Name,
 		Value:    "",
+		Domain:   sm.Cookie.Domain,
 		Path:     sm.Cookie.Path,
 		MaxAge:   -1,
 		HttpOnly: sm.Cookie.HttpOnly,
@@ -647,7 +652,7 @@ func handleBackupExport(c *gin.Context) {
 		Status:    jobStatusRunning,
 		Phase:     jobPhaseSnapshot,
 		Summary:   "Preparing backup export",
-		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		StartedAt: jobTimestampNow(),
 	})
 	if err != nil {
 		if errors.Is(err, errMaintenanceModeActive) {
@@ -658,10 +663,11 @@ func handleBackupExport(c *gin.Context) {
 		return
 	}
 	if err := activateMaintenance(jobKindBackupExport, job.ID, actor, "Backup export in progress. The application will reopen when the encrypted archive is ready."); err != nil {
+		log.Printf("handleBackupExport: activateMaintenance failed for job %q: %v", job.ID, err)
 		status := jobStatusFailed
 		summary := "Failed to activate maintenance mode"
 		errorClass := "maintenance"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -684,7 +690,7 @@ func handleBackupExport(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to snapshot database"
 		errorClass := "snapshot"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -701,7 +707,7 @@ func handleBackupExport(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to read config"
 		errorClass := "config"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -735,7 +741,7 @@ func handleBackupExport(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to build backup payload"
 		errorClass := "archive"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -751,7 +757,7 @@ func handleBackupExport(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to encrypt backup payload"
 		errorClass := "encrypt"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -766,7 +772,7 @@ func handleBackupExport(c *gin.Context) {
 	status := jobStatusSucceeded
 	phase = jobPhaseComplete
 	summary = "Backup export completed"
-	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	finishedAt := jobTimestampNow()
 	meta := marshalJobJSON(map[string]any{
 		"bytes":                len(encrypted),
 		"known_hosts_included": knownHostsIncluded,
@@ -847,7 +853,7 @@ func handleBackupRestore(c *gin.Context) {
 		Status:    jobStatusRunning,
 		Phase:     jobPhaseDecrypt,
 		Summary:   "Restoring backup archive",
-		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		StartedAt: jobTimestampNow(),
 	})
 	if err != nil {
 		if errors.Is(err, errMaintenanceModeActive) {
@@ -861,7 +867,7 @@ func handleBackupRestore(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to activate maintenance mode"
 		errorClass := "maintenance"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -883,7 +889,7 @@ func handleBackupRestore(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to decrypt backup archive"
 		errorClass := "decrypt"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -899,7 +905,7 @@ func handleBackupRestore(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Invalid backup payload"
 		errorClass := "archive"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		_ = jm.UpdateJob(job.ID, JobUpdate{
 			Status:     &status,
 			Summary:    &summary,
@@ -922,7 +928,7 @@ func handleBackupRestore(c *gin.Context) {
 		status := jobStatusFailed
 		summary := "Failed to apply backup files"
 		errorClass := "apply"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		if jm != nil {
 			job.Status = status
 			job.Phase = jobPhaseComplete
@@ -954,7 +960,7 @@ func handleBackupRestore(c *gin.Context) {
 	status := jobStatusSucceeded
 	phase = jobPhaseComplete
 	summary = "Backup restore completed"
-	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	finishedAt := jobTimestampNow()
 	meta := marshalJobJSON(map[string]any{
 		"manifest_files":       len(manifest.Files),
 		"global_key_present":   globalKeyPresent,

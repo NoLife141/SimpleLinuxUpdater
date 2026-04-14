@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -552,6 +553,75 @@ func TestStartPendingUpdateCVEEnrichmentCreatesChildJob(t *testing.T) {
 	}
 	if childStatus != jobStatusSucceeded {
 		t.Fatalf("child CVE job status = %q, want %q", childStatus, jobStatusSucceeded)
+	}
+}
+
+func TestStartPendingUpdateCVEEnrichmentPersistsFailedChildJobOnDialFailure(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "cve-child-job-failure.db"))
+	server := Server{Name: "srv-cve-child-failure", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pendingUpdates := preparePendingUpdatesForCVE([]PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}})
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {
+			Name:           server.Name,
+			Status:         "pending_approval",
+			PendingUpdates: clonePendingUpdates(pendingUpdates),
+		},
+	}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	parentJob, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return nil, errors.New("simulated cve dial failure")
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	startPendingUpdateCVEEnrichment(
+		server,
+		&ssh.ClientConfig{User: server.User, Auth: []ssh.AuthMethod{}},
+		pendingUpdates,
+		parentJob.ID,
+		"tester",
+		"127.0.0.1",
+	)
+
+	waitForUpdateRunners()
+
+	var childStatus, childErrorClass, childMeta string
+	if err := getDB().QueryRow(
+		"SELECT status, error_class, meta_json FROM jobs WHERE kind = ? AND parent_job_id = ? AND server_name = ? LIMIT 1",
+		jobKindCVEEnrichment,
+		parentJob.ID,
+		server.Name,
+	).Scan(&childStatus, &childErrorClass, &childMeta); err != nil {
+		t.Fatalf("query failed child CVE job: %v", err)
+	}
+	if childStatus != jobStatusFailed {
+		t.Fatalf("failed child CVE job status = %q, want %q", childStatus, jobStatusFailed)
+	}
+	if childErrorClass != "dial" {
+		t.Fatalf("failed child CVE job error_class = %q, want %q", childErrorClass, "dial")
+	}
+	if !strings.Contains(childMeta, "simulated cve dial failure") {
+		t.Fatalf("failed child CVE job meta_json = %q, want dial error", childMeta)
 	}
 }
 

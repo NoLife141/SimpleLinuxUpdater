@@ -103,19 +103,19 @@ func activateMaintenance(kind, jobID, actor, message string) error {
 		Actor:     strings.TrimSpace(actor),
 		Message:   strings.TrimSpace(message),
 	}
-	setCurrentMaintenanceState(state)
 	if err := persistMaintenanceState(state); err != nil {
 		return err
 	}
+	setCurrentMaintenanceState(state)
 	return nil
 }
 
 func deactivateMaintenance() error {
 	state := MaintenanceState{}
-	setCurrentMaintenanceState(state)
 	if err := persistMaintenanceState(state); err != nil {
 		return err
 	}
+	setCurrentMaintenanceState(state)
 	return nil
 }
 

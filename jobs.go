@@ -43,6 +43,8 @@ const (
 	jobPhaseDecrypt      = "decrypt"
 	jobPhaseLookup       = "lookup"
 	jobPhaseComplete     = "complete"
+
+	jobTimestampLayout = "2006-01-02T15:04:05.000000000Z"
 )
 
 type JobRecord struct {
@@ -144,6 +146,7 @@ func ensureJobSchema(db *sql.DB) error {
 			error_class TEXT NOT NULL DEFAULT '',
 			retry_policy_json TEXT NOT NULL DEFAULT '{}',
 			meta_json TEXT NOT NULL DEFAULT '{}',
+			-- Fixed-width UTC timestamps keep TEXT ordering chronological.
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL,
 			started_at TEXT NOT NULL DEFAULT '',
@@ -183,6 +186,14 @@ func marshalJobJSON(v any) string {
 	return string(blob)
 }
 
+func formatJobTimestamp(t time.Time) string {
+	return t.UTC().Format(jobTimestampLayout)
+}
+
+func jobTimestampNow() string {
+	return formatJobTimestamp(time.Now())
+}
+
 func (jm *JobManager) CreateJob(params JobCreateParams) (JobRecord, error) {
 	if jm == nil || jm.db == nil {
 		return JobRecord{}, errors.New("job manager is not initialized")
@@ -190,7 +201,7 @@ func (jm *JobManager) CreateJob(params JobCreateParams) (JobRecord, error) {
 	if currentMaintenanceState().Active && params.Kind != jobKindBackupExport && params.Kind != jobKindBackupRestore {
 		return JobRecord{}, errMaintenanceModeActive
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := jobTimestampNow()
 	if strings.TrimSpace(params.Actor) == "" {
 		params.Actor = "unknown"
 	}
@@ -255,7 +266,7 @@ func (jm *JobManager) UpsertJobRecord(record JobRecord) error {
 	if jm == nil || jm.db == nil {
 		return errors.New("job manager is not initialized")
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := jobTimestampNow()
 	if strings.TrimSpace(record.ID) == "" {
 		record.ID = newJobID()
 	}
@@ -323,7 +334,7 @@ func (jm *JobManager) UpdateJob(id string, update JobUpdate) error {
 	if jm == nil || jm.db == nil || strings.TrimSpace(id) == "" {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := jobTimestampNow()
 	setClauses := []string{"updated_at = ?"}
 	args := []any{now}
 	if update.Status != nil {
@@ -481,7 +492,7 @@ func (jm *JobManager) MarkUnfinishedJobsInterrupted() error {
 	if len(affectedJobIDs) == 0 {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := jobTimestampNow()
 	if _, err := jm.db.Exec(`
 		UPDATE jobs
 		   SET status = ?, summary = ?, finished_at = ?, updated_at = ?
@@ -573,7 +584,7 @@ func startJobRunner(jobID string, run func()) {
 	startTrackedActionRunner(func() {
 		jm := currentJobManager()
 		if jm != nil && strings.TrimSpace(jobID) != "" {
-			now := time.Now().UTC().Format(time.RFC3339Nano)
+			now := jobTimestampNow()
 			status := jobStatusRunning
 			if err := jm.UpdateJob(jobID, JobUpdate{
 				Status:    &status,
@@ -589,7 +600,7 @@ func startJobRunner(jobID string, run func()) {
 					status := jobStatusFailed
 					summary := "Runner panicked"
 					errorClass := "panic"
-					finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
 						Summary:    &summary,

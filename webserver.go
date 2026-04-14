@@ -2159,6 +2159,10 @@ func pruneAuditEvents(retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
 	}
+	// Check maintenance before taking backupRestoreMu to avoid unnecessary lock
+	// contention, then re-check after backupRestoreMu.RLock() because maintenance
+	// can become active in the gap between the first currentMaintenanceState()
+	// read and acquiring backupRestoreMu.
 	if currentMaintenanceState().Active {
 		return nil
 	}
@@ -2684,7 +2688,7 @@ func (r *withActorRunner) syncJobFromStatus(snapshot *ServerStatus) {
 		status := jobStatusSucceeded
 		phase := jobPhaseComplete
 		summary := "Completed successfully"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		update.Status = &status
 		update.Phase = &phase
 		update.Summary = &summary
@@ -2693,7 +2697,7 @@ func (r *withActorRunner) syncJobFromStatus(snapshot *ServerStatus) {
 		status := jobStatusFailed
 		phase := jobPhaseComplete
 		summary := "Completed with errors"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		errorClass := strings.TrimSpace(r.lastErrClass)
 		update.Status = &status
 		update.Phase = &phase
@@ -2706,7 +2710,7 @@ func (r *withActorRunner) syncJobFromStatus(snapshot *ServerStatus) {
 		status := jobStatusCancelled
 		phase := jobPhaseComplete
 		summary := "Cancelled"
-		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		finishedAt := jobTimestampNow()
 		update.Status = &status
 		update.Phase = &phase
 		update.Summary = &summary
@@ -3079,7 +3083,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 						if jm != nil && strings.TrimSpace(r.jobID) != "" {
 							jobStatus := jobStatusCancelled
 							summary := "Approval window expired"
-							finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+							finishedAt := jobTimestampNow()
 							_ = jm.UpdateJob(r.jobID, JobUpdate{
 								Status:     &jobStatus,
 								Summary:    &summary,
@@ -3718,6 +3722,22 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 			cveClient, err = dial(server, &configCopy)
 			if err != nil {
 				log.Printf("CVE enrichment dial attempt 2 failed for server %q: %v", server.Name, err)
+				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+					status := jobStatusFailed
+					phase := jobPhaseComplete
+					summary := "Failed to connect for CVE enrichment"
+					errorClass := "dial"
+					meta := marshalJobJSON(map[string]any{"error": err.Error()})
+					finishedAt := jobTimestampNow()
+					_ = jm.UpdateJob(jobID, JobUpdate{
+						Status:     &status,
+						Phase:      &phase,
+						Summary:    &summary,
+						ErrorClass: &errorClass,
+						MetaJSON:   &meta,
+						FinishedAt: &finishedAt,
+					})
+				}
 				for _, pkg := range packages {
 					if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
 						return
@@ -3738,7 +3758,7 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusCancelled
 					summary := "Parent update no longer pending approval"
-					finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
 						Summary:    &summary,
@@ -3758,7 +3778,7 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusCancelled
 					summary := "Pending update state changed before CVE enrichment finished"
-					finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
 						Summary:    &summary,
@@ -3772,7 +3792,7 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 			status := jobStatusSucceeded
 			phase := jobPhaseComplete
 			summary := "CVE enrichment completed"
-			finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+			finishedAt := jobTimestampNow()
 			_ = jm.UpdateJob(jobID, JobUpdate{
 				Status:     &status,
 				Phase:      &phase,
@@ -5281,7 +5301,7 @@ func setupRouter() (*gin.Engine, error) {
 				status := jobStatusCancelled
 				phase := jobPhaseComplete
 				summary := "Update cancelled"
-				finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+				finishedAt := jobTimestampNow()
 				_ = jm.UpdateJob(job.ID, JobUpdate{
 					Status:     &status,
 					Phase:      &phase,
