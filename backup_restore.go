@@ -40,7 +40,7 @@ const (
 	backupKeyLen              = 32
 )
 
-var backupRestoreMu sync.Mutex
+var backupRestoreMu sync.RWMutex
 
 var (
 	errBackupInvalidPassphrase = errors.New("passphrase must be at least 12 characters")
@@ -99,6 +99,25 @@ type restoreSnapshot struct {
 	Path   string
 	Exists bool
 	Data   []byte
+}
+
+func expireSessionCookie(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	sm := currentSessionManager()
+	if sm == nil {
+		return
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     sm.Cookie.Name,
+		Value:    "",
+		Path:     sm.Cookie.Path,
+		MaxAge:   -1,
+		HttpOnly: sm.Cookie.HttpOnly,
+		Secure:   sm.Cookie.Secure,
+		SameSite: sm.Cookie.SameSite,
+	})
 }
 
 func validateBackupPassphrase(passphrase string) error {
@@ -468,10 +487,21 @@ func resetRuntimeCaches() {
 	metricsBearerTokenHashLoaded = false
 	metricsBearerTokenHashDBPath = ""
 	metricsBearerTokenHashMu.Unlock()
+
+	setCurrentJobManager(nil)
 }
 
 func reloadRuntimeState() error {
 	_ = getDB()
+	maintenanceActive := currentMaintenanceState().Active
+	if !maintenanceActive {
+		if err := initializeMaintenanceState(); err != nil {
+			return err
+		}
+	}
+	if err := initializeJobManager(); err != nil {
+		return err
+	}
 	loadServers()
 	mu.Lock()
 	statusMap = make(map[string]*ServerStatus, len(servers))
@@ -500,6 +530,14 @@ func reloadRuntimeState() error {
 	sessionManagerMu.Lock()
 	sessionManager = sm
 	sessionManagerMu.Unlock()
+	return nil
+}
+
+func clearPersistedSessions() error {
+	db := getDB()
+	if _, err := db.Exec("DELETE FROM sessions"); err != nil {
+		return fmt.Errorf("clear sessions: %w", err)
+	}
 	return nil
 }
 
@@ -549,6 +587,9 @@ func applyBackupFiles(files map[string][]byte) error {
 	if err := reloadRuntimeState(); err != nil {
 		return rollback(err)
 	}
+	if err := clearPersistedSessions(); err != nil {
+		return rollback(err)
+	}
 	return nil
 }
 
@@ -576,6 +617,8 @@ func handleBackupStatus(c *gin.Context) {
 }
 
 func handleBackupExport(c *gin.Context) {
+	actor := actorFromContext(c)
+	clientIP := clientIPFromContext(c)
 	var req backupExportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		audit(c, "backup.export", "backup", "state", "failure", "Invalid backup export payload", nil)
@@ -592,11 +635,62 @@ func handleBackupExport(c *gin.Context) {
 		includeKnownHosts = *req.IncludeKnownHosts
 	}
 
-	backupRestoreMu.Lock()
-	defer backupRestoreMu.Unlock()
+	jm := currentJobManager()
+	if jm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "job manager unavailable"})
+		return
+	}
+	job, err := jm.CreateJob(JobCreateParams{
+		Kind:      jobKindBackupExport,
+		Actor:     actor,
+		ClientIP:  clientIP,
+		Status:    jobStatusRunning,
+		Phase:     jobPhaseSnapshot,
+		Summary:   "Preparing backup export",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		if errors.Is(err, errMaintenanceModeActive) {
+			writeMaintenanceBlockedResponse(c)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create backup export job"})
+		return
+	}
+	if err := activateMaintenance(jobKindBackupExport, job.ID, actor, "Backup export in progress. The application will reopen when the encrypted archive is ready."); err != nil {
+		status := jobStatusFailed
+		summary := "Failed to activate maintenance mode"
+		errorClass := "maintenance"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to activate maintenance mode"})
+		return
+	}
+	defer func() {
+		if err := deactivateMaintenance(); err != nil {
+			log.Printf("handleBackupExport: failed to clear maintenance mode: %v", err)
+		}
+	}()
+	c.Header("X-Job-ID", job.ID)
+	waitForUpdateRunners()
 
 	dbSnapshot, err := createDBBackupSnapshot()
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Failed to snapshot database"
+		errorClass := "snapshot"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.export", "backup", "state", "failure", "Failed to snapshot database", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to snapshot database"})
 		return
@@ -604,6 +698,16 @@ func handleBackupExport(c *gin.Context) {
 	_ = getEncryptionKey()
 	configData, err := os.ReadFile(configPath())
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Failed to read config"
+		errorClass := "config"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.export", "backup", "state", "failure", "Failed to read config", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read config"})
 		return
@@ -623,19 +727,57 @@ func handleBackupExport(c *gin.Context) {
 		}
 	}
 
+	phase := jobPhaseEncrypt
+	summary := "Encrypting backup payload"
+	_ = jm.UpdateJob(job.ID, JobUpdate{Phase: &phase, Summary: &summary})
 	tarGz, err := buildBackupTarGz(files)
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Failed to build backup payload"
+		errorClass := "archive"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.export", "backup", "state", "failure", "Failed to build backup payload", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build backup"})
 		return
 	}
 	encrypted, err := encryptBackupPayload(tarGz, req.Passphrase)
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Failed to encrypt backup payload"
+		errorClass := "encrypt"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.export", "backup", "state", "failure", "Failed to encrypt backup", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt backup"})
 		return
 	}
 
+	status := jobStatusSucceeded
+	phase = jobPhaseComplete
+	summary = "Backup export completed"
+	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	meta := marshalJobJSON(map[string]any{
+		"bytes":                len(encrypted),
+		"known_hosts_included": knownHostsIncluded,
+	})
+	_ = jm.UpdateJob(job.ID, JobUpdate{
+		Status:     &status,
+		Phase:      &phase,
+		Summary:    &summary,
+		MetaJSON:   &meta,
+		FinishedAt: &finishedAt,
+	})
 	filename := fmt.Sprintf("simplelinuxupdater-backup-%s%s", time.Now().UTC().Format("20060102T150405Z"), backupFileExtension)
 	c.Header("Content-Type", "application/octet-stream")
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
@@ -670,6 +812,8 @@ func readUploadedBackupFile(file *multipart.FileHeader) ([]byte, error) {
 }
 
 func handleBackupRestore(c *gin.Context) {
+	actor := actorFromContext(c)
+	clientIP := clientIPFromContext(c)
 	if c.Request != nil && c.Writer != nil {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, backupMaxUploadBytes+1024)
 	}
@@ -691,25 +835,109 @@ func handleBackupRestore(c *gin.Context) {
 		return
 	}
 
-	backupRestoreMu.Lock()
-	defer backupRestoreMu.Unlock()
+	jm := currentJobManager()
+	if jm == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "job manager unavailable"})
+		return
+	}
+	job, err := jm.CreateJob(JobCreateParams{
+		Kind:      jobKindBackupRestore,
+		Actor:     actor,
+		ClientIP:  clientIP,
+		Status:    jobStatusRunning,
+		Phase:     jobPhaseDecrypt,
+		Summary:   "Restoring backup archive",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		if errors.Is(err, errMaintenanceModeActive) {
+			writeMaintenanceBlockedResponse(c)
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create backup restore job"})
+		return
+	}
+	if err := activateMaintenance(jobKindBackupRestore, job.ID, actor, "Backup restore in progress. Requests are paused until the restored state is ready."); err != nil {
+		status := jobStatusFailed
+		summary := "Failed to activate maintenance mode"
+		errorClass := "maintenance"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to activate maintenance mode"})
+		return
+	}
+	defer func() {
+		if err := deactivateMaintenance(); err != nil {
+			log.Printf("handleBackupRestore: failed to clear maintenance mode: %v", err)
+		}
+	}()
+	c.Header("X-Job-ID", job.ID)
 
 	plain, err := decryptBackupPayload(blob, passphrase)
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Failed to decrypt backup archive"
+		errorClass := "decrypt"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.restore", "backup", "state", "failure", "Failed to decrypt backup", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to decrypt backup"})
 		return
 	}
 	files, manifest, err := extractBackupTarGz(plain)
 	if err != nil {
+		status := jobStatusFailed
+		summary := "Invalid backup payload"
+		errorClass := "archive"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		_ = jm.UpdateJob(job.ID, JobUpdate{
+			Status:     &status,
+			Summary:    &summary,
+			ErrorClass: &errorClass,
+			FinishedAt: &finishedAt,
+		})
 		audit(c, "backup.restore", "backup", "state", "failure", "Invalid backup payload", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid backup payload"})
 		return
 	}
+	waitForUpdateRunners()
+	phase := jobPhaseApply
+	summary := "Applying restored backup files"
+	_ = jm.UpdateJob(job.ID, JobUpdate{Phase: &phase, Summary: &summary})
 	if err := applyBackupFiles(files); err != nil {
+		jm = currentJobManager()
+		if persistErr := persistMaintenanceState(currentMaintenanceState()); persistErr != nil {
+			log.Printf("handleBackupRestore: failed to re-persist active maintenance state after restore error: %v", persistErr)
+		}
+		status := jobStatusFailed
+		summary := "Failed to apply backup files"
+		errorClass := "apply"
+		finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+		if jm != nil {
+			job.Status = status
+			job.Phase = jobPhaseComplete
+			job.Summary = summary
+			job.ErrorClass = errorClass
+			job.FinishedAt = finishedAt
+			_ = jm.UpsertJobRecord(job)
+		}
 		audit(c, "backup.restore", "backup", "state", "failure", "Failed to apply backup", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply backup"})
 		return
+	}
+	jm = currentJobManager()
+	if persistErr := persistMaintenanceState(currentMaintenanceState()); persistErr != nil {
+		log.Printf("handleBackupRestore: failed to re-persist active maintenance state after restore: %v", persistErr)
 	}
 
 	globalKeyPresent, globalKeyErr := hasPersistedGlobalKey()
@@ -722,8 +950,28 @@ func handleBackupRestore(c *gin.Context) {
 		"global_key_present":   globalKeyPresent,
 		"known_hosts_restored": knownHostsRestored,
 	})
+	expireSessionCookie(c)
+	status := jobStatusSucceeded
+	phase = jobPhaseComplete
+	summary = "Backup restore completed"
+	finishedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	meta := marshalJobJSON(map[string]any{
+		"manifest_files":       len(manifest.Files),
+		"global_key_present":   globalKeyPresent,
+		"known_hosts_restored": knownHostsRestored,
+		"sessions_invalidated": true,
+	})
+	if jm != nil {
+		job.Status = status
+		job.Phase = phase
+		job.Summary = summary
+		job.MetaJSON = meta
+		job.FinishedAt = finishedAt
+		_ = jm.UpsertJobRecord(job)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"message":              "backup restored",
+		"job_id":               job.ID,
 		"restart_required":     false,
 		"sessions_invalidated": true,
 		"global_key_present":   globalKeyPresent,

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +77,7 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
 		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("update start status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -125,6 +128,7 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
 		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("update start conflict status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
@@ -162,6 +166,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	approveRec := httptest.NewRecorder()
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
 	approveReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(approveReq)
 	handler.ServeHTTP(approveRec, approveReq)
 	if approveRec.Code != http.StatusOK {
 		t.Fatalf("approve status = %d, want %d (body=%s)", approveRec.Code, http.StatusOK, approveRec.Body.String())
@@ -179,6 +184,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	approveAgainRec := httptest.NewRecorder()
 	approveAgainReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
 	approveAgainReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(approveAgainReq)
 	handler.ServeHTTP(approveAgainRec, approveAgainReq)
 	if approveAgainRec.Code != http.StatusConflict {
 		t.Fatalf("approve conflict status = %d, want %d (body=%s)", approveAgainRec.Code, http.StatusConflict, approveAgainRec.Body.String())
@@ -201,6 +207,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
 	cancelReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(cancelReq)
 	handler.ServeHTTP(cancelRec, cancelReq)
 	if cancelRec.Code != http.StatusOK {
 		t.Fatalf("cancel status = %d, want %d (body=%s)", cancelRec.Code, http.StatusOK, cancelRec.Body.String())
@@ -221,6 +228,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	cancelAgainRec := httptest.NewRecorder()
 	cancelAgainReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
 	cancelAgainReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(cancelAgainReq)
 	handler.ServeHTTP(cancelAgainRec, cancelAgainReq)
 	if cancelAgainRec.Code != http.StatusConflict {
 		t.Fatalf("cancel conflict status = %d, want %d (body=%s)", cancelAgainRec.Code, http.StatusConflict, cancelAgainRec.Body.String())
@@ -283,6 +291,7 @@ func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/api/update/"+serverName, nil)
 			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
 			handler.ServeHTTP(rec, req)
 			resultsCh <- result{name: serverName, code: rec.Code, body: rec.Body.String()}
 		}(s.Name)
@@ -294,5 +303,93 @@ func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 		if res.code != http.StatusOK {
 			t.Fatalf("bulk update start for %s status = %d, want %d (body=%s)", res.name, res.code, http.StatusOK, res.body)
 		}
+	}
+}
+
+func TestAsyncActionRoutesReturnJobIDAndPersistJobRecords(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		kind       string
+		statusName string
+	}{
+		{name: "update", path: "/api/update/%s", body: "", kind: jobKindUpdate, statusName: "updating"},
+		{name: "autoremove", path: "/api/autoremove/%s", body: "", kind: jobKindAutoremove, statusName: "autoremove"},
+		{name: "sudoers enable", path: "/api/sudoers/%s", body: `{"password":"pw"}`, kind: jobKindSudoersEnable, statusName: "sudoers"},
+		{name: "sudoers disable", path: "/api/sudoers/disable/%s", body: `{"password":"pw"}`, kind: jobKindSudoersDisable, statusName: "sudoers"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.kind, "/", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.kind, "_", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+				}
+			}()
+
+			origDial := getDialSSHConnection()
+			setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+				return &slowSSHConnection{delay: 50 * time.Millisecond}, nil
+			})
+			t.Cleanup(func() {
+				waitForUpdateRunners()
+				setDialSSHConnection(origDial)
+			})
+			t.Setenv(retryMaxAttemptsEnv, "1")
+			t.Setenv(sshCommandTimeoutSecondsEnv, "1")
+
+			var body *bytes.Buffer
+			if tc.body == "" {
+				body = bytes.NewBuffer(nil)
+			} else {
+				body = bytes.NewBufferString(tc.body)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), body)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			var payload struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("unmarshal %s response: %v", tc.name, err)
+			}
+			if strings.TrimSpace(payload.JobID) == "" {
+				t.Fatalf("%s response missing job_id: %s", tc.name, rec.Body.String())
+			}
+
+			var jobKind, jobStatus string
+			if err := getDB().QueryRow("SELECT kind, status FROM jobs WHERE id = ?", payload.JobID).Scan(&jobKind, &jobStatus); err != nil {
+				t.Fatalf("query %s job: %v", tc.name, err)
+			}
+			if jobKind != tc.kind {
+				t.Fatalf("%s job kind = %q, want %q", tc.name, jobKind, tc.kind)
+			}
+			if strings.TrimSpace(jobStatus) == "" {
+				t.Fatalf("%s job status should not be empty", tc.name)
+			}
+		})
 	}
 }

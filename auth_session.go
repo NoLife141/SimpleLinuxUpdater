@@ -41,7 +41,6 @@ var sessionManager *scs.SessionManager
 var sessionManagerMu sync.RWMutex
 
 var (
-	errInvalidCredentials    = errors.New("invalid credentials")
 	errSetupAlreadyCompleted = errors.New("setup already completed")
 	errSetupRequired         = errors.New("setup required")
 )
@@ -422,6 +421,56 @@ func sameOriginAuthRequest(c *gin.Context) bool {
 		return false
 	}
 	return true
+}
+
+func sameOriginWriteMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		switch c.Request.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			c.Next()
+			return
+		}
+		if !sameOriginAuthRequest(c) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross-site write request denied"})
+			return
+		}
+		c.Next()
+	}
+}
+
+func backupRestoreBarrierMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c == nil || c.Request == nil || c.Request.URL == nil {
+			c.Next()
+			return
+		}
+		path := c.Request.URL.Path
+		if maintenanceBypassPath(path) {
+			c.Next()
+			return
+		}
+		if currentMaintenanceState().Active && !maintenanceExclusivePath(path) {
+			writeMaintenanceBlockedResponse(c)
+			return
+		}
+		if maintenanceExclusivePath(path) {
+			backupRestoreMu.Lock()
+			defer backupRestoreMu.Unlock()
+			if currentMaintenanceState().Active && currentMaintenanceState().JobID != "" {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
+			c.Next()
+			return
+		}
+		backupRestoreMu.RLock()
+		defer backupRestoreMu.RUnlock()
+		if currentMaintenanceState().Active {
+			writeMaintenanceBlockedResponse(c)
+			return
+		}
+		c.Next()
+	}
 }
 
 func rateLimitClientIP(c *gin.Context) string {

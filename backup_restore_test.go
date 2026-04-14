@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -116,6 +117,7 @@ func TestBackupAPIExportRestoreLifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/backup/export", bytes.NewBufferString(`{"passphrase":"very-strong-passphrase","include_known_hosts":false}`))
 	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -127,9 +129,20 @@ func TestBackupAPIExportRestoreLifecycle(t *testing.T) {
 	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, backupFileExtension) {
 		t.Fatalf("backup export Content-Disposition = %q, want extension %q", got, backupFileExtension)
 	}
+	exportJobID := strings.TrimSpace(rec.Header().Get("X-Job-ID"))
+	if exportJobID == "" {
+		t.Fatalf("backup export missing X-Job-ID header")
+	}
 	backupBlob := append([]byte(nil), rec.Body.Bytes()...)
 	if len(backupBlob) == 0 {
 		t.Fatalf("backup export payload is empty")
+	}
+	var exportJobStatus, exportJobKind string
+	if err := getDB().QueryRow("SELECT status, kind FROM jobs WHERE id = ?", exportJobID).Scan(&exportJobStatus, &exportJobKind); err != nil {
+		t.Fatalf("query export job: %v", err)
+	}
+	if exportJobKind != jobKindBackupExport || exportJobStatus != jobStatusSucceeded {
+		t.Fatalf("export job kind/status = %q/%q, want %q/%q", exportJobKind, exportJobStatus, jobKindBackupExport, jobStatusSucceeded)
 	}
 
 	if _, err := getDB().Exec(
@@ -159,10 +172,20 @@ func TestBackupAPIExportRestoreLifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/backup/restore", &restoreBody)
 	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("backup restore status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var restoreResp struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &restoreResp); err != nil {
+		t.Fatalf("unmarshal restore response: %v", err)
+	}
+	if strings.TrimSpace(restoreResp.JobID) == "" {
+		t.Fatalf("restore response missing job_id: %s", rec.Body.String())
 	}
 
 	var beforeCount int
@@ -179,6 +202,29 @@ func TestBackupAPIExportRestoreLifecycle(t *testing.T) {
 	}
 	if afterCount != 0 {
 		t.Fatalf("after-export count = %d, want 0", afterCount)
+	}
+
+	var sessionCount int
+	if err := getDB().QueryRow("SELECT COUNT(1) FROM sessions").Scan(&sessionCount); err != nil {
+		t.Fatalf("query session count unexpected error: %v", err)
+	}
+	if sessionCount != 0 {
+		t.Fatalf("session count after restore = %d, want 0", sessionCount)
+	}
+	var restoreJobStatus, restoreJobKind string
+	if err := getDB().QueryRow("SELECT status, kind FROM jobs WHERE id = ?", restoreResp.JobID).Scan(&restoreJobStatus, &restoreJobKind); err != nil {
+		t.Fatalf("query restore job: %v", err)
+	}
+	if restoreJobKind != jobKindBackupRestore || restoreJobStatus != jobStatusSucceeded {
+		t.Fatalf("restore job kind/status = %q/%q, want %q/%q", restoreJobKind, restoreJobStatus, jobKindBackupRestore, jobStatusSucceeded)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/api/backup/status", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("backup status with pre-restore session status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }
 
@@ -222,5 +268,40 @@ func TestBackupRoutesRequireAuthentication(t *testing.T) {
 				t.Fatalf("%s unauthenticated status = %d, want %d", tc.path, rec.Code, http.StatusUnauthorized)
 			}
 		})
+	}
+}
+
+func TestBackupWriteRoutesRequireSameOrigin(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	preserveEncryptionState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "backup-same-origin.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionHandler(r)
+
+	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sessionCookie := testSessionCookieFromRecorder(t, rec)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/backup/export", bytes.NewBufferString(`{"passphrase":"very-strong-passphrase"}`))
+	req.AddCookie(sessionCookie)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("backup export without same-origin status = %d, want %d (body=%s)", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 }
