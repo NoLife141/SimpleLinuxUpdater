@@ -5242,7 +5242,7 @@ func setupRouter() (*gin.Engine, error) {
 					status := jobStatusRunning
 					phase := jobPhaseAptUpgrade
 					summary := "All pending updates approved"
-					_ = jm.UpdateJob(job.ID, JobUpdate{
+					_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
 						Status:  &status,
 						Phase:   &phase,
 						Summary: &summary,
@@ -5275,7 +5275,7 @@ func setupRouter() (*gin.Engine, error) {
 					status := jobStatusRunning
 					phase := jobPhaseAptUpgrade
 					summary := "Security updates approved"
-					_ = jm.UpdateJob(job.ID, JobUpdate{
+					_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
 						Status:  &status,
 						Phase:   &phase,
 						Summary: &summary,

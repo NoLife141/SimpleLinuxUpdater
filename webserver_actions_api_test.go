@@ -235,6 +235,73 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	}
 }
 
+func TestApproveRouteUpdatesJobWithoutOverwritingApprovedRuntimeState(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-approve-job-sync.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-approval-job-sync", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		status := statusMap[server.Name]
+		if status == nil || status.Status != "approved" {
+			t.Fatalf("status after approve = %+v, want approved", status)
+		}
+	}()
+
+	var approvedJobStatus, approvedJobPhase string
+	if err := getDB().QueryRow("SELECT status, phase FROM jobs WHERE id = ?", job.ID).Scan(&approvedJobStatus, &approvedJobPhase); err != nil {
+		t.Fatalf("query approved job: %v", err)
+	}
+	if approvedJobStatus != jobStatusRunning || approvedJobPhase != jobPhaseAptUpgrade {
+		t.Fatalf("approved job status/phase = %q/%q, want %q/%q", approvedJobStatus, approvedJobPhase, jobStatusRunning, jobPhaseAptUpgrade)
+	}
+}
+
 func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 	preserveDBState(t)
 	preserveServerState(t)

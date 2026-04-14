@@ -330,7 +330,7 @@ func (jm *JobManager) UpsertJobRecord(record JobRecord) error {
 	return nil
 }
 
-func (jm *JobManager) UpdateJob(id string, update JobUpdate) error {
+func (jm *JobManager) updateJob(id string, update JobUpdate, syncRuntime bool) error {
 	if jm == nil || jm.db == nil || strings.TrimSpace(id) == "" {
 		return nil
 	}
@@ -377,8 +377,18 @@ func (jm *JobManager) UpdateJob(id string, update JobUpdate) error {
 	if _, err := jm.db.Exec("UPDATE jobs SET "+strings.Join(setClauses, ", ")+" WHERE id = ?", args...); err != nil {
 		return err
 	}
-	jm.syncStatusMapFromJobID(id)
+	if syncRuntime {
+		jm.syncStatusMapFromJobID(id)
+	}
 	return nil
+}
+
+func (jm *JobManager) UpdateJob(id string, update JobUpdate) error {
+	return jm.updateJob(id, update, true)
+}
+
+func (jm *JobManager) UpdateJobWithoutRuntimeSync(id string, update JobUpdate) error {
+	return jm.updateJob(id, update, false)
 }
 
 func (jm *JobManager) GetJob(id string) (JobRecord, error) {

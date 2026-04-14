@@ -157,7 +157,36 @@ func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *t
 		}
 	})
 
-	t.Run("backup route waits behind shared readers", func(t *testing.T) {
+	t.Run("backup route rejects when another backup route holds lock", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(backupRestoreBarrierMiddleware())
+		r.POST("/api/backup/restore", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+
+		backupRestoreMu.Lock()
+		defer backupRestoreMu.Unlock()
+
+		done := make(chan int, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/backup/restore", nil)
+			r.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+
+		select {
+		case code := <-done:
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("backup restore status = %d, want %d", code, http.StatusServiceUnavailable)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("backup restore did not reject while restore lock held")
+		}
+	})
+
+	t.Run("backup route rejects while shared readers are active", func(t *testing.T) {
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
 		r.Use(backupRestoreBarrierMiddleware())
@@ -176,20 +205,13 @@ func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *t
 
 		select {
 		case code := <-done:
-			backupRestoreMu.RUnlock()
-			t.Fatalf("backup restore completed while shared lock held with status %d", code)
-		case <-time.After(100 * time.Millisecond):
-		}
-
-		backupRestoreMu.RUnlock()
-		select {
-		case code := <-done:
-			if code != http.StatusNoContent {
-				t.Fatalf("backup restore status = %d, want %d", code, http.StatusNoContent)
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("backup restore status = %d, want %d", code, http.StatusServiceUnavailable)
 			}
-		case <-time.After(time.Second):
-			t.Fatalf("backup restore did not complete after shared lock release")
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("backup restore did not reject while shared lock held")
 		}
+		backupRestoreMu.RUnlock()
 	})
 }
 

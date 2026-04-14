@@ -454,7 +454,10 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 			return
 		}
 		if maintenanceExclusivePath(path) {
-			backupRestoreMu.Lock()
+			if !backupRestoreMu.TryLock() {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
 			defer backupRestoreMu.Unlock()
 			if currentMaintenanceState().Active {
 				writeMaintenanceBlockedResponse(c)
