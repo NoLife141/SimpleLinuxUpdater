@@ -549,6 +549,12 @@ func (jm *JobManager) syncStatusMapFromJobID(id string) {
 }
 
 func runtimeStatusFromJob(record JobRecord) string {
+	switch record.Kind {
+	case jobKindUpdate, jobKindAutoremove, jobKindSudoersEnable, jobKindSudoersDisable:
+	default:
+		return ""
+	}
+
 	switch record.Status {
 	case jobStatusWaitingApproval:
 		return "pending_approval"

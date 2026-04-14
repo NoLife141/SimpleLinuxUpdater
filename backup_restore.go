@@ -639,6 +639,16 @@ func handleBackupExport(c *gin.Context) {
 	if req.IncludeKnownHosts != nil {
 		includeKnownHosts = *req.IncludeKnownHosts
 	}
+	if activeServers := activeServerActionNames(); len(activeServers) > 0 {
+		audit(c, "backup.export", "backup", "state", "failure", "Active server actions must finish before export", map[string]any{
+			"active_servers": activeServers,
+		})
+		c.JSON(http.StatusConflict, gin.H{
+			"error":          "wait for active server actions to finish before starting backup export",
+			"active_servers": activeServers,
+		})
+		return
+	}
 
 	jm := currentJobManager()
 	if jm == nil {
@@ -683,7 +693,6 @@ func handleBackupExport(c *gin.Context) {
 		}
 	}()
 	c.Header("X-Job-ID", job.ID)
-	waitForUpdateRunners()
 
 	dbSnapshot, err := createDBBackupSnapshot()
 	if err != nil {
@@ -840,6 +849,16 @@ func handleBackupRestore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if activeServers := activeServerActionNames(); len(activeServers) > 0 {
+		audit(c, "backup.restore", "backup", "state", "failure", "Active server actions must finish before restore", map[string]any{
+			"active_servers": activeServers,
+		})
+		c.JSON(http.StatusConflict, gin.H{
+			"error":          "wait for active server actions to finish before starting backup restore",
+			"active_servers": activeServers,
+		})
+		return
+	}
 
 	jm := currentJobManager()
 	if jm == nil {
@@ -916,7 +935,6 @@ func handleBackupRestore(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid backup payload"})
 		return
 	}
-	waitForUpdateRunners()
 	phase := jobPhaseApply
 	summary := "Applying restored backup files"
 	_ = jm.UpdateJob(job.ID, JobUpdate{Phase: &phase, Summary: &summary})

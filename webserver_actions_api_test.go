@@ -393,3 +393,126 @@ func TestAsyncActionRoutesReturnJobIDAndPersistJobRecords(t *testing.T) {
 		})
 	}
 }
+
+func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-summary.db")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	t.Setenv(postchecksEnabledEnv, "false")
+
+	server := Server{Name: "srv-cancel-summary", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+	}
+	mu.Unlock()
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	updateConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDiskSpaceCmd: {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:     {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd: {},
+			precheckAptCheckCmd:  {},
+			aptUpdateCmd:         {},
+			aptListUpgradableCmd: {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
+		},
+	}
+	cveConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\n"},
+		},
+	}
+	var dialCalls int32
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	done := make(chan struct{})
+	go func() {
+		runUpdateJobWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv(), job.ID)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		status := statusMap[server.Name]
+		currentStatus := ""
+		currentLogs := ""
+		if status != nil {
+			currentStatus = status.Status
+			currentLogs = status.Logs
+		}
+		mu.Unlock()
+		if currentStatus == "pending_approval" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for pending approval, last status=%q logs=%s", currentStatus, currentLogs)
+		}
+	}
+
+	logsBeforeCancel := currentStatusLogs(server.Name)
+	mu.Lock()
+	status := statusMap[server.Name]
+	status.Status = "cancelled"
+	status.ApprovalScope = ""
+	status.Logs = ""
+	status.Upgradable = nil
+	status.PendingUpdates = nil
+	mu.Unlock()
+
+	cancelledStatus := jobStatusCancelled
+	cancelledPhase := jobPhaseComplete
+	cancelledSummary := "Update cancelled"
+	finishedAt := jobTimestampNow()
+	if err := currentJobManager().UpdateJob(job.ID, JobUpdate{
+		Status:     &cancelledStatus,
+		Phase:      &cancelledPhase,
+		Summary:    &cancelledSummary,
+		LogsText:   &logsBeforeCancel,
+		FinishedAt: &finishedAt,
+	}); err != nil {
+		t.Fatalf("UpdateJob(cancelled) unexpected error: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("timed out waiting for update flow to exit after cancellation")
+	}
+
+	var jobStatus, jobSummary string
+	if err := getDB().QueryRow("SELECT status, summary FROM jobs WHERE id = ?", job.ID).Scan(&jobStatus, &jobSummary); err != nil {
+		t.Fatalf("query cancelled job: %v", err)
+	}
+	if jobStatus != jobStatusCancelled {
+		t.Fatalf("cancelled job status = %q, want %q", jobStatus, jobStatusCancelled)
+	}
+	if jobSummary != "Update cancelled" {
+		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+}

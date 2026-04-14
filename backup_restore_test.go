@@ -305,3 +305,81 @@ func TestBackupWriteRoutesRequireSameOrigin(t *testing.T) {
 		t.Fatalf("backup export without same-origin status = %d, want %d (body=%s)", rec.Code, http.StatusForbidden, rec.Body.String())
 	}
 }
+
+func TestBackupRoutesRejectWhileServerActionsAreActive(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	preserveEncryptionState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "backup-busy-actions.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionHandler(r)
+
+	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	sessionCookie := testSessionCookieFromRecorder(t, rec)
+
+	mu.Lock()
+	servers = []Server{{Name: "srv-busy", Host: "example.org", Port: 22, User: "root", Pass: "pw"}}
+	statusMap = map[string]*ServerStatus{
+		"srv-busy": {Name: "srv-busy", Status: "pending_approval", Upgradable: []string{"openssl"}},
+	}
+	mu.Unlock()
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/backup/export", bytes.NewBufferString(`{"passphrase":"very-strong-passphrase"}`))
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("backup export with active action status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+
+	var restoreBody bytes.Buffer
+	writer := multipart.NewWriter(&restoreBody)
+	part, err := writer.CreateFormFile("file", "test"+backupFileExtension)
+	if err != nil {
+		t.Fatalf("CreateFormFile() unexpected error: %v", err)
+	}
+	if _, err := part.Write([]byte("not-a-real-backup")); err != nil {
+		t.Fatalf("part.Write() unexpected error: %v", err)
+	}
+	if err := writer.WriteField("passphrase", "very-strong-passphrase"); err != nil {
+		t.Fatalf("WriteField(passphrase) unexpected error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() unexpected error: %v", err)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/backup/restore", &restoreBody)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("backup restore with active action status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+
+	var jobCount int
+	if err := getDB().QueryRow("SELECT COUNT(1) FROM jobs").Scan(&jobCount); err != nil {
+		t.Fatalf("query jobs count: %v", err)
+	}
+	if jobCount != 0 {
+		t.Fatalf("job count after rejected backup routes = %d, want 0", jobCount)
+	}
+}

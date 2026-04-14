@@ -2447,6 +2447,21 @@ func currentStatusLogs(name string) string {
 	return snapshot.Logs
 }
 
+func activeServerActionNames() []string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	names := make([]string, 0)
+	for name, status := range statusMap {
+		if status == nil || !statusInProgress(status.Status) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
 	jm := currentJobManager()
 	if jm == nil {
@@ -3051,7 +3066,8 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			for {
 				time.Sleep(1 * time.Second)
 				approved := false
-				cancelledOrTimeout := false
+				cancelledByUser := false
+				approvalTimedOut := false
 				mu.Lock()
 				status := statusMap[r.server.Name]
 				if status != nil {
@@ -3063,13 +3079,20 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 							r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
 						}
 						approved = true
-					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
+					} else if status.Status == "cancelled" {
+						cancelledByUser = true
 						status.Status = "idle"
 						status.ApprovalScope = ""
 						status.Logs = ""
 						status.Upgradable = nil
 						status.PendingUpdates = nil
-						cancelledOrTimeout = true
+					} else if time.Now().After(approvalDeadline) {
+						approvalTimedOut = true
+						status.Status = "idle"
+						status.ApprovalScope = ""
+						status.Logs = ""
+						status.Upgradable = nil
+						status.PendingUpdates = nil
 					}
 				}
 				mu.Unlock()
@@ -3077,19 +3100,20 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					r.approvedAt = time.Now().UTC()
 					break
 				}
-				if cancelledOrTimeout {
-					if status := currentStatusSnapshot(r.server.Name); status == nil || status.Status != "cancelled" {
-						jm := currentJobManager()
-						if jm != nil && strings.TrimSpace(r.jobID) != "" {
-							jobStatus := jobStatusCancelled
-							summary := "Approval window expired"
-							finishedAt := jobTimestampNow()
-							_ = jm.UpdateJob(r.jobID, JobUpdate{
-								Status:     &jobStatus,
-								Summary:    &summary,
-								FinishedAt: &finishedAt,
-							})
-						}
+				if cancelledByUser {
+					return
+				}
+				if approvalTimedOut {
+					jm := currentJobManager()
+					if jm != nil && strings.TrimSpace(r.jobID) != "" {
+						jobStatus := jobStatusCancelled
+						summary := "Approval window expired"
+						finishedAt := jobTimestampNow()
+						_ = jm.UpdateJob(r.jobID, JobUpdate{
+							Status:     &jobStatus,
+							Summary:    &summary,
+							FinishedAt: &finishedAt,
+						})
 					}
 					return
 				}
