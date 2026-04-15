@@ -218,6 +218,13 @@ func TestBackupAPIExportRestoreLifecycle(t *testing.T) {
 	if restoreJobKind != jobKindBackupRestore || restoreJobStatus != jobStatusSucceeded {
 		t.Fatalf("restore job kind/status = %q/%q, want %q/%q", restoreJobKind, restoreJobStatus, jobKindBackupRestore, jobStatusSucceeded)
 	}
+	var restoredExportJobs int
+	if err := getDB().QueryRow("SELECT COUNT(1) FROM jobs WHERE kind = ?", jobKindBackupExport).Scan(&restoredExportJobs); err != nil {
+		t.Fatalf("query restored export job count: %v", err)
+	}
+	if restoredExportJobs != 0 {
+		t.Fatalf("restored export job count = %d, want 0", restoredExportJobs)
+	}
 
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/api/backup/status", nil)

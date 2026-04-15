@@ -650,6 +650,12 @@ func handleBackupExport(c *gin.Context) {
 		return
 	}
 
+	dbSnapshot, err := createDBBackupSnapshot()
+	if err != nil {
+		audit(c, "backup.export", "backup", "state", "failure", "Failed to snapshot database", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to snapshot database"})
+		return
+	}
 	jm := currentJobManager()
 	if jm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "job manager unavailable"})
@@ -693,23 +699,6 @@ func handleBackupExport(c *gin.Context) {
 		}
 	}()
 	c.Header("X-Job-ID", job.ID)
-
-	dbSnapshot, err := createDBBackupSnapshot()
-	if err != nil {
-		status := jobStatusFailed
-		summary := "Failed to snapshot database"
-		errorClass := "snapshot"
-		finishedAt := jobTimestampNow()
-		_ = jm.UpdateJob(job.ID, JobUpdate{
-			Status:     &status,
-			Summary:    &summary,
-			ErrorClass: &errorClass,
-			FinishedAt: &finishedAt,
-		})
-		audit(c, "backup.export", "backup", "state", "failure", "Failed to snapshot database", map[string]any{"error": err.Error()})
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to snapshot database"})
-		return
-	}
 	_ = getEncryptionKey()
 	configData, err := os.ReadFile(configPath())
 	if err != nil {
