@@ -54,7 +54,19 @@ const (
 var (
 	updatePolicySchedulerOnce sync.Once
 	updatePolicyTickMu        sync.Mutex
+	errUpdatePolicyValidation = errors.New("update policy validation")
 )
+
+func wrapUpdatePolicyValidationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %v", errUpdatePolicyValidation, err)
+}
+
+func isUpdatePolicyValidationError(err error) bool {
+	return errors.Is(err, errUpdatePolicyValidation)
+}
 
 type UpdatePolicyBlackoutWindow struct {
 	Weekdays  []string `json:"weekdays"`
@@ -263,12 +275,15 @@ func loadGlobalUpdatePolicyBlackouts() ([]UpdatePolicyBlackoutWindow, error) {
 	return parseUpdatePolicyBlackouts(raw)
 }
 
-func saveGlobalUpdatePolicyBlackouts(windows []UpdatePolicyBlackoutWindow) error {
+func saveGlobalUpdatePolicyBlackouts(windows []UpdatePolicyBlackoutWindow) ([]UpdatePolicyBlackoutWindow, error) {
 	normalized, err := normalizeBlackoutWindows(windows)
 	if err != nil {
-		return err
+		return nil, wrapUpdatePolicyValidationError(err)
 	}
-	return upsertSettingValue(updatePolicyGlobalBlackoutsSetting, marshalJobJSON(normalized))
+	if err := upsertSettingValue(updatePolicyGlobalBlackoutsSetting, marshalJobJSON(normalized)); err != nil {
+		return nil, err
+	}
+	return normalized, nil
 }
 
 func parseWeekdaysJSON(raw string) []string {
@@ -549,7 +564,7 @@ func getUpdatePolicy(id int64) (UpdatePolicy, error) {
 
 func createUpdatePolicy(policy UpdatePolicy) (UpdatePolicy, error) {
 	if err := normalizeUpdatePolicy(&policy); err != nil {
-		return UpdatePolicy{}, err
+		return UpdatePolicy{}, wrapUpdatePolicyValidationError(err)
 	}
 	now := jobTimestampNow()
 	result, err := getDB().Exec(`
@@ -587,7 +602,7 @@ func updateUpdatePolicy(id int64, policy UpdatePolicy) (UpdatePolicy, error) {
 	}
 	policy.ID = id
 	if err := normalizeUpdatePolicy(&policy); err != nil {
-		return UpdatePolicy{}, err
+		return UpdatePolicy{}, wrapUpdatePolicyValidationError(err)
 	}
 	now := jobTimestampNow()
 	result, err := getDB().Exec(`
@@ -1484,7 +1499,6 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 		})
 		return
 	}
-	defer restoreStatusSnapshot(server.Name, preStartStatus)
 
 	retryPolicy := loadRetryPolicyFromEnv()
 	meta := buildScheduledJobMeta(policy, run.ScheduledForUTC)
@@ -1506,6 +1520,7 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 			"scheduled_for_utc": run.ScheduledForUTC,
 			"error":             "job manager unavailable",
 		})
+		restoreStatusSnapshot(server.Name, preStartStatus)
 		return
 	}
 	job, err := jm.CreateJob(JobCreateParams{
@@ -1534,6 +1549,7 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 			"scheduled_for_utc": run.ScheduledForUTC,
 			"error":             err.Error(),
 		})
+		restoreStatusSnapshot(server.Name, preStartStatus)
 		return
 	}
 	runningStatus := updatePolicyRunRunning
@@ -1555,6 +1571,7 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 	})
 
 	startJobRunner(job.ID, func() {
+		defer restoreStatusSnapshot(server.Name, preStartStatus)
 		runScheduledScanJob(job.ID, run.ID, run.ScheduledForUTC, server, policy, retryPolicy)
 	})
 }
@@ -1613,7 +1630,7 @@ func runScheduledScanJob(jobID string, runID int64, scheduledForUTC string, serv
 		HostKeyCallback: hostKeyCallback,
 		Timeout:         sshConnectTimeout,
 	}
-	client, err := getDialSSHConnection()(server, config)
+	client, err := dialSSHWithRetry(server, config, retryPolicy, "scheduled_scan.ssh_dial", nil)
 	if err != nil {
 		setFailure("Scheduled scan SSH connection failed", err, jobPhaseDial, "")
 		return
@@ -1891,7 +1908,11 @@ func handleUpdatePolicyCreate(c *gin.Context) {
 	created, err := createUpdatePolicy(policy)
 	if err != nil {
 		audit(c, "update_policy.create", "update_policy", policy.Name, "failure", "Failed to create policy", map[string]any{"error": err.Error()})
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		statusCode := http.StatusInternalServerError
+		if isUpdatePolicyValidationError(err) {
+			statusCode = http.StatusBadRequest
+		}
+		c.JSON(statusCode, gin.H{"error": err.Error()})
 		return
 	}
 	audit(c, "update_policy.create", "update_policy", created.Name, "success", "Update policy created", map[string]any{
@@ -1924,7 +1945,11 @@ func handleUpdatePolicyUpdate(c *gin.Context) {
 			return
 		}
 		audit(c, "update_policy.update", "update_policy", c.Param("id"), "failure", "Failed to update policy", map[string]any{"error": err.Error()})
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		statusCode := http.StatusInternalServerError
+		if isUpdatePolicyValidationError(err) {
+			statusCode = http.StatusBadRequest
+		}
+		c.JSON(statusCode, gin.H{"error": err.Error()})
 		return
 	}
 	audit(c, "update_policy.update", "update_policy", updated.Name, "success", "Update policy updated", map[string]any{"policy_id": updated.ID})
@@ -2043,14 +2068,19 @@ func handleUpdatePolicySettingsUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := saveGlobalUpdatePolicyBlackouts(req.GlobalBlackouts); err != nil {
+	normalizedBlackouts, err := saveGlobalUpdatePolicyBlackouts(req.GlobalBlackouts)
+	if err != nil {
 		audit(c, "update_policy.settings", "update_policy", "global", "failure", "Failed to save scheduled update settings", map[string]any{"error": err.Error()})
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		statusCode := http.StatusInternalServerError
+		if isUpdatePolicyValidationError(err) {
+			statusCode = http.StatusBadRequest
+		}
+		c.JSON(statusCode, gin.H{"error": err.Error()})
 		return
 	}
-	audit(c, "update_policy.settings", "update_policy", "global", "success", "Scheduled update settings saved", map[string]any{"global_blackout_count": len(req.GlobalBlackouts)})
+	audit(c, "update_policy.settings", "update_policy", "global", "success", "Scheduled update settings saved", map[string]any{"global_blackout_count": len(normalizedBlackouts)})
 	c.JSON(http.StatusOK, UpdatePolicySettingsResponse{
 		Timezone:        currentAppTimezoneName(),
-		GlobalBlackouts: req.GlobalBlackouts,
+		GlobalBlackouts: normalizedBlackouts,
 	})
 }

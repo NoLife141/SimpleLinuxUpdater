@@ -252,6 +252,23 @@ function renderPolicyMode(policy) {
     return `${escapeHtml(mode)} / ${escapeHtml(scope)}`;
 }
 
+function safeRunStatusClassToken(status) {
+    const normalized = String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+    switch (normalized) {
+        case 'queued':
+        case 'running':
+        case 'waiting_approval':
+        case 'succeeded':
+        case 'failed':
+        case 'skipped':
+        case 'cancelled':
+        case 'interrupted':
+            return normalized;
+        default:
+            return 'unknown';
+    }
+}
+
 function resetPolicyForm() {
     document.getElementById('policy-id').value = '';
     document.getElementById('policy-name').value = '';
@@ -328,11 +345,12 @@ function renderScheduledRuns(items) {
     items.forEach((run) => {
         const row = document.createElement('tr');
         const jobValue = run.job_id ? `<code>${escapeHtml(run.job_id)}</code>` : '<span class="subtle">-</span>';
+        const statusToken = safeRunStatusClassToken(run.status);
         row.innerHTML = `
             <td>${escapeHtml(run.scheduled_for_utc || '')}</td>
             <td>${escapeHtml(run.policy_name || '')}</td>
             <td>${escapeHtml(run.server_name || '')}</td>
-            <td><span class="status-chip status-${escapeHtml(String(run.status || 'unknown').toLowerCase())}">${escapeHtml(run.status || 'unknown')}</span></td>
+            <td><span class="status-chip status-${statusToken}">${escapeHtml(run.status || 'unknown')}</span></td>
             <td>${escapeHtml(run.summary || run.reason || '')}</td>
             <td>${jobValue}</td>
         `;
@@ -447,15 +465,19 @@ async function deleteScheduledPolicy(id) {
     if (!window.confirm('Delete this scheduled update policy?')) {
         return;
     }
-    const res = await fetch(`/api/update-policies/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) {
-        alert(await parseErrorResponse(res, 'Failed to delete scheduled policy.'));
-        return;
+    try {
+        const res = await fetch(`/api/update-policies/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!res.ok) {
+            alert(await parseErrorResponse(res, 'Failed to delete scheduled policy.'));
+            return;
+        }
+        if (document.getElementById('policy-id').value === String(id)) {
+            resetPolicyForm();
+        }
+        await refreshScheduledUpdateViews();
+    } catch (err) {
+        alert(err?.message || 'Failed to delete scheduled policy.');
     }
-    if (document.getElementById('policy-id').value === String(id)) {
-        resetPolicyForm();
-    }
-    await refreshScheduledUpdateViews();
 }
 
 function handleScheduledPolicyTableClick(event) {

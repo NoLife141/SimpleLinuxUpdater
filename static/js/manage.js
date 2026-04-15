@@ -120,18 +120,43 @@ let editPolicyOverrideStates = new Map();
                 const container = document.getElementById('edit-policy-overrides');
                 if (!container) return;
                 const checkboxes = Array.from(container.querySelectorAll('input[data-policy-id]'));
+                const requests = [];
                 for (const checkbox of checkboxes) {
                     const policyID = String(checkbox.dataset.policyId || '').trim();
-                    if (!policyID) continue;
-                    const res = await fetch(`/api/update-policies/${encodeURIComponent(policyID)}/overrides/${encodeURIComponent(serverName)}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ disabled: !!checkbox.checked })
-                    });
-                    if (!res.ok) {
-                        throw new Error(await parseErrorResponse(res, `Failed to save scheduled update override for policy ${policyID}.`));
+                    if (!policyID) {
+                        continue;
                     }
-                    editPolicyOverrideStates.set(policyID, !!checkbox.checked);
+                    const disabled = !!checkbox.checked;
+                    const request = (async () => {
+                        const res = await fetch(`/api/update-policies/${encodeURIComponent(policyID)}/overrides/${encodeURIComponent(serverName)}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ disabled })
+                        });
+                        if (!res.ok) {
+                            throw new Error(await parseErrorResponse(res, `Failed to save scheduled update override for policy ${policyID}.`));
+                        }
+                    })();
+                    requests.push({ policyID, disabled, request });
+                }
+                if (!requests.length) {
+                    return;
+                }
+                const settled = await Promise.allSettled(requests.map((item) => item.request));
+                const failures = [];
+                settled.forEach((result, index) => {
+                    const req = requests[index];
+                    if (result.status === 'fulfilled') {
+                        editPolicyOverrideStates.set(req.policyID, req.disabled);
+                        return;
+                    }
+                    const reason = result.reason instanceof Error
+                        ? result.reason.message
+                        : String(result.reason || 'unknown error');
+                    failures.push(`${req.policyID}: ${reason}`);
+                });
+                if (failures.length) {
+                    throw new Error(`Failed to save scheduled update overrides for policy IDs ${failures.join('; ')}`);
                 }
             }
 
