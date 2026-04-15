@@ -943,9 +943,17 @@ let editPolicyOverrideStates = new Map();
                         }
                         }
                     }
-                    await saveEditPolicyOverrides(newName);
+                    let overrideSaveError = null;
+                    try {
+                        await saveEditPolicyOverrides(newName);
+                    } catch (err) {
+                        overrideSaveError = err;
+                    }
                     closeEditModal();
                     fetchManageServers();
+                    if (overrideSaveError) {
+                        alert(`Server saved, but scheduled update overrides were not fully saved: ${overrideSaveError?.message || 'unknown error'}`);
+                    }
                 } catch (err) {
                     alert(err?.message || 'Failed to save server.');
                 } finally {

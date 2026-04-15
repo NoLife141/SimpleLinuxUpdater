@@ -1055,6 +1055,19 @@ func snapshotServers() []Server {
 	return cloneServers(servers)
 }
 
+func serverExistsByName(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, server := range snapshotServers() {
+		if server.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func policyMatchesServer(policy UpdatePolicy, server Server, overrides map[int64]map[string]bool) bool {
 	if !policy.Enabled {
 		return false
@@ -2060,6 +2073,11 @@ func handleUpdatePolicyOverrideUpsert(c *gin.Context) {
 	}
 	if _, err := getUpdatePolicy(id); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "policy not found"})
+		return
+	}
+	if !serverExistsByName(serverName) {
+		audit(c, "update_policy.override", "server", serverName, "failure", "Server not found", map[string]any{"policy_id": id})
+		c.JSON(http.StatusNotFound, gin.H{"error": "server not found"})
 		return
 	}
 	var req struct {

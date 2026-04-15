@@ -299,6 +299,51 @@ func TestSetUpdatePolicyOverrideFalseRemovesPersistedOptOut(t *testing.T) {
 	}
 }
 
+func TestUpdatePolicyOverrideRejectsUnknownServer(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-override-unknown-server.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	server := Server{Name: "srv-known", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Known server only",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     "02:00",
+	})
+	if err != nil {
+		t.Fatalf("createUpdatePolicy() unexpected error: %v", err)
+	}
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/api/update-policies/"+strconvFormatInt(policy.ID)+"/overrides/srv-missing", bytes.NewBufferString(`{"disabled":true}`))
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown server override status = %d, want %d (body=%s)", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	items, err := listUpdatePolicyOverrides(policy.ID)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyOverrides() unexpected error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("override items = %+v, want none for unknown server request", items)
+	}
+}
+
 func TestCanonicalScheduledForUTCUsesFirstFallbackOccurrence(t *testing.T) {
 	oldLocal := time.Local
 	loc, err := time.LoadLocation("America/Toronto")
