@@ -204,6 +204,18 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 		status.PendingUpdates = clonePendingUpdates(pending)
 		status.Logs = "pending"
 	}()
+	_, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	}
 
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
@@ -233,6 +245,54 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	handler.ServeHTTP(cancelAgainRec, cancelAgainReq)
 	if cancelAgainRec.Code != http.StatusConflict {
 		t.Fatalf("cancel conflict status = %d, want %d (body=%s)", cancelAgainRec.Code, http.StatusConflict, cancelAgainRec.Body.String())
+	}
+}
+
+func TestCancelRouteReturnsFailureWhenPendingJobCannotBePersisted(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-persist-failure.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-cancel-persist-failure", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("cancel status = %d, want %d (body=%s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil {
+		t.Fatalf("status snapshot missing after failed cancel")
+	}
+	if runtimeStatus.Status != "pending_approval" || runtimeStatus.Logs != "pending" {
+		t.Fatalf("runtime status after failed cancel = %+v, want restored pending state", runtimeStatus)
+	}
+	if len(runtimeStatus.Upgradable) != 1 || len(runtimeStatus.PendingUpdates) != 1 {
+		t.Fatalf("runtime status after failed cancel should keep pending data, got %+v", runtimeStatus)
 	}
 }
 

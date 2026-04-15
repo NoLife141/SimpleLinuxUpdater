@@ -218,6 +218,48 @@ func TestWorkersDoNotPanicWhenStatusMissing(t *testing.T) {
 	assertNoPanic("runSudoersDisableWithActor", func() { runSudoersDisableWithActor(server, "pw", "system", "", retryPolicy) })
 }
 
+func TestRunWithActorSharedMarksJobFailedWhenRuntimeStatusMissing(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "missing-runtime-status-job.db"))
+
+	server := Server{Name: "srv-missing-runtime-status", Host: "example.org", Port: 22, User: "root"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	runUpdateJobWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv(), job.ID)
+
+	var status, phase, summary, errorClass string
+	if err := getDB().QueryRow("SELECT status, phase, summary, error_class FROM jobs WHERE id = ?", job.ID).Scan(&status, &phase, &summary, &errorClass); err != nil {
+		t.Fatalf("query failed job: %v", err)
+	}
+	if status != jobStatusFailed || phase != jobPhaseComplete {
+		t.Fatalf("job status/phase = %q/%q, want %q/%q", status, phase, jobStatusFailed, jobPhaseComplete)
+	}
+	if summary != "Server runtime status missing" {
+		t.Fatalf("job summary = %q, want %q", summary, "Server runtime status missing")
+	}
+	if errorClass != "runtime_state" {
+		t.Fatalf("job error_class = %q, want %q", errorClass, "runtime_state")
+	}
+}
+
 func TestInitializeJobManagerMarksUnfinishedJobsInterrupted(t *testing.T) {
 	preserveDBState(t)
 	preserveServerState(t)

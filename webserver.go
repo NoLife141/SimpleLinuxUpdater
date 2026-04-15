@@ -2826,6 +2826,7 @@ func runWithActorShared(
 		lastErrClass:   "none",
 		startedAt:      time.Now().UTC(),
 	}
+	auditHandled := false
 	if auditMeta == nil {
 		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
 	}
@@ -2834,6 +2835,9 @@ func runWithActorShared(
 	}
 
 	defer func() {
+		if auditHandled {
+			return
+		}
 		mu.Lock()
 		finalStatus := "unknown"
 		if status := statusMap[server.Name]; status != nil {
@@ -2856,6 +2860,37 @@ func runWithActorShared(
 	if !runner.withStatus(func(status *ServerStatus) {
 		initStatus(status, policy)
 	}) {
+		runner.lastErrClass = "permanent"
+		if jm := currentJobManager(); jm != nil && strings.TrimSpace(runner.jobID) != "" {
+			status := jobStatusFailed
+			phase := jobPhaseComplete
+			summary := "Server runtime status missing"
+			errorClass := "runtime_state"
+			finishedAt := jobTimestampNow()
+			if err := jm.UpdateJob(runner.jobID, JobUpdate{
+				Status:     &status,
+				Phase:      &phase,
+				Summary:    &summary,
+				ErrorClass: &errorClass,
+				FinishedAt: &finishedAt,
+			}); err != nil {
+				log.Printf("failed to mark job %q failed after runtime status loss: %v", runner.jobID, err)
+			}
+		}
+		auditHandled = true
+		auditWithActor(
+			actor,
+			clientIP,
+			auditAction,
+			"server",
+			server.Name,
+			"failure",
+			"Server runtime status missing",
+			map[string]any{
+				"job_id":   runner.jobID,
+				"job_kind": runner.jobKind,
+			},
+		)
 		return
 	}
 
@@ -3742,6 +3777,11 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 		})
 		if err != nil {
 			log.Printf("failed to create CVE enrichment job for %q: %v", server.Name, err)
+			for _, pkg := range packages {
+				if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
+					return
+				}
+			}
 			return
 		}
 		jobID = job.ID
@@ -5304,12 +5344,23 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.POST("/api/cancel/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		preCancelStatus := currentStatusSnapshot(name)
+		if preCancelStatus == nil {
+			audit(c, "update.cancel", "server", name, "failure", "Server not found", nil)
+			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+			return
+		}
+		if preCancelStatus.Status != "pending_approval" {
+			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		logsBeforeCancel := preCancelStatus.Logs
+
 		mu.Lock()
-		status, exists := statusMap[name]
+		status := statusMap[name]
 		cancelled := false
-		logsBeforeCancel := ""
-		if exists && status.Status == "pending_approval" {
-			logsBeforeCancel = status.Logs
+		if status != nil && status.Status == "pending_approval" {
 			status.Status = "cancelled"
 			status.ApprovalScope = ""
 			status.Logs = ""
@@ -5318,30 +5369,38 @@ func setupRouter() (*gin.Engine, error) {
 			cancelled = true
 		}
 		mu.Unlock()
-		if !exists {
-			audit(c, "update.cancel", "server", name, "failure", "Server not found", nil)
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
 		if !cancelled {
 			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
 			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
-		if jm := currentJobManager(); jm != nil {
-			if job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate); err == nil && job != nil {
-				status := jobStatusCancelled
-				phase := jobPhaseComplete
-				summary := "Update cancelled"
-				finishedAt := jobTimestampNow()
-				_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-					Status:     &status,
-					Phase:      &phase,
-					Summary:    &summary,
-					LogsText:   &logsBeforeCancel,
-					FinishedAt: &finishedAt,
-				})
+
+		persistCancelErr := func() error {
+			jm := currentJobManager()
+			if jm == nil {
+				return errors.New("job manager unavailable")
 			}
+			job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+			if err != nil {
+				return err
+			}
+			status := jobStatusCancelled
+			phase := jobPhaseComplete
+			summary := "Update cancelled"
+			finishedAt := jobTimestampNow()
+			return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:     &status,
+				Phase:      &phase,
+				Summary:    &summary,
+				LogsText:   &logsBeforeCancel,
+				FinishedAt: &finishedAt,
+			})
+		}()
+		if persistCancelErr != nil {
+			restoreStatusSnapshot(name, preCancelStatus)
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": persistCancelErr.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
 		}
 		audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
