@@ -119,14 +119,27 @@ let editPolicyOverrideStates = new Map();
             async function saveEditPolicyOverrides(serverName) {
                 const container = document.getElementById('edit-policy-overrides');
                 if (!container) return;
-                const checkboxes = Array.from(container.querySelectorAll('input[data-policy-id]'));
+                const currentTags = parseTagsInput(document.getElementById('edit-tags').value);
+                const checkboxes = new Map(
+                    Array.from(container.querySelectorAll('input[data-policy-id]')).map((checkbox) => [
+                        String(checkbox.dataset.policyId || '').trim(),
+                        checkbox
+                    ])
+                );
                 const requests = [];
-                for (const checkbox of checkboxes) {
-                    const policyID = String(checkbox.dataset.policyId || '').trim();
+                for (const policy of editUpdatePolicies) {
+                    const policyID = String(policy?.id || '').trim();
                     if (!policyID) {
                         continue;
                     }
-                    const disabled = !!checkbox.checked;
+                    const matchesPolicy = serverMatchesPolicyTags(currentTags, policy);
+                    const checkbox = checkboxes.get(policyID);
+                    if (!matchesPolicy && !editPolicyOverrideStates.get(policyID)) {
+                        continue;
+                    }
+                    const disabled = matchesPolicy
+                        ? (checkbox ? !!checkbox.checked : !!editPolicyOverrideStates.get(policyID))
+                        : false;
                     const request = (async () => {
                         const res = await fetch(`/api/update-policies/${encodeURIComponent(policyID)}/overrides/${encodeURIComponent(serverName)}`, {
                             method: 'PUT',

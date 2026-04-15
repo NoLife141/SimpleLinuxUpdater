@@ -247,6 +247,85 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 }
 
+func TestSetUpdatePolicyOverrideFalseRemovesPersistedOptOut(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-override-clear.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Nightly prod",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     "02:00",
+	})
+	if err != nil {
+		t.Fatalf("createUpdatePolicy() unexpected error: %v", err)
+	}
+
+	created, err := setUpdatePolicyOverride(policy.ID, "srv-override", true)
+	if err != nil {
+		t.Fatalf("setUpdatePolicyOverride(true) unexpected error: %v", err)
+	}
+	if !created.Disabled {
+		t.Fatalf("created override = %+v, want disabled=true", created)
+	}
+
+	cleared, err := setUpdatePolicyOverride(policy.ID, "srv-override", false)
+	if err != nil {
+		t.Fatalf("setUpdatePolicyOverride(false) unexpected error: %v", err)
+	}
+	if cleared.Disabled {
+		t.Fatalf("cleared override = %+v, want disabled=false", cleared)
+	}
+
+	items, err := listUpdatePolicyOverrides(policy.ID)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyOverrides() unexpected error: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("override items = %+v, want none after clearing", items)
+	}
+
+	overrides, err := loadAllUpdatePolicyOverrides()
+	if err != nil {
+		t.Fatalf("loadAllUpdatePolicyOverrides() unexpected error: %v", err)
+	}
+	if perPolicy := overrides[policy.ID]; perPolicy != nil {
+		if disabled, exists := perPolicy["srv-override"]; exists {
+			t.Fatalf("override state persisted as %t, want row removed", disabled)
+		}
+	}
+}
+
+func TestCanonicalScheduledForUTCUsesFirstFallbackOccurrence(t *testing.T) {
+	oldLocal := time.Local
+	loc, err := time.LoadLocation("America/Toronto")
+	if err != nil {
+		t.Fatalf("LoadLocation() unexpected error: %v", err)
+	}
+	time.Local = loc
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+
+	firstOccurrence := time.Date(2026, time.November, 1, 1, 30, 0, 0, loc)
+	secondParsed, err := time.Parse("2006-01-02 15:04 -0700 MST", "2026-11-01 01:30 -0500 EST")
+	if err != nil {
+		t.Fatalf("Parse() unexpected error: %v", err)
+	}
+	secondOccurrence := secondParsed.In(loc)
+
+	want := firstOccurrence.UTC().Format(jobTimestampLayout)
+	if got := canonicalScheduledForUTC(firstOccurrence); got != want {
+		t.Fatalf("canonicalScheduledForUTC(first) = %q, want %q", got, want)
+	}
+	if got := canonicalScheduledForUTC(secondOccurrence); got != want {
+		t.Fatalf("canonicalScheduledForUTC(second) = %q, want %q", got, want)
+	}
+}
+
 func TestProcessDueUpdatePoliciesDedupesAndHandlesSkips(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "update-policy-scheduler.db")
 	prepareUpdatePolicyTestState(t, dbFile)

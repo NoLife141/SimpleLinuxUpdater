@@ -724,6 +724,20 @@ func setUpdatePolicyOverride(policyID int64, serverName string, disabled bool) (
 		return UpdatePolicyOverride{}, errors.New("policy_id and server_name are required")
 	}
 	now := jobTimestampNow()
+	if !disabled {
+		if _, err := getDB().Exec(`
+			DELETE FROM update_policy_overrides
+			 WHERE policy_id = ? AND server_name = ?
+		`, policyID, serverName); err != nil {
+			return UpdatePolicyOverride{}, err
+		}
+		return UpdatePolicyOverride{
+			PolicyID:   policyID,
+			ServerName: serverName,
+			Disabled:   false,
+			UpdatedAt:  now,
+		}, nil
+	}
 	if _, err := getDB().Exec(`
 		INSERT INTO update_policy_overrides (policy_id, server_name, disabled, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?)
@@ -1121,6 +1135,27 @@ func nextWeekdayToken(token string) string {
 	default:
 		return "mon"
 	}
+}
+
+func canonicalScheduledForUTC(slotLocal time.Time) string {
+	loc := slotLocal.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	// Rebuilding the wall-clock minute through time.Date makes the repeated
+	// fallback-hour slot resolve to its first occurrence, so the scheduler
+	// keeps a single run key for that local minute.
+	canonicalLocal := time.Date(
+		slotLocal.Year(),
+		slotLocal.Month(),
+		slotLocal.Day(),
+		slotLocal.Hour(),
+		slotLocal.Minute(),
+		0,
+		0,
+		loc,
+	)
+	return canonicalLocal.UTC().Format(jobTimestampLayout)
 }
 
 func blackoutApplies(slotLocal time.Time, windows []UpdatePolicyBlackoutWindow) bool {
@@ -1793,7 +1828,7 @@ func processDueUpdatePolicies(now time.Time) error {
 		return err
 	}
 	slotLocal := now.In(time.Local).Truncate(time.Minute)
-	scheduledForUTC := slotLocal.UTC().Format(jobTimestampLayout)
+	scheduledForUTC := canonicalScheduledForUTC(slotLocal)
 	serversSnapshot := snapshotServers()
 
 	candidatesByServer := make(map[string][]scheduledPolicyCandidate)
