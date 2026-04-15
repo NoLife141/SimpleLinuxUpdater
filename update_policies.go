@@ -44,6 +44,7 @@ const (
 	updatePolicyRunReasonRestart     = "restart"
 	updatePolicyRunReasonNoMatch     = "no_match"
 	updatePolicyRunReasonMissing     = "missing"
+	updatePolicyRunReasonMaintenance = "maintenance"
 	updatePolicyRunReasonPersistence = "persistence"
 
 	updatePolicyGlobalBlackoutsSetting     = "update_policy_global_blackouts"
@@ -1486,6 +1487,15 @@ func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server S
 		status := updatePolicyRunFailed
 		reason := updatePolicyRunReasonPersistence
 		summary := "Failed to create scheduled update job"
+		auditAction := "schedule.run.failed"
+		auditStatus := "failure"
+		if errors.Is(err, errMaintenanceModeActive) {
+			status = updatePolicyRunSkipped
+			reason = updatePolicyRunReasonMaintenance
+			summary = "Maintenance mode active; scheduled update skipped"
+			auditAction = "schedule.run.skipped"
+			auditStatus = "skipped"
+		}
 		finishedAt := jobTimestampNow()
 		_ = updateUpdatePolicyRun(run.ID, updatePolicyRunUpdate{
 			Status:     &status,
@@ -1493,7 +1503,7 @@ func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server S
 			Summary:    &summary,
 			FinishedAt: &finishedAt,
 		})
-		auditWithActor("system", "", "schedule.run.failed", "server", server.Name, "failure", summary, map[string]any{
+		auditWithActor("system", "", auditAction, "server", server.Name, auditStatus, summary, map[string]any{
 			"policy_id":         policy.ID,
 			"policy_name":       policy.Name,
 			"scheduled_for_utc": run.ScheduledForUTC,
@@ -1584,6 +1594,15 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 		status := updatePolicyRunFailed
 		reason := updatePolicyRunReasonPersistence
 		summary := "Failed to create scheduled scan job"
+		auditAction := "schedule.run.failed"
+		auditStatus := "failure"
+		if errors.Is(err, errMaintenanceModeActive) {
+			status = updatePolicyRunSkipped
+			reason = updatePolicyRunReasonMaintenance
+			summary = "Maintenance mode active; scheduled scan skipped"
+			auditAction = "schedule.run.skipped"
+			auditStatus = "skipped"
+		}
 		finishedAt := jobTimestampNow()
 		_ = updateUpdatePolicyRun(run.ID, updatePolicyRunUpdate{
 			Status:     &status,
@@ -1591,7 +1610,7 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 			Summary:    &summary,
 			FinishedAt: &finishedAt,
 		})
-		auditWithActor("system", "", "schedule.run.failed", "server", server.Name, "failure", summary, map[string]any{
+		auditWithActor("system", "", auditAction, "server", server.Name, auditStatus, summary, map[string]any{
 			"policy_id":         policy.ID,
 			"policy_name":       policy.Name,
 			"scheduled_for_utc": run.ScheduledForUTC,

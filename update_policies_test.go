@@ -844,6 +844,148 @@ func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) 
 	}
 }
 
+func TestRunScheduledUpdatePolicyMaintenanceModeSkipsRun(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-maintenance-update.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	server := Server{Name: "srv-maint-update", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Maintenance update skip",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionApprovalRequired,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     time.Now().In(time.Local).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("create maintenance update policy: %v", err)
+	}
+	run, inserted, err := createUpdatePolicyRun(UpdatePolicyRun{
+		PolicyID:        policy.ID,
+		PolicyName:      policy.Name,
+		ServerName:      server.Name,
+		ScheduledForUTC: time.Now().UTC().Format(jobTimestampLayout),
+		ExecutionMode:   policy.ExecutionMode,
+		PackageScope:    policy.PackageScope,
+		Status:          updatePolicyRunQueued,
+		Summary:         "Queued",
+		ResultJSON:      "{}",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("createUpdatePolicyRun(maintenance update) = (%+v, %t, %v), want inserted", run, inserted, err)
+	}
+
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      "backup_restore",
+		JobID:     "job-maint-update",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Actor:     "test",
+	})
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(MaintenanceState{})
+	})
+
+	runScheduledUpdatePolicy(run, policy, server)
+
+	currentRun, err := getUpdatePolicyRun(run.ID)
+	if err != nil {
+		t.Fatalf("getUpdatePolicyRun(maintenance update) unexpected error: %v", err)
+	}
+	if currentRun.Status != updatePolicyRunSkipped {
+		t.Fatalf("maintenance update status = %q, want %q", currentRun.Status, updatePolicyRunSkipped)
+	}
+	if currentRun.Reason != updatePolicyRunReasonMaintenance {
+		t.Fatalf("maintenance update reason = %q, want %q", currentRun.Reason, updatePolicyRunReasonMaintenance)
+	}
+	if strings.TrimSpace(currentRun.JobID) != "" {
+		t.Fatalf("maintenance update job_id = %q, want empty", currentRun.JobID)
+	}
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil || runtimeStatus.Status != "idle" {
+		t.Fatalf("runtime status after maintenance update skip = %+v, want idle", runtimeStatus)
+	}
+}
+
+func TestRunScheduledScanPolicyMaintenanceModeSkipsRun(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-maintenance-scan.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	server := Server{Name: "srv-maint-scan", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"scan"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"scan"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Maintenance scan skip",
+		Enabled:       true,
+		TargetTag:     "scan",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     time.Now().In(time.Local).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("create maintenance scan policy: %v", err)
+	}
+	run, inserted, err := createUpdatePolicyRun(UpdatePolicyRun{
+		PolicyID:        policy.ID,
+		PolicyName:      policy.Name,
+		ServerName:      server.Name,
+		ScheduledForUTC: time.Now().UTC().Format(jobTimestampLayout),
+		ExecutionMode:   policy.ExecutionMode,
+		PackageScope:    policy.PackageScope,
+		Status:          updatePolicyRunQueued,
+		Summary:         "Queued",
+		ResultJSON:      "{}",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("createUpdatePolicyRun(maintenance scan) = (%+v, %t, %v), want inserted", run, inserted, err)
+	}
+
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      "backup_restore",
+		JobID:     "job-maint-scan",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Actor:     "test",
+	})
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(MaintenanceState{})
+	})
+
+	runScheduledScanPolicy(run, policy, server)
+
+	currentRun, err := getUpdatePolicyRun(run.ID)
+	if err != nil {
+		t.Fatalf("getUpdatePolicyRun(maintenance scan) unexpected error: %v", err)
+	}
+	if currentRun.Status != updatePolicyRunSkipped {
+		t.Fatalf("maintenance scan status = %q, want %q", currentRun.Status, updatePolicyRunSkipped)
+	}
+	if currentRun.Reason != updatePolicyRunReasonMaintenance {
+		t.Fatalf("maintenance scan reason = %q, want %q", currentRun.Reason, updatePolicyRunReasonMaintenance)
+	}
+	if strings.TrimSpace(currentRun.JobID) != "" {
+		t.Fatalf("maintenance scan job_id = %q, want empty", currentRun.JobID)
+	}
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil || runtimeStatus.Status != "idle" {
+		t.Fatalf("runtime status after maintenance scan skip = %+v, want idle", runtimeStatus)
+	}
+}
+
 func strconvFormatInt(v int64) string {
 	return strconv.FormatInt(v, 10)
 }
