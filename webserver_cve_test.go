@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -475,6 +476,261 @@ func TestRunUpdateWithActorSecurityApprovalRecordsAuditMeta(t *testing.T) {
 	}
 	if pkg, ok := rawPackages[0].(string); !ok || pkg != "openssl" {
 		t.Fatalf("approved_packages[0] = %v, want openssl", rawPackages[0])
+	}
+}
+
+func TestStartPendingUpdateCVEEnrichmentCreatesChildJob(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "cve-child-job.db"))
+	server := Server{Name: "srv-cve-child", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pendingUpdates := preparePendingUpdatesForCVE([]PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}})
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {
+			Name:           server.Name,
+			Status:         "pending_approval",
+			PendingUpdates: clonePendingUpdates(pendingUpdates),
+		},
+	}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	parentJob, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return &scriptedSSHConnection{
+			responses: map[string]scriptedResponse{
+				buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\nCVE-2026-1001\n"},
+			},
+		}, nil
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	startPendingUpdateCVEEnrichment(
+		server,
+		&ssh.ClientConfig{User: server.User, Auth: []ssh.AuthMethod{}},
+		pendingUpdates,
+		parentJob.ID,
+		"tester",
+		"127.0.0.1",
+	)
+
+	waitForCondition(t, 5*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		status := statusMap[server.Name]
+		return status != nil &&
+			len(status.PendingUpdates) == 1 &&
+			status.PendingUpdates[0].CVEState == "ready" &&
+			len(status.PendingUpdates[0].CVEs) == 2
+	}, "CVE enrichment child job updates pending package state")
+
+	waitForUpdateRunners()
+
+	var childStatus string
+	if err := getDB().QueryRow(
+		"SELECT status FROM jobs WHERE kind = ? AND parent_job_id = ? AND server_name = ? LIMIT 1",
+		jobKindCVEEnrichment,
+		parentJob.ID,
+		server.Name,
+	).Scan(&childStatus); err != nil {
+		t.Fatalf("query child CVE job: %v", err)
+	}
+	if childStatus != jobStatusSucceeded {
+		t.Fatalf("child CVE job status = %q, want %q", childStatus, jobStatusSucceeded)
+	}
+}
+
+func TestStartPendingUpdateCVEEnrichmentPersistsFailedChildJobOnDialFailure(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "cve-child-job-failure.db"))
+	server := Server{Name: "srv-cve-child-failure", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pendingUpdates := preparePendingUpdatesForCVE([]PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}})
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {
+			Name:           server.Name,
+			Status:         "pending_approval",
+			PendingUpdates: clonePendingUpdates(pendingUpdates),
+		},
+	}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	parentJob, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return nil, errors.New("simulated cve dial failure")
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	startPendingUpdateCVEEnrichment(
+		server,
+		&ssh.ClientConfig{User: server.User, Auth: []ssh.AuthMethod{}},
+		pendingUpdates,
+		parentJob.ID,
+		"tester",
+		"127.0.0.1",
+	)
+
+	waitForUpdateRunners()
+
+	var childStatus, childErrorClass, childMeta string
+	if err := getDB().QueryRow(
+		"SELECT status, error_class, meta_json FROM jobs WHERE kind = ? AND parent_job_id = ? AND server_name = ? LIMIT 1",
+		jobKindCVEEnrichment,
+		parentJob.ID,
+		server.Name,
+	).Scan(&childStatus, &childErrorClass, &childMeta); err != nil {
+		t.Fatalf("query failed child CVE job: %v", err)
+	}
+	if childStatus != jobStatusFailed {
+		t.Fatalf("failed child CVE job status = %q, want %q", childStatus, jobStatusFailed)
+	}
+	if childErrorClass != "dial" {
+		t.Fatalf("failed child CVE job error_class = %q, want %q", childErrorClass, "dial")
+	}
+	if !strings.Contains(childMeta, "simulated cve dial failure") {
+		t.Fatalf("failed child CVE job meta_json = %q, want dial error", childMeta)
+	}
+}
+
+func TestStartPendingUpdateCVEEnrichmentCancelledChildJobUsesCompletePhase(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "cve-child-job-cancelled.db"))
+	server := Server{Name: "srv-cve-child-cancelled", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pendingUpdates := preparePendingUpdatesForCVE([]PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}})
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {
+			Name:           server.Name,
+			Status:         "idle",
+			PendingUpdates: clonePendingUpdates(pendingUpdates),
+		},
+	}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	parentJob, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusRunning,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return &scriptedSSHConnection{}, nil
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	startPendingUpdateCVEEnrichment(
+		server,
+		&ssh.ClientConfig{User: server.User, Auth: []ssh.AuthMethod{}},
+		pendingUpdates,
+		parentJob.ID,
+		"tester",
+		"127.0.0.1",
+	)
+
+	waitForUpdateRunners()
+
+	var childStatus, childPhase string
+	if err := getDB().QueryRow(
+		"SELECT status, phase FROM jobs WHERE kind = ? AND parent_job_id = ? AND server_name = ? LIMIT 1",
+		jobKindCVEEnrichment,
+		parentJob.ID,
+		server.Name,
+	).Scan(&childStatus, &childPhase); err != nil {
+		t.Fatalf("query cancelled child CVE job: %v", err)
+	}
+	if childStatus != jobStatusCancelled || childPhase != jobPhaseComplete {
+		t.Fatalf("cancelled child CVE job status/phase = %q/%q, want %q/%q", childStatus, childPhase, jobStatusCancelled, jobPhaseComplete)
+	}
+}
+
+func TestStartPendingUpdateCVEEnrichmentCreateJobFailureMarksPackagesUnavailable(t *testing.T) {
+	preserveServerState(t)
+	preserveDBState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "cve-child-job-create-failure.db"))
+	server := Server{Name: "srv-cve-child-create-failure", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pendingUpdates := preparePendingUpdatesForCVE([]PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}})
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {
+			Name:           server.Name,
+			Status:         "pending_approval",
+			PendingUpdates: clonePendingUpdates(pendingUpdates),
+		},
+	}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      jobKindBackupRestore,
+		JobID:     "job-maintenance-cve",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+
+	startPendingUpdateCVEEnrichment(
+		server,
+		&ssh.ClientConfig{User: server.User, Auth: []ssh.AuthMethod{}},
+		pendingUpdates,
+		"parent-job",
+		"tester",
+		"127.0.0.1",
+	)
+
+	status := currentStatusSnapshot(server.Name)
+	if status == nil || len(status.PendingUpdates) != 1 {
+		t.Fatalf("pending updates missing after create-job failure: %+v", status)
+	}
+	if status.PendingUpdates[0].CVEState != "unavailable" {
+		t.Fatalf("CVE state after create-job failure = %q, want %q", status.PendingUpdates[0].CVEState, "unavailable")
 	}
 }
 

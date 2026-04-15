@@ -44,14 +44,20 @@ func preserveDBState(t *testing.T) {
 	origDB := db
 	origOncePtr := &dbOnce
 	origOnceDone := origDB != nil
+	origJobManager := currentJobManager()
+	origMaintenanceState := currentMaintenanceState()
 	db = nil
 	*origOncePtr = sync.Once{}
+	setCurrentJobManager(nil)
+	setCurrentMaintenanceState(MaintenanceState{})
 	t.Cleanup(func() {
 		if db != nil {
 			_ = db.Close()
 		}
 		db = origDB
 		*origOncePtr = sync.Once{}
+		setCurrentJobManager(origJobManager)
+		setCurrentMaintenanceState(origMaintenanceState)
 		if origOnceDone {
 			origOncePtr.Do(func() {})
 		}
@@ -205,10 +211,142 @@ func TestWorkersDoNotPanicWhenStatusMissing(t *testing.T) {
 	}
 
 	server := Server{Name: "missing"}
-	assertNoPanic("runUpdate", func() { runUpdate(server) })
-	assertNoPanic("runAutoremove", func() { runAutoremove(server) })
-	assertNoPanic("runSudoersBootstrap", func() { runSudoersBootstrap(server, "pw") })
-	assertNoPanic("runSudoersDisable", func() { runSudoersDisable(server, "pw") })
+	retryPolicy := loadRetryPolicyFromEnv()
+	assertNoPanic("runUpdateWithActor", func() { runUpdateWithActor(server, "system", "", retryPolicy) })
+	assertNoPanic("runAutoremoveWithActor", func() { runAutoremoveWithActor(server, "system", "", retryPolicy) })
+	assertNoPanic("runSudoersBootstrapWithActor", func() { runSudoersBootstrapWithActor(server, "pw", "system", "", retryPolicy) })
+	assertNoPanic("runSudoersDisableWithActor", func() { runSudoersDisableWithActor(server, "pw", "system", "", retryPolicy) })
+}
+
+func TestRunWithActorSharedMarksJobFailedWhenRuntimeStatusMissing(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "missing-runtime-status-job.db"))
+
+	server := Server{Name: "srv-missing-runtime-status", Host: "example.org", Port: 22, User: "root"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{}
+	mu.Unlock()
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	runUpdateJobWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv(), job.ID)
+
+	var status, phase, summary, errorClass string
+	if err := getDB().QueryRow("SELECT status, phase, summary, error_class FROM jobs WHERE id = ?", job.ID).Scan(&status, &phase, &summary, &errorClass); err != nil {
+		t.Fatalf("query failed job: %v", err)
+	}
+	if status != jobStatusFailed || phase != jobPhaseComplete {
+		t.Fatalf("job status/phase = %q/%q, want %q/%q", status, phase, jobStatusFailed, jobPhaseComplete)
+	}
+	if summary != "Server runtime status missing" {
+		t.Fatalf("job summary = %q, want %q", summary, "Server runtime status missing")
+	}
+	if errorClass != "runtime_state" {
+		t.Fatalf("job error_class = %q, want %q", errorClass, "runtime_state")
+	}
+}
+
+func TestInitializeJobManagerMarksUnfinishedJobsInterrupted(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "jobs-interrupted.db"))
+
+	server := Server{Name: "srv-interrupted", Host: "example.org", Port: 22, User: "root"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "pending_approval", Upgradable: []string{"openssl"}},
+	}
+	mu.Unlock()
+
+	db := getDB()
+	jm := newJobManager(db)
+	for _, status := range []string{jobStatusQueued, jobStatusRunning, jobStatusWaitingApproval} {
+		if _, err := jm.CreateJob(JobCreateParams{
+			Kind:       jobKindUpdate,
+			ServerName: server.Name,
+			Actor:      "tester",
+			Status:     status,
+		}); err != nil {
+			t.Fatalf("CreateJob(%s) unexpected error: %v", status, err)
+		}
+	}
+
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+
+	var interruptedCount int
+	if err := getDB().QueryRow("SELECT COUNT(1) FROM jobs WHERE status = ?", jobStatusInterrupted).Scan(&interruptedCount); err != nil {
+		t.Fatalf("query interrupted jobs: %v", err)
+	}
+	if interruptedCount != 3 {
+		t.Fatalf("interrupted job count = %d, want 3", interruptedCount)
+	}
+
+	mu.Lock()
+	finalStatus := statusMap[server.Name]
+	mu.Unlock()
+	if finalStatus == nil || finalStatus.Status != "idle" {
+		t.Fatalf("runtime status after recovery = %+v, want idle", finalStatus)
+	}
+}
+
+func TestPruneAuditEventsSkipsDuringMaintenance(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit-prune-maintenance.db"))
+
+	db := getDB()
+	oldTimestamp := time.Now().UTC().AddDate(0, 0, -(auditRetentionDays + 7)).Format(time.RFC3339)
+	if _, err := db.Exec(`
+		INSERT INTO audit_events(created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip)
+		VALUES(?, 'tester', 'audit.prune.test', 'system', 'audit', 'success', 'old event', '{}', '', '')
+	`, oldTimestamp); err != nil {
+		t.Fatalf("insert audit event: %v", err)
+	}
+
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      jobKindBackupRestore,
+		JobID:     "job-maintenance-audit",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if err := pruneAuditEvents(auditRetentionDays); err != nil {
+		t.Fatalf("pruneAuditEvents(active maintenance) unexpected error: %v", err)
+	}
+
+	var remaining int
+	if err := db.QueryRow("SELECT COUNT(1) FROM audit_events").Scan(&remaining); err != nil {
+		t.Fatalf("query remaining audit events: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining audit events during maintenance = %d, want 1", remaining)
+	}
+
+	setCurrentMaintenanceState(MaintenanceState{})
+	if err := pruneAuditEvents(auditRetentionDays); err != nil {
+		t.Fatalf("pruneAuditEvents() unexpected error: %v", err)
+	}
+	if err := db.QueryRow("SELECT COUNT(1) FROM audit_events").Scan(&remaining); err != nil {
+		t.Fatalf("query remaining audit events after prune: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining audit events after maintenance cleared = %d, want 0", remaining)
+	}
 }
 
 func TestTrustHostKeyWritesKnownHosts(t *testing.T) {

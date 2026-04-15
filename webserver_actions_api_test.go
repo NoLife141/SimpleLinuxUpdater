@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +78,7 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
 		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("update start status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -125,6 +129,7 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
 		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
 		handler.ServeHTTP(rec, req)
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("update start conflict status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
@@ -158,10 +163,23 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 			},
 		}
 	}()
+	_, createErr := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if createErr != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", createErr)
+	}
 
 	approveRec := httptest.NewRecorder()
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
 	approveReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(approveReq)
 	handler.ServeHTTP(approveRec, approveReq)
 	if approveRec.Code != http.StatusOK {
 		t.Fatalf("approve status = %d, want %d (body=%s)", approveRec.Code, http.StatusOK, approveRec.Body.String())
@@ -179,6 +197,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	approveAgainRec := httptest.NewRecorder()
 	approveAgainReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
 	approveAgainReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(approveAgainReq)
 	handler.ServeHTTP(approveAgainRec, approveAgainReq)
 	if approveAgainRec.Code != http.StatusConflict {
 		t.Fatalf("approve conflict status = %d, want %d (body=%s)", approveAgainRec.Code, http.StatusConflict, approveAgainRec.Body.String())
@@ -197,10 +216,23 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 		status.PendingUpdates = clonePendingUpdates(pending)
 		status.Logs = "pending"
 	}()
+	_, createErr = currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if createErr != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", createErr)
+	}
 
 	cancelRec := httptest.NewRecorder()
 	cancelReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
 	cancelReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(cancelReq)
 	handler.ServeHTTP(cancelRec, cancelReq)
 	if cancelRec.Code != http.StatusOK {
 		t.Fatalf("cancel status = %d, want %d (body=%s)", cancelRec.Code, http.StatusOK, cancelRec.Body.String())
@@ -221,9 +253,125 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 	cancelAgainRec := httptest.NewRecorder()
 	cancelAgainReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
 	cancelAgainReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(cancelAgainReq)
 	handler.ServeHTTP(cancelAgainRec, cancelAgainReq)
 	if cancelAgainRec.Code != http.StatusConflict {
 		t.Fatalf("cancel conflict status = %d, want %d (body=%s)", cancelAgainRec.Code, http.StatusConflict, cancelAgainRec.Body.String())
+	}
+}
+
+func TestCancelRouteReturnsFailureWhenPendingJobCannotBePersisted(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-persist-failure.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-cancel-persist-failure", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("cancel status = %d, want %d (body=%s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil {
+		t.Fatalf("status snapshot missing after failed cancel")
+	}
+	if runtimeStatus.Status != "pending_approval" || runtimeStatus.Logs != "pending" {
+		t.Fatalf("runtime status after failed cancel = %+v, want restored pending state", runtimeStatus)
+	}
+	if len(runtimeStatus.Upgradable) != 1 || len(runtimeStatus.PendingUpdates) != 1 {
+		t.Fatalf("runtime status after failed cancel should keep pending data, got %+v", runtimeStatus)
+	}
+}
+
+func TestApproveRouteUpdatesJobWithoutOverwritingApprovedRuntimeState(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-approve-job-sync.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-approval-job-sync", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		status := statusMap[server.Name]
+		if status == nil || status.Status != "approved" {
+			t.Fatalf("status after approve = %+v, want approved", status)
+		}
+	}()
+
+	var approvedJobStatus, approvedJobPhase string
+	if err := getDB().QueryRow("SELECT status, phase FROM jobs WHERE id = ?", job.ID).Scan(&approvedJobStatus, &approvedJobPhase); err != nil {
+		t.Fatalf("query approved job: %v", err)
+	}
+	if approvedJobStatus != jobStatusRunning || approvedJobPhase != jobPhaseAptUpgrade {
+		t.Fatalf("approved job status/phase = %q/%q, want %q/%q", approvedJobStatus, approvedJobPhase, jobStatusRunning, jobPhaseAptUpgrade)
 	}
 }
 
@@ -283,6 +431,7 @@ func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/api/update/"+serverName, nil)
 			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
 			handler.ServeHTTP(rec, req)
 			resultsCh <- result{name: serverName, code: rec.Code, body: rec.Body.String()}
 		}(s.Name)
@@ -294,5 +443,446 @@ func TestBulkUpdateRouteHandlesConcurrentStarts(t *testing.T) {
 		if res.code != http.StatusOK {
 			t.Fatalf("bulk update start for %s status = %d, want %d (body=%s)", res.name, res.code, http.StatusOK, res.body)
 		}
+	}
+}
+
+func TestAsyncActionRoutesReturnJobIDAndPersistJobRecords(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		kind       string
+		statusName string
+	}{
+		{name: "update", path: "/api/update/%s", body: "", kind: jobKindUpdate, statusName: "updating"},
+		{name: "autoremove", path: "/api/autoremove/%s", body: "", kind: jobKindAutoremove, statusName: "autoremove"},
+		{name: "sudoers enable", path: "/api/sudoers/%s", body: `{"password":"pw"}`, kind: jobKindSudoersEnable, statusName: "sudoers"},
+		{name: "sudoers disable", path: "/api/sudoers/disable/%s", body: `{"password":"pw"}`, kind: jobKindSudoersDisable, statusName: "sudoers"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.kind, "/", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.kind, "_", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+				}
+			}()
+
+			origDial := getDialSSHConnection()
+			setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+				return &slowSSHConnection{delay: 50 * time.Millisecond}, nil
+			})
+			t.Cleanup(func() {
+				waitForUpdateRunners()
+				setDialSSHConnection(origDial)
+			})
+			t.Setenv(retryMaxAttemptsEnv, "1")
+			t.Setenv(sshCommandTimeoutSecondsEnv, "1")
+
+			var body *bytes.Buffer
+			if tc.body == "" {
+				body = bytes.NewBuffer(nil)
+			} else {
+				body = bytes.NewBufferString(tc.body)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), body)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			var payload struct {
+				JobID string `json:"job_id"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("unmarshal %s response: %v", tc.name, err)
+			}
+			if strings.TrimSpace(payload.JobID) == "" {
+				t.Fatalf("%s response missing job_id: %s", tc.name, rec.Body.String())
+			}
+
+			var jobKind, jobStatus string
+			if err := getDB().QueryRow("SELECT kind, status FROM jobs WHERE id = ?", payload.JobID).Scan(&jobKind, &jobStatus); err != nil {
+				t.Fatalf("query %s job: %v", tc.name, err)
+			}
+			if jobKind != tc.kind {
+				t.Fatalf("%s job kind = %q, want %q", tc.name, jobKind, tc.kind)
+			}
+			if strings.TrimSpace(jobStatus) == "" {
+				t.Fatalf("%s job status should not be empty", tc.name)
+			}
+		})
+	}
+}
+
+func TestActionRoutesRestoreRuntimeSnapshotWhenJobCreationFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		wantErr string
+	}{
+		{name: "update", path: "/api/update/%s", wantErr: "Failed to create update job"},
+		{name: "autoremove", path: "/api/autoremove/%s", wantErr: "Failed to create autoremove job"},
+		{name: "sudoers enable", path: "/api/sudoers/%s", body: `{"password":"pw"}`, wantErr: "Failed to create sudoers job"},
+		{name: "sudoers disable", path: "/api/sudoers/disable/%s", body: `{"password":"pw"}`, wantErr: "Failed to create sudoers disable job"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.name, " ", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.name, " ", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			original := &ServerStatus{
+				Name:           server.Name,
+				Host:           server.Host,
+				Port:           server.Port,
+				User:           server.User,
+				Status:         "idle",
+				Logs:           "",
+				ApprovalScope:  "all",
+				Upgradable:     []string{"held-package"},
+				PendingUpdates: []PendingUpdate{{Package: "openssl", Raw: "Inst openssl"}},
+				Tags:           []string{"prod"},
+			}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {
+						Name:           original.Name,
+						Host:           original.Host,
+						Port:           original.Port,
+						User:           original.User,
+						Status:         original.Status,
+						Logs:           original.Logs,
+						ApprovalScope:  original.ApprovalScope,
+						Upgradable:     append([]string(nil), original.Upgradable...),
+						PendingUpdates: clonePendingUpdates(original.PendingUpdates),
+						Tags:           append([]string(nil), original.Tags...),
+					},
+				}
+			}()
+
+			setCurrentJobManager(nil)
+
+			var body *bytes.Buffer
+			if tc.body == "" {
+				body = bytes.NewBuffer(nil)
+			} else {
+				body = bytes.NewBufferString(tc.body)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), body)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantErr) {
+				t.Fatalf("%s body = %s, want error containing %q", tc.name, rec.Body.String(), tc.wantErr)
+			}
+
+			restored := currentStatusSnapshot(server.Name)
+			if restored == nil {
+				t.Fatalf("%s status snapshot missing after rollback", tc.name)
+			}
+			if !reflect.DeepEqual(restored, original) {
+				t.Fatalf("%s restored status = %+v, want %+v", tc.name, restored, original)
+			}
+		})
+	}
+}
+
+func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-summary.db")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	t.Setenv(postchecksEnabledEnv, "false")
+
+	server := Server{Name: "srv-cancel-summary", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+	}
+	mu.Unlock()
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	origDial := getDialSSHConnection()
+	updateConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDiskSpaceCmd: {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:     {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd: {},
+			precheckAptCheckCmd:  {},
+			aptUpdateCmd:         {},
+			aptListUpgradableCmd: {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
+		},
+	}
+	cveConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1002\n"},
+		},
+	}
+	var dialCalls int32
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	done := make(chan struct{})
+	go func() {
+		runUpdateJobWithActor(server, "tester", "127.0.0.1", loadRetryPolicyFromEnv(), job.ID)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		status := statusMap[server.Name]
+		currentStatus := ""
+		currentLogs := ""
+		if status != nil {
+			currentStatus = status.Status
+			currentLogs = status.Logs
+		}
+		mu.Unlock()
+		if currentStatus == "pending_approval" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for pending approval, last status=%q logs=%s", currentStatus, currentLogs)
+		}
+	}
+
+	logsBeforeCancel := currentStatusLogs(server.Name)
+	mu.Lock()
+	status := statusMap[server.Name]
+	status.Status = "cancelled"
+	status.ApprovalScope = ""
+	status.Logs = ""
+	status.Upgradable = nil
+	status.PendingUpdates = nil
+	mu.Unlock()
+
+	cancelledStatus := jobStatusCancelled
+	cancelledPhase := jobPhaseComplete
+	cancelledSummary := "Update cancelled"
+	finishedAt := jobTimestampNow()
+	if err := currentJobManager().UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+		Status:     &cancelledStatus,
+		Phase:      &cancelledPhase,
+		Summary:    &cancelledSummary,
+		LogsText:   &logsBeforeCancel,
+		FinishedAt: &finishedAt,
+	}); err != nil {
+		t.Fatalf("UpdateJobWithoutRuntimeSync(cancelled) unexpected error: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("timed out waiting for update flow to exit after cancellation")
+	}
+
+	var jobStatus, jobSummary string
+	if err := getDB().QueryRow("SELECT status, summary FROM jobs WHERE id = ?", job.ID).Scan(&jobStatus, &jobSummary); err != nil {
+		t.Fatalf("query cancelled job: %v", err)
+	}
+	if jobStatus != jobStatusCancelled {
+		t.Fatalf("cancelled job status = %q, want %q", jobStatus, jobStatusCancelled)
+	}
+	if jobSummary != "Update cancelled" {
+		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+}
+
+func TestCancelRouteDoesNotRehydrateClearedRuntimeLogsFromJobSync(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-route-job-sync.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-cancel-route-job-sync", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil {
+		t.Fatalf("status snapshot missing after cancel")
+	}
+	if runtimeStatus.Status != "cancelled" {
+		t.Fatalf("runtime status after cancel = %+v, want cancelled", runtimeStatus)
+	}
+	if runtimeStatus.Logs != "" || len(runtimeStatus.Upgradable) != 0 || len(runtimeStatus.PendingUpdates) != 0 {
+		t.Fatalf("cancel route should keep cleared runtime state, got %+v", runtimeStatus)
+	}
+
+	var jobStatus, jobPhase, jobSummary, jobLogs string
+	if err := getDB().QueryRow("SELECT status, phase, summary, logs_text FROM jobs WHERE id = ?", job.ID).Scan(&jobStatus, &jobPhase, &jobSummary, &jobLogs); err != nil {
+		t.Fatalf("query cancelled job: %v", err)
+	}
+	if jobStatus != jobStatusCancelled || jobPhase != jobPhaseComplete {
+		t.Fatalf("cancelled job status/phase = %q/%q, want %q/%q", jobStatus, jobPhase, jobStatusCancelled, jobPhaseComplete)
+	}
+	if jobSummary != "Update cancelled" {
+		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+	if jobLogs != "pending" {
+		t.Fatalf("cancelled job logs_text = %q, want %q", jobLogs, "pending")
+	}
+}
+
+func TestApproveRoutesReturnFailureWhenPendingJobCannotBePersisted(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wantScope string
+	}{
+		{name: "approve all", path: "/api/approve/%s", wantScope: "all"},
+		{name: "approve security", path: "/api/approve-security/%s", wantScope: "security"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.name, " ", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.name, " ", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {
+						Name:           server.Name,
+						Status:         "pending_approval",
+						ApprovalScope:  "",
+						Upgradable:     []string{"openssl"},
+						PendingUpdates: clonePendingUpdates(pending),
+						Logs:           "pending",
+					},
+				}
+			}()
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), nil)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+
+			runtimeStatus := currentStatusSnapshot(server.Name)
+			if runtimeStatus == nil {
+				t.Fatalf("%s runtime status missing after failed approval", tc.name)
+			}
+			if runtimeStatus.Status != "pending_approval" || runtimeStatus.ApprovalScope != "" || runtimeStatus.Logs != "pending" {
+				t.Fatalf("%s runtime status after failed approval = %+v, want restored pending state", tc.name, runtimeStatus)
+			}
+			if len(runtimeStatus.Upgradable) != 1 || len(runtimeStatus.PendingUpdates) != 1 {
+				t.Fatalf("%s runtime status after failed approval should keep pending data, got %+v", tc.name, runtimeStatus)
+			}
+		})
 	}
 }

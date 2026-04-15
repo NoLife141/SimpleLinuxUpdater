@@ -18,6 +18,7 @@ servers.json
 id_rsa*
 
 # local artifacts
+.DS_Store
 debian-updater
 telemetry-id
 webserver

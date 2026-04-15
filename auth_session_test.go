@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alexedwards/argon2id"
 	"github.com/gin-gonic/gin"
@@ -126,6 +127,152 @@ func assertSecurityHeaders(t *testing.T, h http.Header, wantHSTS bool) {
 	}
 	if got := h.Get("Strict-Transport-Security"); got != "" {
 		t.Fatalf("Strict-Transport-Security = %q, want empty", got)
+	}
+}
+
+func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *testing.T) {
+	t.Run("get rejects while restore lock held", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(backupRestoreBarrierMiddleware())
+		r.GET("/probe", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+
+		backupRestoreMu.Lock()
+		defer backupRestoreMu.Unlock()
+
+		done := make(chan int, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+			r.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+
+		select {
+		case code := <-done:
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("GET /probe status = %d, want %d", code, http.StatusServiceUnavailable)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("GET /probe did not reject while restore lock held")
+		}
+	})
+
+	t.Run("backup route rejects when another backup route holds lock", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(backupRestoreBarrierMiddleware())
+		r.POST("/api/backup/restore", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+
+		backupRestoreMu.Lock()
+		defer backupRestoreMu.Unlock()
+
+		done := make(chan int, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/backup/restore", nil)
+			r.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+
+		select {
+		case code := <-done:
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("backup restore status = %d, want %d", code, http.StatusServiceUnavailable)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("backup restore did not reject while restore lock held")
+		}
+	})
+
+	t.Run("backup route rejects while shared readers are active", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(backupRestoreBarrierMiddleware())
+		r.POST("/api/backup/restore", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+
+		backupRestoreMu.RLock()
+		done := make(chan int, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/api/backup/restore", nil)
+			r.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+
+		select {
+		case code := <-done:
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("backup restore status = %d, want %d", code, http.StatusServiceUnavailable)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("backup restore did not reject while shared lock held")
+		}
+		backupRestoreMu.RUnlock()
+	})
+}
+
+func TestMaintenanceModeBlocksRoutesAndAllowsStatusEndpoint(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "maintenance-mode.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionHandler(r)
+
+	state := MaintenanceState{
+		Active:    true,
+		Kind:      jobKindBackupRestore,
+		JobID:     "job-maintenance-test",
+		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		Actor:     "admin",
+		Message:   "Backup restore in progress.",
+	}
+	setCurrentMaintenanceState(state)
+
+	maintenanceRec := httptest.NewRecorder()
+	maintenanceReq := httptest.NewRequest(http.MethodGet, "/api/maintenance", nil)
+	handler.ServeHTTP(maintenanceRec, maintenanceReq)
+	if maintenanceRec.Code != http.StatusOK {
+		t.Fatalf("/api/maintenance status = %d, want %d", maintenanceRec.Code, http.StatusOK)
+	}
+	var gotState MaintenanceState
+	if err := json.Unmarshal(maintenanceRec.Body.Bytes(), &gotState); err != nil {
+		t.Fatalf("unmarshal maintenance state: %v", err)
+	}
+	if !gotState.Active || gotState.JobID != state.JobID || gotState.Kind != state.Kind {
+		t.Fatalf("maintenance state = %+v, want active job=%q kind=%q", gotState, state.JobID, state.Kind)
+	}
+
+	apiRec := httptest.NewRecorder()
+	apiReq := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
+	handler.ServeHTTP(apiRec, apiReq)
+	if apiRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/api/auth/status during maintenance = %d, want %d (body=%s)", apiRec.Code, http.StatusServiceUnavailable, apiRec.Body.String())
+	}
+	if !strings.Contains(apiRec.Body.String(), `"maintenance":true`) {
+		t.Fatalf("maintenance API response missing maintenance flag: %s", apiRec.Body.String())
+	}
+
+	htmlRec := httptest.NewRecorder()
+	htmlReq := httptest.NewRequest(http.MethodGet, "/login", nil)
+	handler.ServeHTTP(htmlRec, htmlReq)
+	if htmlRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/login during maintenance = %d, want %d", htmlRec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(htmlRec.Body.String(), "Maintenance Mode") {
+		t.Fatalf("maintenance HTML page missing title: %s", htmlRec.Body.String())
 	}
 }
 
@@ -716,6 +863,7 @@ func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/metrics/token", nil)
 	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics token create status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -740,6 +888,7 @@ func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/api/metrics/token", nil)
 	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics token rotate status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
@@ -775,6 +924,7 @@ func TestMetricsTokenAPIAndMetricsRouteLifecycle(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodDelete, "/api/metrics/token", nil)
 	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics token clear status = %d, want %d", rec.Code, http.StatusOK)

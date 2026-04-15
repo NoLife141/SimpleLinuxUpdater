@@ -294,20 +294,20 @@ func getDialSSHConnection() func(Server, *ssh.ClientConfig) (sshConnection, erro
 	return dialSSHConnection
 }
 
-func setDialSSHConnection(fn func(Server, *ssh.ClientConfig) (sshConnection, error)) {
-	dialSSHConnectionMu.Lock()
-	defer dialSSHConnectionMu.Unlock()
-	dialSSHConnection = fn
-}
-
 var updateRunnerWG sync.WaitGroup
 
-func startUpdateRunner(server Server, actor, clientIP string, policy RetryPolicy) {
+func startTrackedActionRunner(run func()) {
 	updateRunnerWG.Add(1)
 	go func() {
 		defer updateRunnerWG.Done()
-		runUpdateWithActor(server, actor, clientIP, policy)
+		run()
 	}()
+}
+
+func startUpdateRunner(server Server, actor, clientIP string, policy RetryPolicy, jobID string) {
+	startJobRunner(jobID, func() {
+		runUpdateJobWithActor(server, actor, clientIP, policy, jobID)
+	})
 }
 
 func waitForUpdateRunners() {
@@ -316,10 +316,6 @@ func waitForUpdateRunners() {
 
 func (e retryableTaggedError) Error() string {
 	return e.err.Error()
-}
-
-func (e retryableTaggedError) Unwrap() error {
-	return e.err
 }
 
 func (e retryableTaggedError) Retryable() bool {
@@ -617,7 +613,7 @@ func ensureSchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
 		return err
 	}
-	return nil
+	return ensureJobSchema(db)
 }
 
 func truncateString(s string, maxLen int) string {
@@ -920,8 +916,8 @@ func dialSSHWithRetry(server Server, config *ssh.ClientConfig, policy RetryPolic
 		if attemptsUsed != nil {
 			*attemptsUsed += 1
 		}
-			dial := getDialSSHConnection()
-			c, dialErr := dial(server, config)
+		dial := getDialSSHConnection()
+		c, dialErr := dial(server, config)
 		if dialErr == nil {
 			if client != nil {
 				_ = client.Close()
@@ -2163,6 +2159,18 @@ func pruneAuditEvents(retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
 	}
+	// Check maintenance before taking backupRestoreMu to avoid unnecessary lock
+	// contention, then re-check after backupRestoreMu.RLock() because maintenance
+	// can become active in the gap between the first currentMaintenanceState()
+	// read and acquiring backupRestoreMu.
+	if currentMaintenanceState().Active {
+		return nil
+	}
+	backupRestoreMu.RLock()
+	defer backupRestoreMu.RUnlock()
+	if currentMaintenanceState().Active {
+		return nil
+	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
 	_, err := getDB().Exec("DELETE FROM audit_events WHERE created_at < ?", cutoff)
 	return err
@@ -2413,6 +2421,83 @@ func clonePendingUpdates(src []PendingUpdate) []PendingUpdate {
 	return dst
 }
 
+func stringPtr(s string) *string {
+	return &s
+}
+
+func currentStatusSnapshot(name string) *ServerStatus {
+	mu.Lock()
+	defer mu.Unlock()
+	status := statusMap[name]
+	if status == nil {
+		return nil
+	}
+	copyStatus := *status
+	copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+	copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
+	copyStatus.Tags = append([]string(nil), status.Tags...)
+	return &copyStatus
+}
+
+func restoreStatusSnapshot(name string, snapshot *ServerStatus) {
+	mu.Lock()
+	defer mu.Unlock()
+	if snapshot == nil {
+		delete(statusMap, name)
+		return
+	}
+	restored := *snapshot
+	restored.Upgradable = append([]string(nil), snapshot.Upgradable...)
+	restored.PendingUpdates = clonePendingUpdates(snapshot.PendingUpdates)
+	restored.Tags = append([]string(nil), snapshot.Tags...)
+	statusMap[name] = &restored
+}
+
+func currentStatusLogs(name string) string {
+	snapshot := currentStatusSnapshot(name)
+	if snapshot == nil {
+		return ""
+	}
+	return snapshot.Logs
+}
+
+func activeServerActionNames() []string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	names := make([]string, 0)
+	for name, status := range statusMap {
+		if status == nil || !statusInProgress(status.Status) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
+	jm := currentJobManager()
+	if jm == nil {
+		return JobRecord{}, errors.New("job manager is not initialized")
+	}
+	snapshot := currentStatusSnapshot(serverName)
+	initialLogs := ""
+	if snapshot != nil {
+		initialLogs = snapshot.Logs
+	}
+	return jm.CreateJob(JobCreateParams{
+		Kind:            kind,
+		ServerName:      serverName,
+		Actor:           actor,
+		ClientIP:        clientIP,
+		Status:          jobStatusQueued,
+		LogsText:        initialLogs,
+		RetryPolicyJSON: marshalJobJSON(policy),
+		MetaJSON:        "{}",
+	})
+}
+
 func statusInProgress(status string) bool {
 	return status == "updating" ||
 		status == "pending_approval" ||
@@ -2468,6 +2553,24 @@ func approvePendingUpdate(name, scope string) (exists bool, approved bool) {
 	return exists, true
 }
 
+func cancelPendingUpdate(name string) (exists bool, cancelled bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return exists, false
+	}
+	if status.Status != "pending_approval" {
+		return exists, false
+	}
+	status.Status = "cancelled"
+	status.ApprovalScope = ""
+	status.Logs = ""
+	status.Upgradable = nil
+	status.PendingUpdates = nil
+	return exists, true
+}
+
 func readUploadedKeyData(r io.Reader) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxUploadedKeyBytes+1))
 	if err != nil {
@@ -2518,16 +2621,14 @@ func init() {
 	}
 }
 
-func runUpdate(server Server) {
-	retryPolicy := loadRetryPolicyFromEnv()
-	runUpdateWithActor(server, "system", "", retryPolicy)
-}
-
 type withActorRunner struct {
 	server     Server
 	actor      string
 	clientIP   string
 	policy     RetryPolicy
+	jobID      string
+	jobKind    string
+	jobPhase   string
 	startedAt  time.Time
 	approvedAt time.Time
 
@@ -2564,12 +2665,18 @@ type withActorRunner struct {
 
 func (r *withActorRunner) withStatus(update func(*ServerStatus)) bool {
 	mu.Lock()
-	defer mu.Unlock()
 	status := statusMap[r.server.Name]
 	if status == nil {
+		mu.Unlock()
 		return false
 	}
 	update(status)
+	snapshot := *status
+	snapshot.Upgradable = append([]string(nil), status.Upgradable...)
+	snapshot.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
+	snapshot.Tags = append([]string(nil), status.Tags...)
+	mu.Unlock()
+	r.syncJobFromStatus(&snapshot)
 	return true
 }
 
@@ -2593,6 +2700,87 @@ func (r *withActorRunner) currentLogs() string {
 		return status.Logs
 	}
 	return ""
+}
+
+func (r *withActorRunner) setJobPhase(phase string) {
+	r.jobPhase = strings.TrimSpace(phase)
+	if jm := currentJobManager(); jm != nil && strings.TrimSpace(r.jobID) != "" && r.jobPhase != "" {
+		if err := jm.UpdateJob(r.jobID, JobUpdate{Phase: &r.jobPhase}); err != nil {
+			log.Printf("failed to update job %q phase to %q: %v", r.jobID, r.jobPhase, err)
+		}
+	}
+}
+
+func (r *withActorRunner) syncJobFromStatus(snapshot *ServerStatus) {
+	if snapshot == nil {
+		return
+	}
+	jm := currentJobManager()
+	if jm == nil || strings.TrimSpace(r.jobID) == "" {
+		return
+	}
+	update := JobUpdate{
+		LogsText: &snapshot.Logs,
+	}
+
+	switch snapshot.Status {
+	case "pending_approval":
+		status := jobStatusWaitingApproval
+		phase := jobPhaseApprovalWait
+		summary := "Waiting for approval"
+		update.Status = &status
+		update.Phase = &phase
+		update.Summary = &summary
+	case "done":
+		status := jobStatusSucceeded
+		phase := jobPhaseComplete
+		summary := "Completed successfully"
+		finishedAt := jobTimestampNow()
+		update.Status = &status
+		update.Phase = &phase
+		update.Summary = &summary
+		update.FinishedAt = &finishedAt
+	case "error":
+		status := jobStatusFailed
+		phase := jobPhaseComplete
+		summary := "Completed with errors"
+		finishedAt := jobTimestampNow()
+		errorClass := strings.TrimSpace(r.lastErrClass)
+		update.Status = &status
+		update.Phase = &phase
+		update.Summary = &summary
+		update.FinishedAt = &finishedAt
+		if errorClass != "" {
+			update.ErrorClass = &errorClass
+		}
+	case "cancelled":
+		status := jobStatusCancelled
+		phase := jobPhaseComplete
+		summary := "Cancelled"
+		finishedAt := jobTimestampNow()
+		update.Status = &status
+		update.Phase = &phase
+		update.Summary = &summary
+		update.FinishedAt = &finishedAt
+	case "approved":
+		status := jobStatusRunning
+		phase := jobPhaseAptUpgrade
+		summary := "Approval received"
+		update.Status = &status
+		update.Phase = &phase
+		update.Summary = &summary
+	default:
+		status := jobStatusRunning
+		update.Status = &status
+		if strings.TrimSpace(r.jobPhase) != "" {
+			phase := r.jobPhase
+			update.Phase = &phase
+		}
+	}
+
+	if err := jm.UpdateJob(r.jobID, update); err != nil {
+		log.Printf("failed to sync job %q from status %q: %v", r.jobID, snapshot.Status, err)
+	}
 }
 
 func (r *withActorRunner) markErrorClass(err error) {
@@ -2636,6 +2824,7 @@ func (r *withActorRunner) setupSSH(dialOpName string) bool {
 func runWithActorShared(
 	server Server,
 	actor, clientIP string,
+	jobID, jobKind string,
 	policy RetryPolicy,
 	auditAction string,
 	initStatus func(*ServerStatus, RetryPolicy),
@@ -2649,10 +2838,13 @@ func runWithActorShared(
 		actor:          actor,
 		clientIP:       clientIP,
 		policy:         policy,
+		jobID:          strings.TrimSpace(jobID),
+		jobKind:        strings.TrimSpace(jobKind),
 		commandTimeout: loadSSHCommandTimeoutFromEnv(),
 		lastErrClass:   "none",
 		startedAt:      time.Now().UTC(),
 	}
+	auditHandled := false
 	if auditMeta == nil {
 		auditMeta = func(*withActorRunner, string) map[string]any { return map[string]any{} }
 	}
@@ -2661,6 +2853,9 @@ func runWithActorShared(
 	}
 
 	defer func() {
+		if auditHandled {
+			return
+		}
 		mu.Lock()
 		finalStatus := "unknown"
 		if status := statusMap[server.Name]; status != nil {
@@ -2683,9 +2878,41 @@ func runWithActorShared(
 	if !runner.withStatus(func(status *ServerStatus) {
 		initStatus(status, policy)
 	}) {
+		runner.lastErrClass = "permanent"
+		if jm := currentJobManager(); jm != nil && strings.TrimSpace(runner.jobID) != "" {
+			status := jobStatusFailed
+			phase := jobPhaseComplete
+			summary := "Server runtime status missing"
+			errorClass := "runtime_state"
+			finishedAt := jobTimestampNow()
+			if err := jm.UpdateJob(runner.jobID, JobUpdate{
+				Status:     &status,
+				Phase:      &phase,
+				Summary:    &summary,
+				ErrorClass: &errorClass,
+				FinishedAt: &finishedAt,
+			}); err != nil {
+				log.Printf("failed to mark job %q failed after runtime status loss: %v", runner.jobID, err)
+			}
+		}
+		auditHandled = true
+		auditWithActor(
+			actor,
+			clientIP,
+			auditAction,
+			"server",
+			server.Name,
+			"failure",
+			"Server runtime status missing",
+			map[string]any{
+				"job_id":   runner.jobID,
+				"job_kind": runner.jobKind,
+			},
+		)
 		return
 	}
 
+	runner.setJobPhase(jobPhaseDial)
 	if !runner.setupSSH(dialOpName) {
 		return
 	}
@@ -2754,11 +2981,17 @@ func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]a
 }
 
 func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	runUpdateJobWithActor(server, actor, clientIP, policy, "")
+}
+
+func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPolicy, jobID string) {
 	postcheckCfg := loadPostUpdateCheckConfigFromEnv()
 	runWithActorShared(
 		server,
 		actor,
 		clientIP,
+		jobID,
+		jobKindUpdate,
 		policy,
 		updateCompleteAction,
 		func(status *ServerStatus, policy RetryPolicy) {
@@ -2778,6 +3011,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 		updateCompletionOutcome,
 		"update.ssh_dial",
 		func(r *withActorRunner) {
+			r.setJobPhase(jobPhasePrechecks)
 			r.postchecksEnabled = postcheckCfg.Enabled
 			r.appendStatusLog("\nRunning pre-checks...")
 
@@ -2826,6 +3060,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				}
 			}
 
+			r.setJobPhase(jobPhaseAptUpdate)
 			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
@@ -2892,13 +3127,14 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				status.PendingUpdates = clonePendingUpdates(pendingUpdates)
 				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
 			})
-			startPendingUpdateCVEEnrichment(r.server, r.config, pendingUpdates)
+			startPendingUpdateCVEEnrichment(r.server, r.config, pendingUpdates, r.jobID, r.actor, r.clientIP)
 
 			approvalDeadline := time.Now().Add(30 * time.Minute)
 			for {
 				time.Sleep(1 * time.Second)
 				approved := false
-				cancelledOrTimeout := false
+				cancelledByUser := false
+				approvalTimedOut := false
 				mu.Lock()
 				status := statusMap[r.server.Name]
 				if status != nil {
@@ -2910,13 +3146,20 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 							r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
 						}
 						approved = true
-					} else if status.Status == "cancelled" || time.Now().After(approvalDeadline) {
+					} else if status.Status == "cancelled" {
+						cancelledByUser = true
 						status.Status = "idle"
 						status.ApprovalScope = ""
 						status.Logs = ""
 						status.Upgradable = nil
 						status.PendingUpdates = nil
-						cancelledOrTimeout = true
+					} else if time.Now().After(approvalDeadline) {
+						approvalTimedOut = true
+						status.Status = "idle"
+						status.ApprovalScope = ""
+						status.Logs = ""
+						status.Upgradable = nil
+						status.PendingUpdates = nil
 					}
 				}
 				mu.Unlock()
@@ -2924,7 +3167,23 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 					r.approvedAt = time.Now().UTC()
 					break
 				}
-				if cancelledOrTimeout {
+				if cancelledByUser {
+					return
+				}
+				if approvalTimedOut {
+					jm := currentJobManager()
+					if jm != nil && strings.TrimSpace(r.jobID) != "" {
+						jobStatus := jobStatusCancelled
+						phase := jobPhaseComplete
+						summary := "Approval window expired"
+						finishedAt := jobTimestampNow()
+						_ = jm.UpdateJob(r.jobID, JobUpdate{
+							Status:     &jobStatus,
+							Phase:      &phase,
+							Summary:    &summary,
+							FinishedAt: &finishedAt,
+						})
+					}
 					return
 				}
 			}
@@ -2940,6 +3199,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				return
 			}
 
+			r.setJobPhase(jobPhaseAptUpgrade)
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "upgrading"
 				status.ApprovalScope = ""
@@ -3000,6 +3260,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 				return
 			}
 
+			r.setJobPhase(jobPhasePostchecks)
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "upgrading"
 				status.Logs = logs + "\nUpgrade completed.\nRunning post-update health checks..."
@@ -3058,16 +3319,17 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 	)
 }
 
-func runSudoersBootstrap(server Server, sudoPassword string) {
-	retryPolicy := loadRetryPolicyFromEnv()
-	runSudoersBootstrapWithActor(server, sudoPassword, "system", "", retryPolicy)
+func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	runSudoersBootstrapJobWithActor(server, sudoPassword, actor, clientIP, policy, "")
 }
 
-func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+func runSudoersBootstrapJobWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy, jobID string) {
 	runWithActorShared(
 		server,
 		actor,
 		clientIP,
+		jobID,
+		jobKindSudoersEnable,
 		policy,
 		"sudoers.enable.complete",
 		func(status *ServerStatus, policy RetryPolicy) {
@@ -3087,6 +3349,7 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 		doneOnlyOutcome,
 		"sudoers.enable.ssh_dial",
 		func(r *withActorRunner) {
+			r.setJobPhase(jobPhaseApply)
 			line := fmt.Sprintf("%s ALL=(root) NOPASSWD: /usr/bin/apt, /usr/bin/apt-get, /usr/bin/dpkg, /usr/bin/fuser", r.server.User)
 			escapedLine := shellEscapeSingleQuotes(line)
 			cmd := fmt.Sprintf("sudo -S -p '' sh -c \"printf '%%s\\n' '%s' > /etc/sudoers.d/apt-nopasswd && chmod 440 /etc/sudoers.d/apt-nopasswd && /usr/sbin/visudo -cf /etc/sudoers.d/apt-nopasswd\"", escapedLine)
@@ -3121,16 +3384,17 @@ func runSudoersBootstrapWithActor(server Server, sudoPassword, actor, clientIP s
 	)
 }
 
-func runSudoersDisable(server Server, sudoPassword string) {
-	retryPolicy := loadRetryPolicyFromEnv()
-	runSudoersDisableWithActor(server, sudoPassword, "system", "", retryPolicy)
+func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+	runSudoersDisableJobWithActor(server, sudoPassword, actor, clientIP, policy, "")
 }
 
-func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy) {
+func runSudoersDisableJobWithActor(server Server, sudoPassword, actor, clientIP string, policy RetryPolicy, jobID string) {
 	runWithActorShared(
 		server,
 		actor,
 		clientIP,
+		jobID,
+		jobKindSudoersDisable,
 		policy,
 		"sudoers.disable.complete",
 		func(status *ServerStatus, policy RetryPolicy) {
@@ -3150,6 +3414,7 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 		doneOnlyOutcome,
 		"sudoers.disable.ssh_dial",
 		func(r *withActorRunner) {
+			r.setJobPhase(jobPhaseApply)
 			cmd := "sudo -S -p '' rm -f /etc/sudoers.d/apt-nopasswd"
 
 			var stdout, stderr string
@@ -3182,16 +3447,17 @@ func runSudoersDisableWithActor(server Server, sudoPassword, actor, clientIP str
 	)
 }
 
-func runAutoremove(server Server) {
-	retryPolicy := loadRetryPolicyFromEnv()
-	runAutoremoveWithActor(server, "system", "", retryPolicy)
+func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+	runAutoremoveJobWithActor(server, actor, clientIP, policy, "")
 }
 
-func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
+func runAutoremoveJobWithActor(server Server, actor, clientIP string, policy RetryPolicy, jobID string) {
 	runWithActorShared(
 		server,
 		actor,
 		clientIP,
+		jobID,
+		jobKindAutoremove,
 		policy,
 		"autoremove.complete",
 		func(status *ServerStatus, policy RetryPolicy) {
@@ -3211,6 +3477,7 @@ func runAutoremoveWithActor(server Server, actor, clientIP string, policy RetryP
 		doneOnlyOutcome,
 		"autoremove.ssh_dial",
 		func(r *withActorRunner) {
+			r.setJobPhase(jobPhaseAutoremove)
 			var stdout, stderr string
 			err := runSSHOperationWithRetry(
 				r.server,
@@ -3506,7 +3773,7 @@ func updatePendingPackageCVEState(serverName, pkg, state string, cves []string) 
 	return true
 }
 
-func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, updates []PendingUpdate) {
+func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, updates []PendingUpdate, parentJobID, actor, clientIP string) {
 	packages := pendingCVEPackages(updates)
 	if len(packages) == 0 || config == nil {
 		return
@@ -3514,16 +3781,61 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 	configCopy := *config
 	configCopy.Auth = append([]ssh.AuthMethod(nil), config.Auth...)
 
-	go func() {
-			dial := getDialSSHConnection()
-			cveClient, err := dial(server, &configCopy)
+	var jobID string
+	if jm := currentJobManager(); jm != nil {
+		job, err := jm.CreateJob(JobCreateParams{
+			Kind:        jobKindCVEEnrichment,
+			ParentJobID: strings.TrimSpace(parentJobID),
+			ServerName:  server.Name,
+			Actor:       actor,
+			ClientIP:    clientIP,
+			Status:      jobStatusQueued,
+			Phase:       jobPhaseDial,
+			Summary:     "Enriching pending updates with CVEs",
+		})
+		if err != nil {
+			log.Printf("failed to create CVE enrichment job for %q: %v", server.Name, err)
+			for _, pkg := range packages {
+				if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
+					return
+				}
+			}
+			return
+		}
+		jobID = job.ID
+	}
+
+	startJobRunner(jobID, func() {
+		if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+			phase := jobPhaseDial
+			summary := "Connecting for CVE enrichment"
+			_ = jm.UpdateJob(jobID, JobUpdate{Phase: &phase, Summary: &summary})
+		}
+		dial := getDialSSHConnection()
+		cveClient, err := dial(server, &configCopy)
 		if err != nil {
 			log.Printf("CVE enrichment dial attempt 1 failed for server %q: %v", server.Name, err)
 			time.Sleep(250 * time.Millisecond)
-				dial := getDialSSHConnection()
-				cveClient, err = dial(server, &configCopy)
+			dial := getDialSSHConnection()
+			cveClient, err = dial(server, &configCopy)
 			if err != nil {
 				log.Printf("CVE enrichment dial attempt 2 failed for server %q: %v", server.Name, err)
+				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+					status := jobStatusFailed
+					phase := jobPhaseComplete
+					summary := "Failed to connect for CVE enrichment"
+					errorClass := "dial"
+					meta := marshalJobJSON(map[string]any{"error": err.Error()})
+					finishedAt := jobTimestampNow()
+					_ = jm.UpdateJob(jobID, JobUpdate{
+						Status:     &status,
+						Phase:      &phase,
+						Summary:    &summary,
+						ErrorClass: &errorClass,
+						MetaJSON:   &meta,
+						FinishedAt: &finishedAt,
+					})
+				}
 				for _, pkg := range packages {
 					if !updatePendingPackageCVEState(server.Name, pkg, "unavailable", []string{}) {
 						return
@@ -3534,8 +3846,25 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 		}
 		defer func() { _ = cveClient.Close() }()
 
+		if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+			phase := jobPhaseLookup
+			summary := "Looking up package CVEs"
+			_ = jm.UpdateJob(jobID, JobUpdate{Phase: &phase, Summary: &summary})
+		}
 		for _, pkg := range packages {
 			if !serverPendingApproval(server.Name) {
+				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+					status := jobStatusCancelled
+					phase := jobPhaseComplete
+					summary := "Parent update no longer pending approval"
+					finishedAt := jobTimestampNow()
+					_ = jm.UpdateJob(jobID, JobUpdate{
+						Status:     &status,
+						Phase:      &phase,
+						Summary:    &summary,
+						FinishedAt: &finishedAt,
+					})
+				}
 				return
 			}
 			cves, queryErr := queryPackageCVEs(cveClient, pkg)
@@ -3546,10 +3875,34 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 				cves = []string{}
 			}
 			if !updatePendingPackageCVEState(server.Name, pkg, state, cves) {
+				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+					status := jobStatusCancelled
+					phase := jobPhaseComplete
+					summary := "Pending update state changed before CVE enrichment finished"
+					finishedAt := jobTimestampNow()
+					_ = jm.UpdateJob(jobID, JobUpdate{
+						Status:     &status,
+						Phase:      &phase,
+						Summary:    &summary,
+						FinishedAt: &finishedAt,
+					})
+				}
 				return
 			}
 		}
-	}()
+		if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+			status := jobStatusSucceeded
+			phase := jobPhaseComplete
+			summary := "CVE enrichment completed"
+			finishedAt := jobTimestampNow()
+			_ = jm.UpdateJob(jobID, JobUpdate{
+				Status:     &status,
+				Phase:      &phase,
+				Summary:    &summary,
+				FinishedAt: &finishedAt,
+			})
+		}
+	})
 }
 
 func getGlobalKey() string {
@@ -4094,14 +4447,6 @@ func shellEscapeSingleQuotes(input string) string {
 	return strings.ReplaceAll(input, "'", "'\"'\"'")
 }
 
-func shellEscapeDoubleQuotes(input string) string {
-	escaped := strings.ReplaceAll(input, `\`, `\\`)
-	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-	escaped = strings.ReplaceAll(escaped, `$`, `\$`)
-	escaped = strings.ReplaceAll(escaped, "`", "\\`")
-	return escaped
-}
-
 func isValidSSHUsername(username string) bool {
 	trimmed := strings.TrimSpace(username)
 	if trimmed == "" || len(trimmed) > 64 {
@@ -4167,6 +4512,13 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 func setupRouter() (*gin.Engine, error) {
 	r := gin.Default()
 	r.Use(securityHeadersMiddleware())
+	r.Use(backupRestoreBarrierMiddleware())
+	if err := initializeMaintenanceState(); err != nil {
+		return nil, fmt.Errorf("failed to initialize maintenance state: %w", err)
+	}
+	if err := initializeJobManager(); err != nil {
+		return nil, fmt.Errorf("failed to initialize job manager: %w", err)
+	}
 	sm, err := newSessionManager(getDB())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
@@ -4180,12 +4532,14 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/setup", handleSetupPage)
 	r.GET("/login", handleLoginPage)
-	r.POST("/api/auth/setup", handleAuthSetup)
-	r.POST("/api/auth/login", handleAuthLogin)
+	r.POST("/api/auth/setup", sameOriginWriteMiddleware(), handleAuthSetup)
+	r.POST("/api/auth/login", sameOriginWriteMiddleware(), handleAuthLogin)
 	r.GET("/api/auth/status", handleAuthStatus)
+	r.GET("/api/maintenance", handleMaintenanceStatus)
 	r.GET("/metrics", metricsBearerMiddleware(), handleMetrics)
 
 	r.Use(authGateMiddleware())
+	r.Use(sameOriginWriteMiddleware())
 
 	r.GET("/", func(c *gin.Context) {
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -4478,12 +4832,12 @@ func setupRouter() (*gin.Engine, error) {
 		defer mu.Unlock()
 		for i, s := range servers {
 			if s.Name == name {
-				servers[i].Key = key
 				if err := updateServerKey(name, key); err != nil {
 					audit(c, "server.key.upload", "server", name, "failure", "Failed to save key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
+				servers[i].Key = key
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = key != ""
 				}
@@ -4502,12 +4856,12 @@ func setupRouter() (*gin.Engine, error) {
 		defer mu.Unlock()
 		for i, s := range servers {
 			if s.Name == name {
-				servers[i].Key = ""
 				if err := updateServerKey(name, ""); err != nil {
 					audit(c, "server.key.clear", "server", name, "failure", "Failed to clear key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 					return
 				}
+				servers[i].Key = ""
 				if status, ok := statusMap[name]; ok {
 					status.HasKey = false
 				}
@@ -4729,6 +5083,7 @@ func setupRouter() (*gin.Engine, error) {
 			"total_attempts_used": 0,
 			"retry_exhausted":     false,
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "updating")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -4746,10 +5101,22 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-			startUpdateRunner(server, actor, ip, retryPolicy)
-			audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
-			c.JSON(http.StatusOK, gin.H{"message": "Update started"})
-		})
+		job, err := createServerActionJob(jobKindUpdate, name, actor, ip, retryPolicy)
+		if err != nil {
+			restoreStatusSnapshot(name, preStartStatus)
+			if errors.Is(err, errMaintenanceModeActive) {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
+			retryMeta["error"] = err.Error()
+			audit(c, "update.start", "server", name, "failure", "Failed to create job", retryMeta)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create update job"})
+			return
+		}
+		startUpdateRunner(server, actor, ip, retryPolicy, job.ID)
+		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
+		c.JSON(http.StatusOK, gin.H{"message": "Update started", "job_id": job.ID})
+	})
 
 	r.POST("/api/autoremove/:name", func(c *gin.Context) {
 		name := c.Param("name")
@@ -4764,6 +5131,7 @@ func setupRouter() (*gin.Engine, error) {
 			"total_attempts_used": 0,
 			"retry_exhausted":     false,
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "autoremove")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -4781,9 +5149,23 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
 			return
 		}
-		go runAutoremoveWithActor(server, actor, ip, retryPolicy)
+		job, err := createServerActionJob(jobKindAutoremove, name, actor, ip, retryPolicy)
+		if err != nil {
+			restoreStatusSnapshot(name, preStartStatus)
+			if errors.Is(err, errMaintenanceModeActive) {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
+			retryMeta["error"] = err.Error()
+			audit(c, "autoremove.start", "server", name, "failure", "Failed to create job", retryMeta)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create autoremove job"})
+			return
+		}
+		startJobRunner(job.ID, func() {
+			runAutoremoveJobWithActor(server, actor, ip, retryPolicy, job.ID)
+		})
 		audit(c, "autoremove.start", "server", name, "started", "Autoremove started", retryMeta)
-		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started"})
+		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started", "job_id": job.ID})
 	})
 
 	r.POST("/api/sudoers/:name", func(c *gin.Context) {
@@ -4812,6 +5194,7 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -4829,9 +5212,23 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
 			return
 		}
-		go runSudoersBootstrapWithActor(server, req.Password, actor, ip, retryPolicy)
+		job, err := createServerActionJob(jobKindSudoersEnable, name, actor, ip, retryPolicy)
+		if err != nil {
+			restoreStatusSnapshot(name, preStartStatus)
+			if errors.Is(err, errMaintenanceModeActive) {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
+			retryMeta["error"] = err.Error()
+			audit(c, "sudoers.enable.start", "server", name, "failure", "Failed to create job", retryMeta)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sudoers job"})
+			return
+		}
+		startJobRunner(job.ID, func() {
+			runSudoersBootstrapJobWithActor(server, req.Password, actor, ip, retryPolicy, job.ID)
+		})
 		audit(c, "sudoers.enable.start", "server", name, "started", "Sudoers setup started", retryMeta)
-		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started"})
+		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started", "job_id": job.ID})
 	})
 
 	r.POST("/api/sudoers/disable/:name", func(c *gin.Context) {
@@ -4860,6 +5257,7 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -4877,65 +5275,202 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
 			return
 		}
-		go runSudoersDisableWithActor(server, req.Password, actor, ip, retryPolicy)
+		job, err := createServerActionJob(jobKindSudoersDisable, name, actor, ip, retryPolicy)
+		if err != nil {
+			restoreStatusSnapshot(name, preStartStatus)
+			if errors.Is(err, errMaintenanceModeActive) {
+				writeMaintenanceBlockedResponse(c)
+				return
+			}
+			retryMeta["error"] = err.Error()
+			audit(c, "sudoers.disable.start", "server", name, "failure", "Failed to create job", retryMeta)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sudoers disable job"})
+			return
+		}
+		startJobRunner(job.ID, func() {
+			runSudoersDisableJobWithActor(server, req.Password, actor, ip, retryPolicy, job.ID)
+		})
 		audit(c, "sudoers.disable.start", "server", name, "started", "Sudoers disable started", retryMeta)
-		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started"})
+		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started", "job_id": job.ID})
 	})
 
 	r.POST("/api/approve/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		exists, approved := approvePendingUpdate(name, "all")
-		if !exists {
+		preApproveStatus := currentStatusSnapshot(name)
+		if preApproveStatus == nil {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if approved {
-			audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
-			c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
+		if preApproveStatus.Status != "pending_approval" {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
-		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
-		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		status := jobStatusRunning
+		phase := jobPhaseAptUpgrade
+		summary := "All pending updates approved"
+		logs := preApproveStatus.Logs
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:   &status,
+			Phase:    &phase,
+			Summary:  &summary,
+			LogsText: &logs,
+		}); err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		exists, approved := approvePendingUpdate(name, "all")
+		if !exists || !approved {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logs,
+			}); rollbackErr != nil {
+				log.Printf("update approve rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
+		c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
 	})
 
 	r.POST("/api/approve-security/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		exists, approved := approvePendingUpdate(name, "security")
-		if !exists {
+		preApproveStatus := currentStatusSnapshot(name)
+		if preApproveStatus == nil {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", map[string]any{"scope": "security"})
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if approved {
-			audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
-			c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
+		if preApproveStatus.Status != "pending_approval" {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
-		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
-		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		status := jobStatusRunning
+		phase := jobPhaseAptUpgrade
+		summary := "Security updates approved"
+		logs := preApproveStatus.Logs
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:   &status,
+			Phase:    &phase,
+			Summary:  &summary,
+			LogsText: &logs,
+		}); err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		exists, approved := approvePendingUpdate(name, "security")
+		if !exists || !approved {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logs,
+			}); rollbackErr != nil {
+				log.Printf("security approve rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
+		c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
 	})
 
 	r.POST("/api/cancel/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		mu.Lock()
-		status, exists := statusMap[name]
-		cancelled := false
-		if exists && status.Status == "pending_approval" {
-			status.Status = "cancelled"
-			status.ApprovalScope = ""
-			status.Logs = ""
-			status.Upgradable = nil
-			status.PendingUpdates = nil
-			cancelled = true
-		}
-		mu.Unlock()
-		if !exists {
+		preCancelStatus := currentStatusSnapshot(name)
+		if preCancelStatus == nil {
 			audit(c, "update.cancel", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if !cancelled {
+		if preCancelStatus.Status != "pending_approval" {
+			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		logsBeforeCancel := preCancelStatus.Logs
+
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
+		}
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
+		}
+		status := jobStatusCancelled
+		phase := jobPhaseComplete
+		summary := "Update cancelled"
+		finishedAt := jobTimestampNow()
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:     &status,
+			Phase:      &phase,
+			Summary:    &summary,
+			LogsText:   &logsBeforeCancel,
+			FinishedAt: &finishedAt,
+		}); err != nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
+		}
+		exists, cancelled := cancelPendingUpdate(name)
+		if !exists || !cancelled {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logsBeforeCancel,
+			}); rollbackErr != nil {
+				log.Printf("cancel rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
 			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
 			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
