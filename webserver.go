@@ -613,7 +613,10 @@ func ensureSchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
 		return err
 	}
-	return ensureJobSchema(db)
+	if err := ensureJobSchema(db); err != nil {
+		return err
+	}
+	return ensureUpdatePolicySchema(db)
 }
 
 func truncateString(s string, maxLen int) string {
@@ -2366,6 +2369,10 @@ func saveServers() error {
 			return fmt.Errorf("insert server %s: %w", server.Name, err)
 		}
 	}
+	if err := pruneUpdatePolicyOverridesForServersTx(tx, servers); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("prune policy overrides: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit servers: %w", err)
 	}
@@ -2986,6 +2993,7 @@ func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolic
 
 func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPolicy, jobID string) {
 	postcheckCfg := loadPostUpdateCheckConfigFromEnv()
+	behavior := loadScheduledJobBehavior(jobID)
 	runWithActorShared(
 		server,
 		actor,
@@ -3120,6 +3128,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			}
 
 			pendingUpdates = preparePendingUpdatesForCVE(pendingUpdates)
+			updateScheduledJobDiscoveryMeta(r.jobID, upgradable, pendingUpdates)
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "pending_approval"
 				status.ApprovalScope = ""
@@ -3127,64 +3136,88 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 				status.PendingUpdates = clonePendingUpdates(pendingUpdates)
 				status.Logs = logs + "\nUpgradable packages:\n" + strings.Join(upgradable, "\n")
 			})
-			startPendingUpdateCVEEnrichment(r.server, r.config, pendingUpdates, r.jobID, r.actor, r.clientIP)
+			if behavior.AutoApproveScope == "" {
+				startPendingUpdateCVEEnrichment(r.server, r.config, pendingUpdates, r.jobID, r.actor, r.clientIP)
+			}
 
-			approvalDeadline := time.Now().Add(30 * time.Minute)
-			for {
-				time.Sleep(1 * time.Second)
-				approved := false
-				cancelledByUser := false
-				approvalTimedOut := false
+			if behavior.AutoApproveScope != "" {
+				autoApproved := false
 				mu.Lock()
 				status := statusMap[r.server.Name]
-				if status != nil {
-					if status.Status == "approved" {
-						r.approvalScope = normalizeApprovalScope(status.ApprovalScope)
-						if r.approvalScope == "security" {
-							r.approvedPackages = securityPackagesFromPendingUpdates(status.PendingUpdates)
-						} else {
-							r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
-						}
-						approved = true
-					} else if status.Status == "cancelled" {
-						cancelledByUser = true
-						status.Status = "idle"
-						status.ApprovalScope = ""
-						status.Logs = ""
-						status.Upgradable = nil
-						status.PendingUpdates = nil
-					} else if time.Now().After(approvalDeadline) {
-						approvalTimedOut = true
-						status.Status = "idle"
-						status.ApprovalScope = ""
-						status.Logs = ""
-						status.Upgradable = nil
-						status.PendingUpdates = nil
+				if status != nil && status.Status == "pending_approval" {
+					r.approvalScope = normalizeApprovalScope(behavior.AutoApproveScope)
+					status.ApprovalScope = r.approvalScope
+					status.Status = "approved"
+					if r.approvalScope == "security" {
+						r.approvedPackages = securityPackagesFromPendingUpdates(status.PendingUpdates)
+					} else {
+						r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
 					}
+					autoApproved = true
 				}
 				mu.Unlock()
-				if approved {
-					r.approvedAt = time.Now().UTC()
-					break
-				}
-				if cancelledByUser {
+				if !autoApproved {
 					return
 				}
-				if approvalTimedOut {
-					jm := currentJobManager()
-					if jm != nil && strings.TrimSpace(r.jobID) != "" {
-						jobStatus := jobStatusCancelled
-						phase := jobPhaseComplete
-						summary := "Approval window expired"
-						finishedAt := jobTimestampNow()
-						_ = jm.UpdateJob(r.jobID, JobUpdate{
-							Status:     &jobStatus,
-							Phase:      &phase,
-							Summary:    &summary,
-							FinishedAt: &finishedAt,
-						})
+				r.approvedAt = time.Now().UTC()
+			} else {
+				approvalDeadline := time.Now().Add(behavior.ApprovalTimeout)
+				for {
+					time.Sleep(1 * time.Second)
+					approved := false
+					cancelledByUser := false
+					approvalTimedOut := false
+					mu.Lock()
+					status := statusMap[r.server.Name]
+					if status != nil {
+						if status.Status == "approved" {
+							r.approvalScope = normalizeApprovalScope(status.ApprovalScope)
+							if r.approvalScope == "security" {
+								r.approvedPackages = securityPackagesFromPendingUpdates(status.PendingUpdates)
+							} else {
+								r.approvedPackages = packageNamesFromPendingUpdates(status.PendingUpdates)
+							}
+							approved = true
+						} else if status.Status == "cancelled" {
+							cancelledByUser = true
+							status.Status = "idle"
+							status.ApprovalScope = ""
+							status.Logs = ""
+							status.Upgradable = nil
+							status.PendingUpdates = nil
+						} else if time.Now().After(approvalDeadline) {
+							approvalTimedOut = true
+							status.Status = "idle"
+							status.ApprovalScope = ""
+							status.Logs = ""
+							status.Upgradable = nil
+							status.PendingUpdates = nil
+						}
 					}
-					return
+					mu.Unlock()
+					if approved {
+						r.approvedAt = time.Now().UTC()
+						break
+					}
+					if cancelledByUser {
+						return
+					}
+					if approvalTimedOut {
+						jm := currentJobManager()
+						if jm != nil && strings.TrimSpace(r.jobID) != "" {
+							jobStatus := jobStatusCancelled
+							phase := jobPhaseComplete
+							summary := "Approval window expired"
+							finishedAt := jobTimestampNow()
+							_ = jm.UpdateJob(r.jobID, JobUpdate{
+								Status:     &jobStatus,
+								Phase:      &phase,
+								Summary:    &summary,
+								FinishedAt: &finishedAt,
+							})
+						}
+						return
+					}
 				}
 			}
 
@@ -4564,6 +4597,15 @@ func setupRouter() (*gin.Engine, error) {
 	r.GET("/api/backup/status", handleBackupStatus)
 	r.POST("/api/backup/export", handleBackupExport)
 	r.POST("/api/backup/restore", handleBackupRestore)
+	r.GET("/api/update-policies", handleUpdatePoliciesList)
+	r.POST("/api/update-policies", handleUpdatePolicyCreate)
+	r.GET("/api/update-policies/runs", handleUpdatePolicyRuns)
+	r.GET("/api/update-policies/settings", handleUpdatePolicySettingsStatus)
+	r.PUT("/api/update-policies/settings", handleUpdatePolicySettingsUpdate)
+	r.GET("/api/update-policies/:id/overrides", handleUpdatePolicyOverrides)
+	r.PUT("/api/update-policies/:id/overrides/:server", handleUpdatePolicyOverrideUpsert)
+	r.PUT("/api/update-policies/:id", handleUpdatePolicyUpdate)
+	r.DELETE("/api/update-policies/:id", handleUpdatePolicyDelete)
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
@@ -4704,7 +4746,8 @@ func setupRouter() (*gin.Engine, error) {
 					return
 				}
 				servers[i] = updatedServer
-				if updatedServer.Name != name {
+				renamedServer := updatedServer.Name != name
+				if renamedServer {
 					delete(statusMap, name)
 					statusMap[updatedServer.Name] = &ServerStatus{
 						Name:           updatedServer.Name,
@@ -4735,7 +4778,26 @@ func setupRouter() (*gin.Engine, error) {
 					statusMap[name].HasKey = updatedServer.Key != ""
 					statusMap[name].Tags = updatedServer.Tags
 				}
+				if renamedServer {
+					if err := renameUpdatePolicyOverridesServer(name, updatedServer.Name); err != nil {
+						servers = prevServers
+						statusMap = prevStatusMap
+						mu.Unlock()
+						audit(c, "server.update", "server", name, "failure", "Failed to migrate scheduled policy overrides", map[string]any{
+							"error": err.Error(),
+							"from":  name,
+							"to":    updatedServer.Name,
+						})
+						c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to migrate scheduled policy overrides: %v", err)})
+						return
+					}
+				}
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
+					if renamedServer {
+						if rollbackErr := renameUpdatePolicyOverridesServer(updatedServer.Name, name); rollbackErr != nil {
+							log.Printf("failed to roll back policy overrides rename from %q to %q: %v", updatedServer.Name, name, rollbackErr)
+						}
+					}
 					mu.Unlock()
 					audit(c, "server.update", "server", name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
@@ -5504,6 +5566,7 @@ func main() {
 	shutdownCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	startAuditPruner(shutdownCtx)
+	startUpdatePolicyScheduler(shutdownCtx)
 	defer StopAuthRateLimiters()
 	server := &http.Server{
 		Addr:         ":8080",

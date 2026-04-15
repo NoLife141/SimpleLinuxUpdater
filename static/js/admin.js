@@ -1,3 +1,8 @@
+const scheduledPoliciesState = {
+    items: [],
+    timezone: "Local"
+};
+
 function showMetricsTokenOnce(token) {
     const panel = document.getElementById('metrics-token-once');
     const value = document.getElementById('metrics-token-value');
@@ -208,6 +213,261 @@ async function restoreBackup() {
     }
 }
 
+function normalizeWeekdaysInput(raw) {
+    return String(raw || '')
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+function parseBlackoutsJSON(raw, label) {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return [];
+    try {
+        const parsed = JSON.parse(trimmed);
+        if (!Array.isArray(parsed)) {
+            throw new Error(`${label} must be a JSON array.`);
+        }
+        return parsed;
+    } catch (err) {
+        throw new Error(`${label} must be valid JSON.`);
+    }
+}
+
+function formatCadence(policy) {
+    const timeLocal = escapeHtml(policy.time_local || '--:--');
+    if (policy.cadence_kind === 'weekly') {
+        const weekdays = Array.isArray(policy.weekdays) && policy.weekdays.length
+            ? policy.weekdays.join(', ')
+            : 'weekly';
+        return `${escapeHtml(weekdays)} @ ${timeLocal}`;
+    }
+    return `daily @ ${timeLocal}`;
+}
+
+function renderPolicyMode(policy) {
+    const mode = String(policy.execution_mode || '').replace(/_/g, ' ');
+    const scope = String(policy.package_scope || '');
+    return `${escapeHtml(mode)} / ${escapeHtml(scope)}`;
+}
+
+function resetPolicyForm() {
+    document.getElementById('policy-id').value = '';
+    document.getElementById('policy-name').value = '';
+    document.getElementById('policy-target-tag').value = '';
+    document.getElementById('policy-time-local').value = '02:00';
+    document.getElementById('policy-execution-mode').value = 'scan_only';
+    document.getElementById('policy-package-scope').value = 'security';
+    document.getElementById('policy-cadence-kind').value = 'daily';
+    document.getElementById('policy-weekdays').value = '';
+    document.getElementById('policy-approval-timeout').value = '720';
+    document.getElementById('policy-enabled').checked = true;
+    document.getElementById('policy-blackouts').value = '[]';
+    document.getElementById('policy-save-btn').textContent = 'Save Policy';
+}
+
+function applyPolicyToForm(policy) {
+    document.getElementById('policy-id').value = String(policy.id || '');
+    document.getElementById('policy-name').value = policy.name || '';
+    document.getElementById('policy-target-tag').value = policy.target_tag || '';
+    document.getElementById('policy-time-local').value = policy.time_local || '02:00';
+    document.getElementById('policy-execution-mode').value = policy.execution_mode || 'scan_only';
+    document.getElementById('policy-package-scope').value = policy.package_scope || 'security';
+    document.getElementById('policy-cadence-kind').value = policy.cadence_kind || 'daily';
+    document.getElementById('policy-weekdays').value = Array.isArray(policy.weekdays) ? policy.weekdays.join(', ') : '';
+    document.getElementById('policy-approval-timeout').value = policy.approval_timeout_minutes || 720;
+    document.getElementById('policy-enabled').checked = !!policy.enabled;
+    document.getElementById('policy-blackouts').value = JSON.stringify(policy.policy_blackouts || [], null, 2);
+    document.getElementById('policy-save-btn').textContent = 'Update Policy';
+}
+
+function renderScheduledPolicies() {
+    const tbody = document.querySelector('#scheduled-policy-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!scheduledPoliciesState.items.length) {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="6" class="subtle">No scheduled update policies yet.</td>';
+        tbody.appendChild(row);
+        return;
+    }
+    scheduledPoliciesState.items.forEach((policy) => {
+        const row = document.createElement('tr');
+        const matched = Array.isArray(policy.matched_servers) && policy.matched_servers.length
+            ? policy.matched_servers.map((name) => `<span class="pill">${escapeHtml(name)}</span>`).join(' ')
+            : '<span class="pill pill-muted">None</span>';
+        row.innerHTML = `
+            <td>
+                <div>${escapeHtml(policy.name || '')}</div>
+                <div class="subtle">${policy.enabled ? 'enabled' : 'disabled'}</div>
+            </td>
+            <td>${escapeHtml(policy.target_tag || '')}</td>
+            <td>${formatCadence(policy)}</td>
+            <td>${renderPolicyMode(policy)}</td>
+            <td>${matched}</td>
+            <td>
+                <button class="btn-ghost" type="button" data-action="edit-policy" data-id="${escapeHtml(String(policy.id))}">Edit</button>
+                <button class="btn-danger" type="button" data-action="delete-policy" data-id="${escapeHtml(String(policy.id))}">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderScheduledRuns(items) {
+    const tbody = document.querySelector('#scheduled-runs-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!Array.isArray(items) || !items.length) {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="6" class="subtle">No scheduled runs recorded yet.</td>';
+        tbody.appendChild(row);
+        return;
+    }
+    items.forEach((run) => {
+        const row = document.createElement('tr');
+        const jobValue = run.job_id ? `<code>${escapeHtml(run.job_id)}</code>` : '<span class="subtle">-</span>';
+        row.innerHTML = `
+            <td>${escapeHtml(run.scheduled_for_utc || '')}</td>
+            <td>${escapeHtml(run.policy_name || '')}</td>
+            <td>${escapeHtml(run.server_name || '')}</td>
+            <td><span class="status-chip status-${escapeHtml(String(run.status || 'unknown').toLowerCase())}">${escapeHtml(run.status || 'unknown')}</span></td>
+            <td>${escapeHtml(run.summary || run.reason || '')}</td>
+            <td>${jobValue}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+async function fetchScheduledPolicies() {
+    const res = await fetch('/api/update-policies');
+    if (!res.ok) {
+        throw new Error(await parseErrorResponse(res, 'Failed to load scheduled policies.'));
+    }
+    const data = await res.json().catch(() => ({}));
+    scheduledPoliciesState.items = Array.isArray(data.items) ? data.items : [];
+    scheduledPoliciesState.timezone = data.timezone || scheduledPoliciesState.timezone;
+    renderScheduledPolicies();
+}
+
+async function fetchScheduledSettings() {
+    const res = await fetch('/api/update-policies/settings');
+    if (!res.ok) {
+        throw new Error(await parseErrorResponse(res, 'Failed to load scheduled update settings.'));
+    }
+    const data = await res.json().catch(() => ({}));
+    document.getElementById('scheduled-timezone').textContent = data.timezone || scheduledPoliciesState.timezone || 'Local';
+    document.getElementById('scheduled-global-blackouts').value = JSON.stringify(data.global_blackouts || [], null, 2);
+}
+
+async function fetchScheduledRuns() {
+    const res = await fetch('/api/update-policies/runs?limit=50');
+    if (!res.ok) {
+        throw new Error(await parseErrorResponse(res, 'Failed to load scheduled runs.'));
+    }
+    const data = await res.json().catch(() => ({}));
+    renderScheduledRuns(data.items || []);
+}
+
+async function refreshScheduledUpdateViews() {
+    try {
+        await Promise.all([
+            fetchScheduledPolicies(),
+            fetchScheduledSettings(),
+            fetchScheduledRuns()
+        ]);
+    } catch (err) {
+        console.error('Failed to refresh scheduled update views:', err);
+        const status = document.getElementById('update-policy-status');
+        if (status) {
+            status.textContent = err.message || 'Failed to load scheduled update views.';
+        }
+    }
+}
+
+async function saveScheduledPolicy(event) {
+    event.preventDefault();
+    const id = document.getElementById('policy-id').value.trim();
+    const payload = {
+        name: document.getElementById('policy-name').value.trim(),
+        enabled: document.getElementById('policy-enabled').checked,
+        target_tag: document.getElementById('policy-target-tag').value.trim(),
+        package_scope: document.getElementById('policy-package-scope').value,
+        execution_mode: document.getElementById('policy-execution-mode').value,
+        cadence_kind: document.getElementById('policy-cadence-kind').value,
+        time_local: document.getElementById('policy-time-local').value,
+        weekdays: normalizeWeekdaysInput(document.getElementById('policy-weekdays').value),
+        approval_timeout_minutes: Number(document.getElementById('policy-approval-timeout').value || 0),
+        policy_blackouts: parseBlackoutsJSON(document.getElementById('policy-blackouts').value, 'Policy blackout windows')
+    };
+    const url = id ? `/api/update-policies/${encodeURIComponent(id)}` : '/api/update-policies';
+    const method = id ? 'PUT' : 'POST';
+    const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+        alert(await parseErrorResponse(res, 'Failed to save scheduled policy.'));
+        return;
+    }
+    document.getElementById('update-policy-status').textContent = id ? 'Policy updated.' : 'Policy created.';
+    resetPolicyForm();
+    await refreshScheduledUpdateViews();
+}
+
+async function saveScheduledSettings() {
+    try {
+        const payload = {
+            global_blackouts: parseBlackoutsJSON(document.getElementById('scheduled-global-blackouts').value, 'Global blackout windows')
+        };
+        const res = await fetch('/api/update-policies/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+            alert(await parseErrorResponse(res, 'Failed to save global blackout windows.'));
+            return;
+        }
+        const data = await res.json().catch(() => ({}));
+        document.getElementById('scheduled-timezone').textContent = data.timezone || scheduledPoliciesState.timezone || 'Local';
+        document.getElementById('scheduled-settings-status').textContent = 'Global blackout windows saved.';
+    } catch (err) {
+        alert(err.message || 'Failed to save global blackout windows.');
+    }
+}
+
+async function deleteScheduledPolicy(id) {
+    if (!window.confirm('Delete this scheduled update policy?')) {
+        return;
+    }
+    const res = await fetch(`/api/update-policies/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) {
+        alert(await parseErrorResponse(res, 'Failed to delete scheduled policy.'));
+        return;
+    }
+    if (document.getElementById('policy-id').value === String(id)) {
+        resetPolicyForm();
+    }
+    await refreshScheduledUpdateViews();
+}
+
+function handleScheduledPolicyTableClick(event) {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+    const id = String(button.dataset.id || '').trim();
+    const policy = scheduledPoliciesState.items.find((item) => String(item.id) === id);
+    if (!policy) return;
+    if (button.dataset.action === 'edit-policy') {
+        applyPolicyToForm(policy);
+        return;
+    }
+    if (button.dataset.action === 'delete-policy') {
+        deleteScheduledPolicy(id);
+    }
+}
+
 document.addEventListener('change', (e) => {
     if (e.target && e.target.id === 'backup-restore-file') {
         updateFileLabel(e.target, 'Choose backup file');
@@ -221,7 +481,13 @@ document.getElementById('metrics-token-disable').addEventListener('click', disab
 document.getElementById('metrics-token-copy').addEventListener('click', copyMetricsToken);
 document.getElementById('backup-export-btn').addEventListener('click', exportBackup);
 document.getElementById('backup-restore-btn').addEventListener('click', restoreBackup);
+document.getElementById('update-policy-form').addEventListener('submit', saveScheduledPolicy);
+document.getElementById('policy-reset-btn').addEventListener('click', resetPolicyForm);
+document.getElementById('scheduled-settings-save').addEventListener('click', saveScheduledSettings);
+document.querySelector('#scheduled-policy-table tbody').addEventListener('click', handleScheduledPolicyTableClick);
 
+resetPolicyForm();
 fetchMetricsTokenStatus();
 fetchBackupStatus();
+refreshScheduledUpdateViews();
 updateFileLabel(document.getElementById('backup-restore-file'), 'Choose backup file');

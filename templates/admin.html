@@ -50,6 +50,94 @@
         </section>
 
         <section class="card fade-in section-spaced">
+            <h2>Scheduled Updates</h2>
+            <p class="subtle">Define recurring update policies by tag, opt into scan-only or approval workflows, and keep runs inside blackout windows without manual babysitting.</p>
+            <div class="admin-grid">
+                <div class="admin-block">
+                    <h3>Policy Editor</h3>
+                    <form id="update-policy-form" class="policy-form">
+                        <input type="hidden" id="policy-id">
+                        <input type="text" id="policy-name" placeholder="Policy name" required>
+                        <input type="text" id="policy-target-tag" placeholder="Target tag" required>
+                        <input type="time" id="policy-time-local" required>
+                        <select id="policy-execution-mode">
+                            <option value="scan_only">Scan only</option>
+                            <option value="approval_required">Approval required</option>
+                            <option value="auto_apply">Auto apply</option>
+                        </select>
+                        <select id="policy-package-scope">
+                            <option value="security">Security only</option>
+                            <option value="full">Full updates</option>
+                        </select>
+                        <select id="policy-cadence-kind">
+                            <option value="daily">Daily</option>
+                            <option value="weekly">Weekly</option>
+                        </select>
+                        <input type="text" id="policy-weekdays" placeholder="Weekdays for weekly (e.g. mon,thu)">
+                        <input type="number" id="policy-approval-timeout" min="1" placeholder="Approval timeout (minutes)">
+                        <div class="field-span">
+                            <label class="checkbox-inline"><input type="checkbox" id="policy-enabled" checked> Policy enabled</label>
+                        </div>
+                        <div class="field-span">
+                            <label for="policy-blackouts" class="form-label">Policy blackout windows (JSON array)</label>
+                            <textarea id="policy-blackouts" rows="5" placeholder='[{"weekdays":["sat"],"start_time":"00:00","end_time":"06:00"}]'></textarea>
+                        </div>
+                        <div class="field-span policy-actions">
+                            <button class="btn-success" type="submit" id="policy-save-btn">Save Policy</button>
+                            <button class="btn-ghost" type="button" id="policy-reset-btn">Clear</button>
+                        </div>
+                    </form>
+                    <div id="update-policy-status" class="subtle"></div>
+                </div>
+                <div class="admin-block">
+                    <h3>Global Schedule Settings</h3>
+                    <p class="subtle">App timezone: <strong id="scheduled-timezone">Loading...</strong></p>
+                    <label for="scheduled-global-blackouts" class="form-label">Global blackout windows (JSON array)</label>
+                    <textarea id="scheduled-global-blackouts" rows="8" placeholder='[{"weekdays":["sun"],"start_time":"01:00","end_time":"04:00"}]'></textarea>
+                    <div class="policy-actions">
+                        <button class="btn-success" type="button" id="scheduled-settings-save">Save Global Blackouts</button>
+                    </div>
+                    <div id="scheduled-settings-status" class="subtle"></div>
+                </div>
+            </div>
+            <div class="table-wrap section-spaced">
+                <table id="scheduled-policy-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Target</th>
+                            <th>Cadence</th>
+                            <th>Mode</th>
+                            <th>Matched Servers</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card fade-in section-spaced">
+            <h2>Recent Scheduled Runs</h2>
+            <p class="subtle">Latest policy executions, skips, and linked jobs.</p>
+            <div class="table-wrap">
+                <table id="scheduled-runs-table">
+                    <thead>
+                        <tr>
+                            <th>Scheduled</th>
+                            <th>Policy</th>
+                            <th>Server</th>
+                            <th>Status</th>
+                            <th>Summary</th>
+                            <th>Job</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="card fade-in section-spaced">
             <h2>Backup &amp; Restore</h2>
             <p class="subtle">Export encrypted disaster-recovery backups (DB + config + known_hosts) and restore on another host/container.</p>
             <div class="backup-grid">

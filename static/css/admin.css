@@ -306,3 +306,142 @@ button:hover,
         grid-template-columns: 1fr;
     }
 }
+
+textarea,
+select {
+    width: 100%;
+    background: rgba(10, 17, 28, 0.84);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 11px 14px;
+    border-radius: 14px;
+    outline: none;
+    transition: border-color 0.22s ease, box-shadow 0.22s ease;
+}
+
+textarea:focus,
+select:focus {
+    border-color: rgba(125, 211, 252, 0.5);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
+}
+
+.admin-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+}
+
+.admin-block {
+    padding: 18px;
+    border-radius: 20px;
+    border: 1px solid rgba(133, 155, 184, 0.14);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.policy-form {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+.field-span {
+    grid-column: 1 / -1;
+}
+
+.form-label {
+    display: inline-block;
+    margin-bottom: 8px;
+    color: var(--subtle);
+    font-size: 13px;
+}
+
+.policy-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.table-wrap {
+    overflow-x: auto;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+th,
+td {
+    text-align: left;
+    padding: 12px 10px;
+    border-bottom: 1px solid rgba(133, 155, 184, 0.12);
+    vertical-align: top;
+}
+
+th {
+    color: var(--subtle);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border-radius: 999px;
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.18);
+    color: var(--text);
+    font-size: 12px;
+    margin: 2px 4px 2px 0;
+}
+
+.pill-muted {
+    background: rgba(133, 155, 184, 0.1);
+    border-color: rgba(133, 155, 184, 0.18);
+    color: var(--subtle);
+}
+
+.status-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    border: 1px solid transparent;
+}
+
+.status-running,
+.status-queued {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.24);
+    color: #d5f4ff;
+}
+
+.status-waiting_approval,
+.status-skipped {
+    background: rgba(251, 191, 36, 0.12);
+    border-color: rgba(251, 191, 36, 0.24);
+    color: #fde68a;
+}
+
+.status-succeeded {
+    background: rgba(74, 222, 128, 0.12);
+    border-color: rgba(74, 222, 128, 0.24);
+    color: #dcfce7;
+}
+
+.status-failed,
+.status-cancelled,
+.status-interrupted {
+    background: rgba(251, 113, 133, 0.12);
+    border-color: rgba(251, 113, 133, 0.24);
+    color: #fecdd3;
+}
+
+@media (max-width: 960px) {
+    .admin-grid,
+    .policy-form {
+        grid-template-columns: 1fr;
+    }
+}
