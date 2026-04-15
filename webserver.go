@@ -2335,7 +2335,9 @@ func loadServers() {
 	}
 }
 
-func saveServers() error {
+type saveServersTxHook func(*sql.Tx) error
+
+func saveServersWithTxHook(txHook saveServersTxHook) error {
 	db := getDB()
 	tx, err := db.Begin()
 	if err != nil {
@@ -2369,6 +2371,12 @@ func saveServers() error {
 			return fmt.Errorf("insert server %s: %w", server.Name, err)
 		}
 	}
+	if txHook != nil {
+		if err := txHook(tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
 	if err := pruneUpdatePolicyOverridesForServersTx(tx, servers); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("prune policy overrides: %w", err)
@@ -2379,8 +2387,22 @@ func saveServers() error {
 	return nil
 }
 
+func saveServers() error {
+	return saveServersWithTxHook(nil)
+}
+
 func saveServersOrRollbackLocked(prevServers []Server, prevStatusMap map[string]*ServerStatus) error {
-	if err := saveServersFunc(); err != nil {
+	return saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, nil)
+}
+
+func saveServersOrRollbackLockedWithTxHook(prevServers []Server, prevStatusMap map[string]*ServerStatus, txHook saveServersTxHook) error {
+	save := saveServersFunc
+	if txHook != nil {
+		save = func() error {
+			return saveServersWithTxHook(txHook)
+		}
+	}
+	if err := save(); err != nil {
 		servers = prevServers
 		statusMap = prevStatusMap
 		return err
@@ -4778,26 +4800,15 @@ func setupRouter() (*gin.Engine, error) {
 					statusMap[name].HasKey = updatedServer.Key != ""
 					statusMap[name].Tags = updatedServer.Tags
 				}
+				var txHook saveServersTxHook
 				if renamedServer {
-					if err := renameUpdatePolicyOverridesServer(name, updatedServer.Name); err != nil {
-						servers = prevServers
-						statusMap = prevStatusMap
-						mu.Unlock()
-						audit(c, "server.update", "server", name, "failure", "Failed to migrate scheduled policy overrides", map[string]any{
-							"error": err.Error(),
-							"from":  name,
-							"to":    updatedServer.Name,
-						})
-						c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to migrate scheduled policy overrides: %v", err)})
-						return
+					oldServerName := name
+					newServerName := updatedServer.Name
+					txHook = func(tx *sql.Tx) error {
+						return renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName)
 					}
 				}
-				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
-					if renamedServer {
-						if rollbackErr := renameUpdatePolicyOverridesServer(updatedServer.Name, name); rollbackErr != nil {
-							log.Printf("failed to roll back policy overrides rename from %q to %q: %v", updatedServer.Name, name, rollbackErr)
-						}
-					}
+				if err := saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, txHook); err != nil {
 					mu.Unlock()
 					audit(c, "server.update", "server", name, "failure", "Failed to persist server", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})

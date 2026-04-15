@@ -56,27 +56,52 @@
                 <div class="admin-block">
                     <h3>Policy Editor</h3>
                     <form id="update-policy-form" class="policy-form">
-                        <input type="hidden" id="policy-id">
-                        <input type="text" id="policy-name" placeholder="Policy name" required>
-                        <input type="text" id="policy-target-tag" placeholder="Target tag" required>
-                        <input type="time" id="policy-time-local" required>
-                        <select id="policy-execution-mode">
-                            <option value="scan_only">Scan only</option>
-                            <option value="approval_required">Approval required</option>
-                            <option value="auto_apply">Auto apply</option>
-                        </select>
-                        <select id="policy-package-scope">
-                            <option value="security">Security only</option>
-                            <option value="full">Full updates</option>
-                        </select>
-                        <select id="policy-cadence-kind">
-                            <option value="daily">Daily</option>
-                            <option value="weekly">Weekly</option>
-                        </select>
-                        <input type="text" id="policy-weekdays" placeholder="Weekdays for weekly (e.g. mon,thu)">
-                        <input type="number" id="policy-approval-timeout" min="1" placeholder="Approval timeout (minutes)">
-                        <div class="field-span">
-                            <label class="checkbox-inline"><input type="checkbox" id="policy-enabled" checked> Policy enabled</label>
+                        <input type="hidden" id="policy-id" aria-label="Policy ID">
+                        <div>
+                            <label for="policy-name" class="form-label">Policy name</label>
+                            <input type="text" id="policy-name" placeholder="Policy name" required>
+                        </div>
+                        <div>
+                            <label for="policy-target-tag" class="form-label">Target tag</label>
+                            <input type="text" id="policy-target-tag" placeholder="Target tag" required>
+                        </div>
+                        <div>
+                            <label for="policy-time-local" class="form-label">Local time</label>
+                            <input type="time" id="policy-time-local" required>
+                        </div>
+                        <div>
+                            <label for="policy-execution-mode" class="form-label">Execution mode</label>
+                            <select id="policy-execution-mode">
+                                <option value="scan_only">Scan only</option>
+                                <option value="approval_required">Approval required</option>
+                                <option value="auto_apply">Auto apply</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="policy-package-scope" class="form-label">Package scope</label>
+                            <select id="policy-package-scope">
+                                <option value="security">Security only</option>
+                                <option value="full">Full updates</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="policy-cadence-kind" class="form-label">Cadence</label>
+                            <select id="policy-cadence-kind">
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="policy-weekdays" class="form-label">Weekdays for weekly</label>
+                            <input type="text" id="policy-weekdays" placeholder="Weekdays for weekly (e.g. mon,thu)">
+                        </div>
+                        <div>
+                            <label for="policy-approval-timeout" class="form-label">Approval timeout (minutes)</label>
+                            <input type="number" id="policy-approval-timeout" min="1" placeholder="Approval timeout (minutes)">
+                        </div>
+                        <div class="field-span checkbox-inline">
+                            <input type="checkbox" id="policy-enabled" checked>
+                            <label for="policy-enabled">Policy enabled</label>
                         </div>
                         <div class="field-span">
                             <label for="policy-blackouts" class="form-label">Policy blackout windows (JSON array)</label>

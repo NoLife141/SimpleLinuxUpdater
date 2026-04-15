@@ -223,15 +223,16 @@ function normalizeWeekdaysInput(raw) {
 function parseBlackoutsJSON(raw, label) {
     const trimmed = String(raw || '').trim();
     if (!trimmed) return [];
+    let parsed;
     try {
-        const parsed = JSON.parse(trimmed);
-        if (!Array.isArray(parsed)) {
-            throw new Error(`${label} must be a JSON array.`);
-        }
-        return parsed;
+        parsed = JSON.parse(trimmed);
     } catch (err) {
         throw new Error(`${label} must be valid JSON.`);
     }
+    if (!Array.isArray(parsed)) {
+        throw new Error(`${label} must be a JSON array.`);
+    }
+    return parsed;
 }
 
 function formatCadence(policy) {
@@ -387,33 +388,37 @@ async function refreshScheduledUpdateViews() {
 
 async function saveScheduledPolicy(event) {
     event.preventDefault();
-    const id = document.getElementById('policy-id').value.trim();
-    const payload = {
-        name: document.getElementById('policy-name').value.trim(),
-        enabled: document.getElementById('policy-enabled').checked,
-        target_tag: document.getElementById('policy-target-tag').value.trim(),
-        package_scope: document.getElementById('policy-package-scope').value,
-        execution_mode: document.getElementById('policy-execution-mode').value,
-        cadence_kind: document.getElementById('policy-cadence-kind').value,
-        time_local: document.getElementById('policy-time-local').value,
-        weekdays: normalizeWeekdaysInput(document.getElementById('policy-weekdays').value),
-        approval_timeout_minutes: Number(document.getElementById('policy-approval-timeout').value || 0),
-        policy_blackouts: parseBlackoutsJSON(document.getElementById('policy-blackouts').value, 'Policy blackout windows')
-    };
-    const url = id ? `/api/update-policies/${encodeURIComponent(id)}` : '/api/update-policies';
-    const method = id ? 'PUT' : 'POST';
-    const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-        alert(await parseErrorResponse(res, 'Failed to save scheduled policy.'));
-        return;
+    try {
+        const id = document.getElementById('policy-id').value.trim();
+        const payload = {
+            name: document.getElementById('policy-name').value.trim(),
+            enabled: document.getElementById('policy-enabled').checked,
+            target_tag: document.getElementById('policy-target-tag').value.trim(),
+            package_scope: document.getElementById('policy-package-scope').value,
+            execution_mode: document.getElementById('policy-execution-mode').value,
+            cadence_kind: document.getElementById('policy-cadence-kind').value,
+            time_local: document.getElementById('policy-time-local').value,
+            weekdays: normalizeWeekdaysInput(document.getElementById('policy-weekdays').value),
+            approval_timeout_minutes: Number(document.getElementById('policy-approval-timeout').value || 0),
+            policy_blackouts: parseBlackoutsJSON(document.getElementById('policy-blackouts').value, 'Policy blackout windows')
+        };
+        const url = id ? `/api/update-policies/${encodeURIComponent(id)}` : '/api/update-policies';
+        const method = id ? 'PUT' : 'POST';
+        const res = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+            alert(await parseErrorResponse(res, 'Failed to save scheduled policy.'));
+            return;
+        }
+        document.getElementById('update-policy-status').textContent = id ? 'Policy updated.' : 'Policy created.';
+        resetPolicyForm();
+        await refreshScheduledUpdateViews();
+    } catch (err) {
+        alert(err.message || 'Failed to save scheduled policy.');
     }
-    document.getElementById('update-policy-status').textContent = id ? 'Policy updated.' : 'Policy created.';
-    resetPolicyForm();
-    await refreshScheduledUpdateViews();
 }
 
 async function saveScheduledSettings() {

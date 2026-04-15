@@ -718,27 +718,28 @@ func setUpdatePolicyOverride(policyID int64, serverName string, disabled bool) (
 	`, policyID, serverName, boolToInt(disabled), now, now); err != nil {
 		return UpdatePolicyOverride{}, err
 	}
-	return UpdatePolicyOverride{
-		PolicyID:   policyID,
-		ServerName: serverName,
-		Disabled:   disabled,
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}, nil
+	var item UpdatePolicyOverride
+	var disabledInt int
+	if err := getDB().QueryRow(`
+		SELECT policy_id, server_name, disabled, created_at, updated_at
+		  FROM update_policy_overrides
+		 WHERE policy_id = ? AND server_name = ?
+	`, policyID, serverName).Scan(&item.PolicyID, &item.ServerName, &disabledInt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return UpdatePolicyOverride{}, err
+	}
+	item.Disabled = disabledInt != 0
+	return item, nil
 }
 
-func renameUpdatePolicyOverridesServer(oldServerName, newServerName string) error {
+func renameUpdatePolicyOverridesServerTx(tx *sql.Tx, oldServerName, newServerName string) error {
+	if tx == nil {
+		return errors.New("tx is required")
+	}
 	oldServerName = strings.TrimSpace(oldServerName)
 	newServerName = strings.TrimSpace(newServerName)
 	if oldServerName == "" || newServerName == "" || oldServerName == newServerName {
 		return nil
 	}
-
-	tx, err := getDB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	now := jobTimestampNow()
 	if _, err := tx.Exec(`
@@ -754,6 +755,20 @@ func renameUpdatePolicyOverridesServer(oldServerName, newServerName string) erro
 	}
 
 	if _, err := tx.Exec(`DELETE FROM update_policy_overrides WHERE server_name = ?`, oldServerName); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func renameUpdatePolicyOverridesServer(oldServerName, newServerName string) error {
+	tx, err := getDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
 		return err
 	}
 
@@ -1322,11 +1337,13 @@ func loadScheduledJobBehavior(jobID string) scheduledJobBehavior {
 	if meta.ApprovalTimeoutMinutes > 0 {
 		behavior.ApprovalTimeout = time.Duration(meta.ApprovalTimeoutMinutes) * time.Minute
 	}
-	switch normalizeApprovalScope(meta.AutoApproveScope) {
-	case "security":
-		behavior.AutoApproveScope = "security"
-	case "all":
-		behavior.AutoApproveScope = "all"
+	if strings.TrimSpace(meta.AutoApproveScope) != "" {
+		switch normalizeApprovalScope(meta.AutoApproveScope) {
+		case "security":
+			behavior.AutoApproveScope = "security"
+		case "all":
+			behavior.AutoApproveScope = "all"
+		}
 	}
 	return behavior
 }
@@ -1443,6 +1460,32 @@ func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server S
 }
 
 func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Server) {
+	preStartStatus := currentStatusSnapshot(server.Name)
+	if _, err := beginServerAction(server.Name, "updating"); err != nil {
+		status := updatePolicyRunFailed
+		reason := updatePolicyRunReasonMissing
+		summary := "Server unavailable for scheduled scan"
+		if errors.Is(err, errActionInProgress) {
+			status = updatePolicyRunSkipped
+			reason = updatePolicyRunReasonBusy
+			summary = "Server busy; scheduled scan skipped"
+		}
+		finishedAt := jobTimestampNow()
+		_ = updateUpdatePolicyRun(run.ID, updatePolicyRunUpdate{
+			Status:     &status,
+			Reason:     &reason,
+			Summary:    &summary,
+			FinishedAt: &finishedAt,
+		})
+		auditWithActor("system", "", "schedule.run."+status, "server", server.Name, status, summary, map[string]any{
+			"policy_id":         policy.ID,
+			"policy_name":       policy.Name,
+			"scheduled_for_utc": run.ScheduledForUTC,
+		})
+		return
+	}
+	defer restoreStatusSnapshot(server.Name, preStartStatus)
+
 	retryPolicy := loadRetryPolicyFromEnv()
 	meta := buildScheduledJobMeta(policy, run.ScheduledForUTC)
 	jm := currentJobManager()
@@ -1456,6 +1499,12 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 			Reason:     &reason,
 			Summary:    &summary,
 			FinishedAt: &finishedAt,
+		})
+		auditWithActor("system", "", "schedule.run.failed", "server", server.Name, "failure", summary, map[string]any{
+			"policy_id":         policy.ID,
+			"policy_name":       policy.Name,
+			"scheduled_for_utc": run.ScheduledForUTC,
+			"error":             "job manager unavailable",
 		})
 		return
 	}
@@ -1478,6 +1527,12 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 			Reason:     &reason,
 			Summary:    &summary,
 			FinishedAt: &finishedAt,
+		})
+		auditWithActor("system", "", "schedule.run.failed", "server", server.Name, "failure", summary, map[string]any{
+			"policy_id":         policy.ID,
+			"policy_name":       policy.Name,
+			"scheduled_for_utc": run.ScheduledForUTC,
+			"error":             err.Error(),
 		})
 		return
 	}

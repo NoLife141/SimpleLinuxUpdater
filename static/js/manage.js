@@ -55,24 +55,39 @@ let editPolicyOverrideStates = new Map();
             }
 
             async function fetchEditPolicyContext(serverName) {
+                const requestedServerName = String(serverName || '');
                 const policiesRes = await fetch('/api/update-policies');
                 if (!policiesRes.ok) {
                     throw new Error(await parseErrorResponse(policiesRes, 'Failed to load scheduled policies.'));
                 }
+                if (!editingServerName || editingServerName !== requestedServerName) {
+                    return;
+                }
                 const policiesData = await policiesRes.json().catch(() => ({}));
-                editUpdatePolicies = Array.isArray(policiesData.items) ? policiesData.items : [];
-                editPolicyOverrideStates = new Map();
-                await Promise.all(editUpdatePolicies.map(async (policy) => {
+                const nextPolicies = Array.isArray(policiesData.items) ? policiesData.items : [];
+                const nextOverrideStates = new Map();
+                await Promise.all(nextPolicies.map(async (policy) => {
                     const res = await fetch(`/api/update-policies/${encodeURIComponent(policy.id)}/overrides`);
                     if (!res.ok) {
                         throw new Error(await parseErrorResponse(res, 'Failed to load policy overrides.'));
                     }
+                    if (!editingServerName || editingServerName !== requestedServerName) {
+                        return;
+                    }
                     const data = await res.json().catch(() => ({}));
+                    if (!editingServerName || editingServerName !== requestedServerName) {
+                        return;
+                    }
                     const match = Array.isArray(data.items)
-                        ? data.items.find((item) => String(item.server_name || '') === String(serverName || ''))
+                        ? data.items.find((item) => String(item.server_name || '') === requestedServerName)
                         : null;
-                    editPolicyOverrideStates.set(String(policy.id), !!match?.disabled);
+                    nextOverrideStates.set(String(policy.id), !!match?.disabled);
                 }));
+                if (!editingServerName || editingServerName !== requestedServerName) {
+                    return;
+                }
+                editUpdatePolicies = nextPolicies;
+                editPolicyOverrideStates = nextOverrideStates;
             }
 
             function renderEditPolicyOverrides() {
@@ -856,6 +871,7 @@ let editPolicyOverrideStates = new Map();
                         setEditHostKeyStatus('');
                         return;
                     }
+                    editingServerName = newName;
                     if (trustHostNow) {
                         if (editKnownHostCheckPromise) {
                             await editKnownHostCheckPromise;

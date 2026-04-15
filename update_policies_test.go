@@ -473,6 +473,157 @@ func TestRunUpdateJobWithActorScheduledAutoApplyUsesJobMeta(t *testing.T) {
 	}
 }
 
+func TestRunUpdateJobWithActorScheduledApprovalRequiredCancelledKeepsMeta(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-approval-required.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	t.Setenv(postchecksEnabledEnv, "false")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+	server := Server{Name: "srv-approval-required", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	scheduledFor := time.Now().UTC().Format(jobTimestampLayout)
+	meta := buildScheduledJobMeta(UpdatePolicy{
+		ID:                     9,
+		Name:                   "Approval required security",
+		ExecutionMode:          updatePolicyExecutionApprovalRequired,
+		PackageScope:           updatePolicyPackageScopeSecurity,
+		ApprovalTimeoutMinutes: defaultScheduledApprovalTimeoutMinutes,
+	}, scheduledFor)
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "system",
+		Status:     jobStatusQueued,
+		MetaJSON:   marshalJobJSON(meta),
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update) unexpected error: %v", err)
+	}
+
+	updateConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDiskSpaceCmd: {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:     {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd: {},
+			precheckAptCheckCmd:  {},
+			aptUpdateCmd:         {},
+			aptListUpgradableCmd: {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
+		},
+	}
+	cveConn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1003\n"},
+		},
+	}
+	origDial := getDialSSHConnection()
+	var dialCalls int32
+	setDialSSHConnection(makeDialSSHValidator(server, &dialCalls, updateConn, cveConn))
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	done := make(chan struct{})
+	go func() {
+		runUpdateJobWithActor(server, "system", "", loadRetryPolicyFromEnv(), job.ID)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		snapshot := currentStatusSnapshot(server.Name)
+		if snapshot != nil && snapshot.Status == "pending_approval" {
+			break
+		}
+		if time.Now().After(deadline) {
+			persistedJob, jobErr := currentJobManager().GetJob(job.ID)
+			t.Fatalf(
+				"timed out waiting for pending approval; runtime_status=%+v job_err=%v job_status=%q job_phase=%q job_summary=%q",
+				snapshot,
+				jobErr,
+				persistedJob.Status,
+				persistedJob.Phase,
+				persistedJob.Summary,
+			)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitForCondition(t, 3*time.Second, func() bool {
+		persistedJob, err := currentJobManager().GetJob(job.ID)
+		return err == nil && persistedJob.Status == jobStatusWaitingApproval
+	}, "scheduled approval-required job status to become waiting_approval")
+
+	cancelRec := httptest.NewRecorder()
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
+	cancelReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(cancelReq)
+	handler.ServeHTTP(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, want %d (body=%s)", cancelRec.Code, http.StatusOK, cancelRec.Body.String())
+	}
+
+	select {
+	case <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("timed out waiting for approval-required flow to exit after cancel")
+	}
+
+	persistedJob, err := currentJobManager().GetJob(job.ID)
+	if err != nil {
+		t.Fatalf("GetJob(approval-required) unexpected error: %v", err)
+	}
+	if persistedJob.Status != jobStatusCancelled {
+		t.Fatalf("approval-required final job status = %q, want %q", persistedJob.Status, jobStatusCancelled)
+	}
+	var persistedMeta scheduledJobMeta
+	if err := json.Unmarshal([]byte(persistedJob.MetaJSON), &persistedMeta); err != nil {
+		t.Fatalf("unmarshal approval-required job meta: %v", err)
+	}
+	if persistedMeta.Trigger != "scheduled" {
+		t.Fatalf("approval-required meta trigger = %q, want %q", persistedMeta.Trigger, "scheduled")
+	}
+	if persistedMeta.ExecutionMode != updatePolicyExecutionApprovalRequired {
+		t.Fatalf("approval-required meta execution_mode = %q, want %q", persistedMeta.ExecutionMode, updatePolicyExecutionApprovalRequired)
+	}
+	if persistedMeta.ScheduledFor != scheduledFor {
+		t.Fatalf("approval-required meta scheduled_for = %q, want %q", persistedMeta.ScheduledFor, scheduledFor)
+	}
+	if persistedMeta.ApprovalTimeoutMinutes != defaultScheduledApprovalTimeoutMinutes {
+		t.Fatalf("approval-required meta timeout = %d, want %d", persistedMeta.ApprovalTimeoutMinutes, defaultScheduledApprovalTimeoutMinutes)
+	}
+
+	var auditStatus, auditMetaJSON string
+	if err := getDB().QueryRow(`
+		SELECT status, meta_json
+		  FROM audit_events
+		 WHERE action = 'update.cancel' AND target_name = ?
+		 ORDER BY id DESC
+		 LIMIT 1
+	`, server.Name).Scan(&auditStatus, &auditMetaJSON); err != nil {
+		t.Fatalf("query update.cancel audit: %v", err)
+	}
+	if auditStatus != "success" {
+		t.Fatalf("update.cancel audit status = %q, want %q", auditStatus, "success")
+	}
+	var auditMeta map[string]any
+	if err := json.Unmarshal([]byte(auditMetaJSON), &auditMeta); err != nil {
+		t.Fatalf("unmarshal update.cancel audit meta: %v", err)
+	}
+	if auditMeta == nil {
+		t.Fatalf("update.cancel audit meta is nil")
+	}
+}
+
 func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "update-policy-scan.db")
 	prepareUpdatePolicyTestState(t, dbFile)
