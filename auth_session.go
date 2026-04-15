@@ -466,7 +466,10 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		backupRestoreMu.RLock()
+		if !backupRestoreMu.TryRLock() {
+			writeMaintenanceBlockedResponse(c)
+			return
+		}
 		defer backupRestoreMu.RUnlock()
 		if currentMaintenanceState().Active {
 			writeMaintenanceBlockedResponse(c)

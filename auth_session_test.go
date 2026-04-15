@@ -131,7 +131,7 @@ func assertSecurityHeaders(t *testing.T, h http.Header, wantHSTS bool) {
 }
 
 func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *testing.T) {
-	t.Run("get waits behind restore lock", func(t *testing.T) {
+	t.Run("get rejects while restore lock held", func(t *testing.T) {
 		gin.SetMode(gin.TestMode)
 		r := gin.New()
 		r.Use(backupRestoreBarrierMiddleware())
@@ -152,8 +152,11 @@ func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *t
 
 		select {
 		case code := <-done:
-			t.Fatalf("GET completed while restore lock held with status %d", code)
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("GET /probe status = %d, want %d", code, http.StatusServiceUnavailable)
+			}
 		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("GET /probe did not reject while restore lock held")
 		}
 	})
 
