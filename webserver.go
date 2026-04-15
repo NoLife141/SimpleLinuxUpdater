@@ -5278,6 +5278,7 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.POST("/api/approve/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		preApproveStatus := currentStatusSnapshot(name)
 		exists, approved := approvePendingUpdate(name, "all")
 		if !exists {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
@@ -5285,21 +5286,31 @@ func setupRouter() (*gin.Engine, error) {
 			return
 		}
 		if approved {
-			if jm := currentJobManager(); jm != nil {
-				if job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate); err == nil && job != nil {
-					status := jobStatusRunning
-					phase := jobPhaseAptUpgrade
-					summary := "All pending updates approved"
-					_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-						Status:  &status,
-						Phase:   &phase,
-						Summary: &summary,
-						LogsText: func() *string {
-							logs := currentStatusLogs(name)
-							return &logs
-						}(),
-					})
+			persistApproveErr := func() error {
+				jm := currentJobManager()
+				if jm == nil {
+					return errors.New("job manager unavailable")
 				}
+				job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+				if err != nil {
+					return err
+				}
+				status := jobStatusRunning
+				phase := jobPhaseAptUpgrade
+				summary := "All pending updates approved"
+				logs := preApproveStatus.Logs
+				return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+					Status:   &status,
+					Phase:    &phase,
+					Summary:  &summary,
+					LogsText: &logs,
+				})
+			}()
+			if persistApproveErr != nil {
+				restoreStatusSnapshot(name, preApproveStatus)
+				audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": persistApproveErr.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+				return
 			}
 			audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
 			c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
@@ -5311,6 +5322,7 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.POST("/api/approve-security/:name", func(c *gin.Context) {
 		name := c.Param("name")
+		preApproveStatus := currentStatusSnapshot(name)
 		exists, approved := approvePendingUpdate(name, "security")
 		if !exists {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", map[string]any{"scope": "security"})
@@ -5318,21 +5330,31 @@ func setupRouter() (*gin.Engine, error) {
 			return
 		}
 		if approved {
-			if jm := currentJobManager(); jm != nil {
-				if job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate); err == nil && job != nil {
-					status := jobStatusRunning
-					phase := jobPhaseAptUpgrade
-					summary := "Security updates approved"
-					_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-						Status:  &status,
-						Phase:   &phase,
-						Summary: &summary,
-						LogsText: func() *string {
-							logs := currentStatusLogs(name)
-							return &logs
-						}(),
-					})
+			persistApproveErr := func() error {
+				jm := currentJobManager()
+				if jm == nil {
+					return errors.New("job manager unavailable")
 				}
+				job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+				if err != nil {
+					return err
+				}
+				status := jobStatusRunning
+				phase := jobPhaseAptUpgrade
+				summary := "Security updates approved"
+				logs := preApproveStatus.Logs
+				return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+					Status:   &status,
+					Phase:    &phase,
+					Summary:  &summary,
+					LogsText: &logs,
+				})
+			}()
+			if persistApproveErr != nil {
+				restoreStatusSnapshot(name, preApproveStatus)
+				audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": persistApproveErr.Error()})
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+				return
 			}
 			audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
 			c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})

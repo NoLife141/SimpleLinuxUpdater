@@ -163,6 +163,18 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 			},
 		}
 	}()
+	_, createErr := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if createErr != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", createErr)
+	}
 
 	approveRec := httptest.NewRecorder()
 	approveReq := httptest.NewRequest(http.MethodPost, "/api/approve/"+server.Name, nil)
@@ -204,7 +216,7 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 		status.PendingUpdates = clonePendingUpdates(pending)
 		status.Logs = "pending"
 	}()
-	_, err := currentJobManager().CreateJob(JobCreateParams{
+	_, createErr = currentJobManager().CreateJob(JobCreateParams{
 		Kind:       jobKindUpdate,
 		ServerName: server.Name,
 		Actor:      "tester",
@@ -213,8 +225,8 @@ func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
 		Phase:      jobPhaseApprovalWait,
 		Summary:    "Waiting for approval",
 	})
-	if err != nil {
-		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	if createErr != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", createErr)
 	}
 
 	cancelRec := httptest.NewRecorder()
@@ -709,14 +721,14 @@ func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
 	cancelledPhase := jobPhaseComplete
 	cancelledSummary := "Update cancelled"
 	finishedAt := jobTimestampNow()
-	if err := currentJobManager().UpdateJob(job.ID, JobUpdate{
+	if err := currentJobManager().UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
 		Status:     &cancelledStatus,
 		Phase:      &cancelledPhase,
 		Summary:    &cancelledSummary,
 		LogsText:   &logsBeforeCancel,
 		FinishedAt: &finishedAt,
 	}); err != nil {
-		t.Fatalf("UpdateJob(cancelled) unexpected error: %v", err)
+		t.Fatalf("UpdateJobWithoutRuntimeSync(cancelled) unexpected error: %v", err)
 	}
 
 	select {
@@ -809,5 +821,68 @@ func TestCancelRouteDoesNotRehydrateClearedRuntimeLogsFromJobSync(t *testing.T) 
 	}
 	if jobLogs != "pending" {
 		t.Fatalf("cancelled job logs_text = %q, want %q", jobLogs, "pending")
+	}
+}
+
+func TestApproveRoutesReturnFailureWhenPendingJobCannotBePersisted(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wantScope string
+	}{
+		{name: "approve all", path: "/api/approve/%s", wantScope: "all"},
+		{name: "approve security", path: "/api/approve-security/%s", wantScope: "security"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.name, " ", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.name, " ", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {
+						Name:           server.Name,
+						Status:         "pending_approval",
+						ApprovalScope:  "",
+						Upgradable:     []string{"openssl"},
+						PendingUpdates: clonePendingUpdates(pending),
+						Logs:           "pending",
+					},
+				}
+			}()
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), nil)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+
+			runtimeStatus := currentStatusSnapshot(server.Name)
+			if runtimeStatus == nil {
+				t.Fatalf("%s runtime status missing after failed approval", tc.name)
+			}
+			if runtimeStatus.Status != "pending_approval" || runtimeStatus.ApprovalScope != "" || runtimeStatus.Logs != "pending" {
+				t.Fatalf("%s runtime status after failed approval = %+v, want restored pending state", tc.name, runtimeStatus)
+			}
+			if len(runtimeStatus.Upgradable) != 1 || len(runtimeStatus.PendingUpdates) != 1 {
+				t.Fatalf("%s runtime status after failed approval should keep pending data, got %+v", tc.name, runtimeStatus)
+			}
+		})
 	}
 }
