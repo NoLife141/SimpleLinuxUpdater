@@ -21,6 +21,7 @@ const (
 	jobKindCVEEnrichment  = "cve_enrichment"
 	jobKindBackupExport   = "backup_export"
 	jobKindBackupRestore  = "backup_restore"
+	jobKindScheduledScan  = "scheduled_scan"
 
 	jobStatusQueued          = "queued"
 	jobStatusRunning         = "running"

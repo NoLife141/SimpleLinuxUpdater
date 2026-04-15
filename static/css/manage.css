@@ -574,6 +574,29 @@ td button { display: block; margin: 6px 0; width: 100%; }
     word-break: break-word;
 }
 
+.policy-override-section {
+    padding: 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(133, 155, 184, 0.14);
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.policy-override-list {
+    display: grid;
+    gap: 10px;
+}
+
+.policy-override-item {
+    padding: 12px;
+    border-radius: 14px;
+    border: 1px solid rgba(133, 155, 184, 0.12);
+    background: rgba(10, 17, 28, 0.56);
+}
+
+.policy-override-item .subtle {
+    margin: 6px 0 0;
+}
+
 @keyframes fade-in {
     to { opacity: 1; transform: translateY(0); }
     from { opacity: 0; transform: translateY(8px); }

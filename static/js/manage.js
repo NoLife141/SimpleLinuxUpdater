@@ -7,12 +7,14 @@ let serverCache = {};
         let auditEvents = [];
         let auditPage = 1;
         let auditPageSize = 20;
-            let auditTotal = 0;
-            let hostKeyModalPromise = null;
-            let hostKeyModalResolvers = [];
-            let editSaveInProgress = false;
-            let editKnownHostState = { host: '', port: 0, checked: false, alreadyTrusted: false, fingerprint: '' };
-            let editKnownHostCheckPromise = null;
+let auditTotal = 0;
+let hostKeyModalPromise = null;
+let hostKeyModalResolvers = [];
+let editSaveInProgress = false;
+let editKnownHostState = { host: '', port: 0, checked: false, alreadyTrusted: false, fingerprint: '' };
+let editKnownHostCheckPromise = null;
+let editUpdatePolicies = [];
+let editPolicyOverrideStates = new Map();
 
         function escapeHtml(value) {
             return String(value ?? "")
@@ -37,6 +39,138 @@ let serverCache = {};
                 const parsed = Number.parseInt(value, 10);
                 if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return fallback;
                 return parsed;
+            }
+
+            function parseTagsInput(raw) {
+                return String(raw || '')
+                    .split(',')
+                    .map((tag) => tag.trim())
+                    .filter(Boolean);
+            }
+
+            function serverMatchesPolicyTags(tags, policy) {
+                const targetTag = String(policy?.target_tag || '').trim().toLowerCase();
+                if (!targetTag) return false;
+                return tags.some((tag) => String(tag || '').trim().toLowerCase() === targetTag);
+            }
+
+            async function fetchEditPolicyContext(serverName) {
+                const requestedServerName = String(serverName || '');
+                const policiesRes = await fetch('/api/update-policies');
+                if (!policiesRes.ok) {
+                    throw new Error(await parseErrorResponse(policiesRes, 'Failed to load scheduled policies.'));
+                }
+                if (!editingServerName || editingServerName !== requestedServerName) {
+                    return;
+                }
+                const policiesData = await policiesRes.json().catch(() => ({}));
+                const nextPolicies = Array.isArray(policiesData.items) ? policiesData.items : [];
+                const nextOverrideStates = new Map();
+                await Promise.all(nextPolicies.map(async (policy) => {
+                    const res = await fetch(`/api/update-policies/${encodeURIComponent(policy.id)}/overrides`);
+                    if (!res.ok) {
+                        throw new Error(await parseErrorResponse(res, 'Failed to load policy overrides.'));
+                    }
+                    if (!editingServerName || editingServerName !== requestedServerName) {
+                        return;
+                    }
+                    const data = await res.json().catch(() => ({}));
+                    if (!editingServerName || editingServerName !== requestedServerName) {
+                        return;
+                    }
+                    const match = Array.isArray(data.items)
+                        ? data.items.find((item) => String(item.server_name || '') === requestedServerName)
+                        : null;
+                    nextOverrideStates.set(String(policy.id), !!match?.disabled);
+                }));
+                if (!editingServerName || editingServerName !== requestedServerName) {
+                    return;
+                }
+                editUpdatePolicies = nextPolicies;
+                editPolicyOverrideStates = nextOverrideStates;
+            }
+
+            function renderEditPolicyOverrides() {
+                const container = document.getElementById('edit-policy-overrides');
+                if (!container) return;
+                const currentTags = parseTagsInput(document.getElementById('edit-tags').value);
+                const matchingPolicies = editUpdatePolicies.filter((policy) => serverMatchesPolicyTags(currentTags, policy));
+                if (!matchingPolicies.length) {
+                    container.innerHTML = '<div class="subtle">No tag-based scheduled policies currently match this server.</div>';
+                    return;
+                }
+                container.innerHTML = matchingPolicies.map((policy) => {
+                    const checked = editPolicyOverrideStates.get(String(policy.id)) ? 'checked' : '';
+                    const cadence = policy.cadence_kind === 'weekly'
+                        ? `${(policy.weekdays || []).join(', ') || 'weekly'} @ ${policy.time_local || '--:--'}`
+                        : `daily @ ${policy.time_local || '--:--'}`;
+                    return `
+                        <div class="policy-override-item">
+                            <label class="checkbox-inline">
+                                <input type="checkbox" data-policy-id="${escapeHtml(String(policy.id))}" ${checked}>
+                                Disable "${escapeHtml(policy.name || '')}" for this server
+                            </label>
+                            <p class="subtle">${escapeHtml(policy.execution_mode || '')} / ${escapeHtml(policy.package_scope || '')} / ${escapeHtml(cadence)}</p>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            async function saveEditPolicyOverrides(serverName) {
+                const container = document.getElementById('edit-policy-overrides');
+                if (!container) return;
+                const currentTags = parseTagsInput(document.getElementById('edit-tags').value);
+                const checkboxes = new Map(
+                    Array.from(container.querySelectorAll('input[data-policy-id]')).map((checkbox) => [
+                        String(checkbox.dataset.policyId || '').trim(),
+                        checkbox
+                    ])
+                );
+                const requests = [];
+                for (const policy of editUpdatePolicies) {
+                    const policyID = String(policy?.id || '').trim();
+                    if (!policyID) {
+                        continue;
+                    }
+                    const matchesPolicy = serverMatchesPolicyTags(currentTags, policy);
+                    const checkbox = checkboxes.get(policyID);
+                    if (!matchesPolicy && !editPolicyOverrideStates.get(policyID)) {
+                        continue;
+                    }
+                    const disabled = matchesPolicy
+                        ? (checkbox ? !!checkbox.checked : !!editPolicyOverrideStates.get(policyID))
+                        : false;
+                    const request = (async () => {
+                        const res = await fetch(`/api/update-policies/${encodeURIComponent(policyID)}/overrides/${encodeURIComponent(serverName)}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ disabled })
+                        });
+                        if (!res.ok) {
+                            throw new Error(await parseErrorResponse(res, `Failed to save scheduled update override for policy ${policyID}.`));
+                        }
+                    })();
+                    requests.push({ policyID, disabled, request });
+                }
+                if (!requests.length) {
+                    return;
+                }
+                const settled = await Promise.allSettled(requests.map((item) => item.request));
+                const failures = [];
+                settled.forEach((result, index) => {
+                    const req = requests[index];
+                    if (result.status === 'fulfilled') {
+                        editPolicyOverrideStates.set(req.policyID, req.disabled);
+                        return;
+                    }
+                    const reason = result.reason instanceof Error
+                        ? result.reason.message
+                        : String(result.reason || 'unknown error');
+                    failures.push(`${req.policyID}: ${reason}`);
+                });
+                if (failures.length) {
+                    throw new Error(`Failed to save scheduled update overrides for policy IDs ${failures.join('; ')}`);
+                }
             }
 
             function resetEditKnownHostState() {
@@ -540,7 +674,7 @@ let serverCache = {};
             }
         }
 
-            function editServer(name) {
+            async function editServer(name) {
                 const current = serverCache[name] || {};
                 editSaveInProgress = false;
                 editingServerName = name;
@@ -563,6 +697,13 @@ let serverCache = {};
                 setEditKnownHostButtonsState(false);
                 document.getElementById('edit-modal').classList.add('active');
                 checkEditKnownHostStatus();
+                document.getElementById('edit-policy-overrides').innerHTML = '<div class="subtle">Loading matching policies...</div>';
+                try {
+                    await fetchEditPolicyContext(name);
+                    renderEditPolicyOverrides();
+                } catch (err) {
+                    document.getElementById('edit-policy-overrides').innerHTML = `<div class="subtle">${escapeHtml(err.message || 'Failed to load scheduled policies.')}</div>`;
+                }
             }
 
             function closeEditModal() {
@@ -573,6 +714,12 @@ let serverCache = {};
                 setEditKnownHostButtonsState(false);
                 editingServerName = null;
                 resetEditKnownHostState();
+                editUpdatePolicies = [];
+                editPolicyOverrideStates = new Map();
+                const overrides = document.getElementById('edit-policy-overrides');
+                if (overrides) {
+                    overrides.innerHTML = '';
+                }
             }
 
         function setEditHostKeyStatus(message) {
@@ -762,6 +909,7 @@ let serverCache = {};
                         setEditHostKeyStatus('');
                         return;
                     }
+                    editingServerName = newName;
                     if (trustHostNow) {
                         if (editKnownHostCheckPromise) {
                             await editKnownHostCheckPromise;
@@ -795,12 +943,23 @@ let serverCache = {};
                         }
                         }
                     }
-                closeEditModal();
-                fetchManageServers();
-            } finally {
-                editSaveInProgress = false;
-                setEditSaveButtonState(false);
-            }
+                    let overrideSaveError = null;
+                    try {
+                        await saveEditPolicyOverrides(newName);
+                    } catch (err) {
+                        overrideSaveError = err;
+                    }
+                    closeEditModal();
+                    fetchManageServers();
+                    if (overrideSaveError) {
+                        alert(`Server saved, but scheduled update overrides were not fully saved: ${overrideSaveError?.message || 'unknown error'}`);
+                    }
+                } catch (err) {
+                    alert(err?.message || 'Failed to save server.');
+                } finally {
+                    editSaveInProgress = false;
+                    setEditSaveButtonState(false);
+                }
         }
 
         async function uploadServerKey(name) {
@@ -877,6 +1036,11 @@ let serverCache = {};
                     editKnownHostCheckPromise = null;
                     resetEditKnownHostState();
                     setEditHostKeyStatus('Host/port changed. Click "Check Known Host" to refresh status.');
+                }
+            });
+            document.getElementById('edit-tags').addEventListener('input', () => {
+                if (editingServerName) {
+                    renderEditPolicyOverrides();
                 }
             });
             document.getElementById('edit-user').addEventListener('input', () => {
