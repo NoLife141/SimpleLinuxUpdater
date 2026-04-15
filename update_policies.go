@@ -1884,6 +1884,7 @@ func processDueUpdatePolicies(now time.Time) error {
 		}
 	}
 
+	var queueErrs []error
 	for serverName, candidates := range candidatesByServer {
 		if len(candidates) == 0 {
 			continue
@@ -1918,12 +1919,25 @@ func processDueUpdatePolicies(now time.Time) error {
 			ResultJSON:      "{}",
 		})
 		if err != nil {
-			return err
+			queueErr := fmt.Errorf(
+				"queue scheduled run failed: policy_id=%d policy_name=%q server=%q scheduled_for_utc=%q: %w",
+				winner.policy.ID,
+				winner.policy.Name,
+				serverName,
+				winner.scheduledForUTC,
+				err,
+			)
+			log.Printf("processDueUpdatePolicies: %v", queueErr)
+			queueErrs = append(queueErrs, queueErr)
+			continue
 		}
 		if !inserted {
 			continue
 		}
 		executeScheduledPolicyRun(run, winner.policy, winner.server)
+	}
+	if len(queueErrs) > 0 {
+		return fmt.Errorf("scheduled policy queue encountered %d error(s): %w", len(queueErrs), errors.Join(queueErrs...))
 	}
 	return nil
 }
