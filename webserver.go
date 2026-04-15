@@ -2439,6 +2439,20 @@ func currentStatusSnapshot(name string) *ServerStatus {
 	return &copyStatus
 }
 
+func restoreStatusSnapshot(name string, snapshot *ServerStatus) {
+	mu.Lock()
+	defer mu.Unlock()
+	if snapshot == nil {
+		delete(statusMap, name)
+		return
+	}
+	restored := *snapshot
+	restored.Upgradable = append([]string(nil), snapshot.Upgradable...)
+	restored.PendingUpdates = clonePendingUpdates(snapshot.PendingUpdates)
+	restored.Tags = append([]string(nil), snapshot.Tags...)
+	statusMap[name] = &restored
+}
+
 func currentStatusLogs(name string) string {
 	snapshot := currentStatusSnapshot(name)
 	if snapshot == nil {
@@ -3107,10 +3121,12 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					jm := currentJobManager()
 					if jm != nil && strings.TrimSpace(r.jobID) != "" {
 						jobStatus := jobStatusCancelled
+						phase := jobPhaseComplete
 						summary := "Approval window expired"
 						finishedAt := jobTimestampNow()
 						_ = jm.UpdateJob(r.jobID, JobUpdate{
 							Status:     &jobStatus,
+							Phase:      &phase,
 							Summary:    &summary,
 							FinishedAt: &finishedAt,
 						})
@@ -3781,10 +3797,12 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 			if !serverPendingApproval(server.Name) {
 				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusCancelled
+					phase := jobPhaseComplete
 					summary := "Parent update no longer pending approval"
 					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
+						Phase:      &phase,
 						Summary:    &summary,
 						FinishedAt: &finishedAt,
 					})
@@ -3801,10 +3819,12 @@ func startPendingUpdateCVEEnrichment(server Server, config *ssh.ClientConfig, up
 			if !updatePendingPackageCVEState(server.Name, pkg, state, cves) {
 				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusCancelled
+					phase := jobPhaseComplete
 					summary := "Pending update state changed before CVE enrichment finished"
 					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
+						Phase:      &phase,
 						Summary:    &summary,
 						FinishedAt: &finishedAt,
 					})
@@ -5005,6 +5025,7 @@ func setupRouter() (*gin.Engine, error) {
 			"total_attempts_used": 0,
 			"retry_exhausted":     false,
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "updating")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -5024,11 +5045,7 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		job, err := createServerActionJob(jobKindUpdate, name, actor, ip, retryPolicy)
 		if err != nil {
-			mu.Lock()
-			if status := statusMap[name]; status != nil {
-				status.Status = "idle"
-			}
-			mu.Unlock()
+			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
 				writeMaintenanceBlockedResponse(c)
 				return
@@ -5056,6 +5073,7 @@ func setupRouter() (*gin.Engine, error) {
 			"total_attempts_used": 0,
 			"retry_exhausted":     false,
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "autoremove")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -5075,11 +5093,7 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		job, err := createServerActionJob(jobKindAutoremove, name, actor, ip, retryPolicy)
 		if err != nil {
-			mu.Lock()
-			if status := statusMap[name]; status != nil {
-				status.Status = "idle"
-			}
-			mu.Unlock()
+			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
 				writeMaintenanceBlockedResponse(c)
 				return
@@ -5122,6 +5136,7 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -5141,11 +5156,7 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		job, err := createServerActionJob(jobKindSudoersEnable, name, actor, ip, retryPolicy)
 		if err != nil {
-			mu.Lock()
-			if status := statusMap[name]; status != nil {
-				status.Status = "idle"
-			}
-			mu.Unlock()
+			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
 				writeMaintenanceBlockedResponse(c)
 				return
@@ -5188,6 +5199,7 @@ func setupRouter() (*gin.Engine, error) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "missing sudo password"})
 			return
 		}
+		preStartStatus := currentStatusSnapshot(name)
 		server, err := beginServerAction(name, "sudoers")
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -5207,11 +5219,7 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		job, err := createServerActionJob(jobKindSudoersDisable, name, actor, ip, retryPolicy)
 		if err != nil {
-			mu.Lock()
-			if status := statusMap[name]; status != nil {
-				status.Status = "idle"
-			}
-			mu.Unlock()
+			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
 				writeMaintenanceBlockedResponse(c)
 				return
@@ -5326,7 +5334,7 @@ func setupRouter() (*gin.Engine, error) {
 				phase := jobPhaseComplete
 				summary := "Update cancelled"
 				finishedAt := jobTimestampNow()
-				_ = jm.UpdateJob(job.ID, JobUpdate{
+				_ = jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
 					Status:     &status,
 					Phase:      &phase,
 					Summary:    &summary,

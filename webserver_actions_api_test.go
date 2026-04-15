@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -461,6 +462,98 @@ func TestAsyncActionRoutesReturnJobIDAndPersistJobRecords(t *testing.T) {
 	}
 }
 
+func TestActionRoutesRestoreRuntimeSnapshotWhenJobCreationFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		wantErr string
+	}{
+		{name: "update", path: "/api/update/%s", wantErr: "Failed to create update job"},
+		{name: "autoremove", path: "/api/autoremove/%s", wantErr: "Failed to create autoremove job"},
+		{name: "sudoers enable", path: "/api/sudoers/%s", body: `{"password":"pw"}`, wantErr: "Failed to create sudoers job"},
+		{name: "sudoers disable", path: "/api/sudoers/disable/%s", body: `{"password":"pw"}`, wantErr: "Failed to create sudoers disable job"},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			preserveDBState(t)
+			preserveServerState(t)
+			preserveSessionState(t)
+			preserveRateLimiterState(t)
+			preserveMetricsTokenState(t)
+
+			dbFile := filepath.Join(t.TempDir(), strings.ReplaceAll(tc.name, " ", "-")+".db")
+			handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+			server := Server{Name: "srv-" + strings.ReplaceAll(tc.name, " ", "-"), Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+			original := &ServerStatus{
+				Name:           server.Name,
+				Host:           server.Host,
+				Port:           server.Port,
+				User:           server.User,
+				Status:         "idle",
+				Logs:           "",
+				ApprovalScope:  "all",
+				Upgradable:     []string{"held-package"},
+				PendingUpdates: []PendingUpdate{{Package: "openssl", Raw: "Inst openssl"}},
+				Tags:           []string{"prod"},
+			}
+			func() {
+				mu.Lock()
+				defer mu.Unlock()
+				servers = []Server{server}
+				statusMap = map[string]*ServerStatus{
+					server.Name: {
+						Name:           original.Name,
+						Host:           original.Host,
+						Port:           original.Port,
+						User:           original.User,
+						Status:         original.Status,
+						Logs:           original.Logs,
+						ApprovalScope:  original.ApprovalScope,
+						Upgradable:     append([]string(nil), original.Upgradable...),
+						PendingUpdates: clonePendingUpdates(original.PendingUpdates),
+						Tags:           append([]string(nil), original.Tags...),
+					},
+				}
+			}()
+
+			setCurrentJobManager(nil)
+
+			var body *bytes.Buffer
+			if tc.body == "" {
+				body = bytes.NewBuffer(nil)
+			} else {
+				body = bytes.NewBufferString(tc.body)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(tc.path, server.Name), body)
+			req.AddCookie(sessionCookie)
+			markSameOriginAuthRequest(req)
+			if tc.body != "" {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s status = %d, want %d (body=%s)", tc.name, rec.Code, http.StatusInternalServerError, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantErr) {
+				t.Fatalf("%s body = %s, want error containing %q", tc.name, rec.Body.String(), tc.wantErr)
+			}
+
+			restored := currentStatusSnapshot(server.Name)
+			if restored == nil {
+				t.Fatalf("%s status snapshot missing after rollback", tc.name)
+			}
+			if !reflect.DeepEqual(restored, original) {
+				t.Fatalf("%s restored status = %+v, want %+v", tc.name, restored, original)
+			}
+		})
+	}
+}
+
 func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
 	preserveDBState(t)
 	preserveServerState(t)
@@ -581,5 +674,80 @@ func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
 	}
 	if jobSummary != "Update cancelled" {
 		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+}
+
+func TestCancelRouteDoesNotRehydrateClearedRuntimeLogsFromJobSync(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+
+	dbFile := filepath.Join(t.TempDir(), "actions-cancel-route-job-sync.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-cancel-route-job-sync", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	pending := []PendingUpdate{{Package: "openssl", Security: true, Raw: "Inst openssl"}}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {
+				Name:           server.Name,
+				Status:         "pending_approval",
+				Upgradable:     []string{"openssl"},
+				PendingUpdates: clonePendingUpdates(pending),
+				Logs:           "pending",
+			},
+		}
+	}()
+
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update pending approval) unexpected error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/cancel/"+server.Name, nil)
+	req.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil {
+		t.Fatalf("status snapshot missing after cancel")
+	}
+	if runtimeStatus.Status != "cancelled" {
+		t.Fatalf("runtime status after cancel = %+v, want cancelled", runtimeStatus)
+	}
+	if runtimeStatus.Logs != "" || len(runtimeStatus.Upgradable) != 0 || len(runtimeStatus.PendingUpdates) != 0 {
+		t.Fatalf("cancel route should keep cleared runtime state, got %+v", runtimeStatus)
+	}
+
+	var jobStatus, jobPhase, jobSummary, jobLogs string
+	if err := getDB().QueryRow("SELECT status, phase, summary, logs_text FROM jobs WHERE id = ?", job.ID).Scan(&jobStatus, &jobPhase, &jobSummary, &jobLogs); err != nil {
+		t.Fatalf("query cancelled job: %v", err)
+	}
+	if jobStatus != jobStatusCancelled || jobPhase != jobPhaseComplete {
+		t.Fatalf("cancelled job status/phase = %q/%q, want %q/%q", jobStatus, jobPhase, jobStatusCancelled, jobPhaseComplete)
+	}
+	if jobSummary != "Update cancelled" {
+		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+	if jobLogs != "pending" {
+		t.Fatalf("cancelled job logs_text = %q, want %q", jobLogs, "pending")
 	}
 }
