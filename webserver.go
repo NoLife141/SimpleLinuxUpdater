@@ -2553,6 +2553,24 @@ func approvePendingUpdate(name, scope string) (exists bool, approved bool) {
 	return exists, true
 }
 
+func cancelPendingUpdate(name string) (exists bool, cancelled bool) {
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return exists, false
+	}
+	if status.Status != "pending_approval" {
+		return exists, false
+	}
+	status.Status = "cancelled"
+	status.ApprovalScope = ""
+	status.Logs = ""
+	status.Upgradable = nil
+	status.PendingUpdates = nil
+	return exists, true
+}
+
 func readUploadedKeyData(r io.Reader) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxUploadedKeyBytes+1))
 	if err != nil {
@@ -5279,89 +5297,123 @@ func setupRouter() (*gin.Engine, error) {
 	r.POST("/api/approve/:name", func(c *gin.Context) {
 		name := c.Param("name")
 		preApproveStatus := currentStatusSnapshot(name)
-		exists, approved := approvePendingUpdate(name, "all")
-		if !exists {
+		if preApproveStatus == nil {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if approved {
-			persistApproveErr := func() error {
-				jm := currentJobManager()
-				if jm == nil {
-					return errors.New("job manager unavailable")
-				}
-				job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
-				if err != nil {
-					return err
-				}
-				status := jobStatusRunning
-				phase := jobPhaseAptUpgrade
-				summary := "All pending updates approved"
-				logs := preApproveStatus.Logs
-				return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-					Status:   &status,
-					Phase:    &phase,
-					Summary:  &summary,
-					LogsText: &logs,
-				})
-			}()
-			if persistApproveErr != nil {
-				restoreStatusSnapshot(name, preApproveStatus)
-				audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": persistApproveErr.Error()})
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
-				return
-			}
-			audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
-			c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
+		if preApproveStatus.Status != "pending_approval" {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
-		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
-		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		status := jobStatusRunning
+		phase := jobPhaseAptUpgrade
+		summary := "All pending updates approved"
+		logs := preApproveStatus.Logs
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:   &status,
+			Phase:    &phase,
+			Summary:  &summary,
+			LogsText: &logs,
+		}); err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "all", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		exists, approved := approvePendingUpdate(name, "all")
+		if !exists || !approved {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logs,
+			}); rollbackErr != nil {
+				log.Printf("update approve rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "all"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		audit(c, "update.approve", "server", name, "success", "All pending updates approved", map[string]any{"scope": "all"})
+		c.JSON(http.StatusOK, gin.H{"message": "All pending updates approved"})
 	})
 
 	r.POST("/api/approve-security/:name", func(c *gin.Context) {
 		name := c.Param("name")
 		preApproveStatus := currentStatusSnapshot(name)
-		exists, approved := approvePendingUpdate(name, "security")
-		if !exists {
+		if preApproveStatus == nil {
 			audit(c, "update.approve", "server", name, "failure", "Server not found", map[string]any{"scope": "security"})
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
 		}
-		if approved {
-			persistApproveErr := func() error {
-				jm := currentJobManager()
-				if jm == nil {
-					return errors.New("job manager unavailable")
-				}
-				job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
-				if err != nil {
-					return err
-				}
-				status := jobStatusRunning
-				phase := jobPhaseAptUpgrade
-				summary := "Security updates approved"
-				logs := preApproveStatus.Logs
-				return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-					Status:   &status,
-					Phase:    &phase,
-					Summary:  &summary,
-					LogsText: &logs,
-				})
-			}()
-			if persistApproveErr != nil {
-				restoreStatusSnapshot(name, preApproveStatus)
-				audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": persistApproveErr.Error()})
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
-				return
-			}
-			audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
-			c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
+		if preApproveStatus.Status != "pending_approval" {
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
-		audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
-		c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		status := jobStatusRunning
+		phase := jobPhaseAptUpgrade
+		summary := "Security updates approved"
+		logs := preApproveStatus.Logs
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:   &status,
+			Phase:    &phase,
+			Summary:  &summary,
+			LogsText: &logs,
+		}); err != nil {
+			audit(c, "update.approve", "server", name, "failure", "Failed to persist approval", map[string]any{"scope": "security", "error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist approval"})
+			return
+		}
+		exists, approved := approvePendingUpdate(name, "security")
+		if !exists || !approved {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logs,
+			}); rollbackErr != nil {
+				log.Printf("security approve rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
+			audit(c, "update.approve", "server", name, "ignored", "Server not pending approval", map[string]any{"scope": "security"})
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+			return
+		}
+		audit(c, "update.approve", "server", name, "success", "Security updates approved", map[string]any{"scope": "security"})
+		c.JSON(http.StatusOK, gin.H{"message": "Security updates approved"})
 	})
 
 	r.POST("/api/cancel/:name", func(c *gin.Context) {
@@ -5379,49 +5431,48 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		logsBeforeCancel := preCancelStatus.Logs
 
-		mu.Lock()
-		status := statusMap[name]
-		cancelled := false
-		if status != nil && status.Status == "pending_approval" {
-			status.Status = "cancelled"
-			status.ApprovalScope = ""
-			status.Logs = ""
-			status.Upgradable = nil
-			status.PendingUpdates = nil
-			cancelled = true
-		}
-		mu.Unlock()
-		if !cancelled {
-			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
-			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
+		jm := currentJobManager()
+		if jm == nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": "job manager unavailable"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
 			return
 		}
-
-		persistCancelErr := func() error {
-			jm := currentJobManager()
-			if jm == nil {
-				return errors.New("job manager unavailable")
-			}
-			job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
-			if err != nil {
-				return err
-			}
-			status := jobStatusCancelled
-			phase := jobPhaseComplete
-			summary := "Update cancelled"
-			finishedAt := jobTimestampNow()
-			return jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
-				Status:     &status,
-				Phase:      &phase,
-				Summary:    &summary,
-				LogsText:   &logsBeforeCancel,
-				FinishedAt: &finishedAt,
-			})
-		}()
-		if persistCancelErr != nil {
-			restoreStatusSnapshot(name, preCancelStatus)
-			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": persistCancelErr.Error()})
+		job, err := jm.FindLatestActiveJobByServerAndKind(name, jobKindUpdate)
+		if err != nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
+		}
+		status := jobStatusCancelled
+		phase := jobPhaseComplete
+		summary := "Update cancelled"
+		finishedAt := jobTimestampNow()
+		if err := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+			Status:     &status,
+			Phase:      &phase,
+			Summary:    &summary,
+			LogsText:   &logsBeforeCancel,
+			FinishedAt: &finishedAt,
+		}); err != nil {
+			audit(c, "update.cancel", "server", name, "failure", "Failed to persist cancelled update", map[string]any{"error": err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to persist cancelled update"})
+			return
+		}
+		exists, cancelled := cancelPendingUpdate(name)
+		if !exists || !cancelled {
+			rollbackStatus := jobStatusWaitingApproval
+			rollbackPhase := jobPhaseApprovalWait
+			rollbackSummary := "Waiting for approval"
+			if rollbackErr := jm.UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+				Status:   &rollbackStatus,
+				Phase:    &rollbackPhase,
+				Summary:  &rollbackSummary,
+				LogsText: &logsBeforeCancel,
+			}); rollbackErr != nil {
+				log.Printf("cancel rollback failed for job %q: %v", job.ID, rollbackErr)
+			}
+			audit(c, "update.cancel", "server", name, "ignored", "Server not pending approval", nil)
+			c.JSON(http.StatusConflict, gin.H{"error": "Server not pending approval"})
 			return
 		}
 		audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
