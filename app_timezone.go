@@ -37,6 +37,7 @@ var appTimezoneZoneinfoRoots = []string{
 type AppTimezoneResponse struct {
 	Timezone         string `json:"timezone"`
 	ResolvedTimezone string `json:"resolved_timezone,omitempty"`
+	EditableTimezone string `json:"editable_timezone,omitempty"`
 }
 
 func wrapAppTimezoneValidationError(err error) error {
@@ -444,15 +445,15 @@ func normalizeAppTimezoneName(raw string) (string, *time.Location, error) {
 }
 
 func loadCurrentAppTimezone() (*time.Location, string, error) {
-	fallbackLoc, fallbackName := defaultAppTimezone()
-
 	var err error
 	raw, err := getSettingValue(appTimezoneSetting)
 	if err != nil {
+		fallbackLoc, fallbackName := defaultAppTimezone()
 		return fallbackLoc, fallbackName, err
 	}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
+		fallbackLoc, fallbackName := defaultAppTimezone()
 		return fallbackLoc, fallbackName, nil
 	}
 	if offsetName, offsetLoc, ok := parseOffsetTimezoneLabel(raw); ok {
@@ -460,6 +461,7 @@ func loadCurrentAppTimezone() (*time.Location, string, error) {
 	}
 	name, loc, err := resolveAppTimezone(raw)
 	if err != nil {
+		fallbackLoc, fallbackName := defaultAppTimezone()
 		return fallbackLoc, fallbackName, fmt.Errorf("load configured app timezone %q: %w", raw, err)
 	}
 	return loc, name, nil
@@ -501,16 +503,58 @@ func currentAppTimezoneResolvedName() string {
 	return resolved
 }
 
+func currentAppTimezoneEditableName() string {
+	raw, err := getSettingValue(appTimezoneSetting)
+	if err == nil {
+		value := strings.TrimSpace(raw)
+		switch {
+		case value == "":
+			return "Local"
+		case isLocalTimezoneAlias(value):
+			return "Local"
+		default:
+			return value
+		}
+	}
+	loc, name := currentAppTimezone()
+	if _, _, ok := parseOffsetTimezoneLabel(name); ok {
+		return "Local"
+	}
+	display, _ := appTimezoneDisplayAndResolved(loc, name, time.Now())
+	if isLocalTimezoneAlias(display) {
+		return "Local"
+	}
+	if strings.TrimSpace(name) == "" {
+		return "UTC"
+	}
+	return name
+}
+
 func currentAppTimezoneResponse() AppTimezoneResponse {
+	loc, name := currentAppTimezone()
+	display, resolved := appTimezoneDisplayAndResolved(loc, name, time.Now())
 	return AppTimezoneResponse{
-		Timezone:         currentAppTimezoneDisplayName(),
-		ResolvedTimezone: currentAppTimezoneResolvedName(),
+		Timezone:         display,
+		ResolvedTimezone: resolved,
+		EditableTimezone: currentAppTimezoneEditableName(),
 	}
 }
 
 func saveAppTimezone(raw string) (string, error) {
 	name, _, err := normalizeAppTimezoneName(raw)
 	if err != nil {
+		if offsetName, _, ok := parseOffsetTimezoneLabel(raw); ok {
+			currentRaw, currentErr := getSettingValue(appTimezoneSetting)
+			if currentErr != nil {
+				return "", currentErr
+			}
+			if strings.TrimSpace(currentRaw) == offsetName {
+				if err := upsertSettingValue(appTimezoneSetting, offsetName); err != nil {
+					return "", err
+				}
+				return offsetName, nil
+			}
+		}
 		return "", err
 	}
 	if err := upsertSettingValue(appTimezoneSetting, name); err != nil {

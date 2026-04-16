@@ -287,6 +287,9 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	if saved.ResolvedTimezone != "America/Toronto" {
 		t.Fatalf("saved resolved timezone = %q, want %q", saved.ResolvedTimezone, "America/Toronto")
 	}
+	if saved.EditableTimezone != "America/Toronto" {
+		t.Fatalf("saved editable timezone = %q, want %q", saved.EditableTimezone, "America/Toronto")
+	}
 
 	settingsRec := httptest.NewRecorder()
 	settingsReq := httptest.NewRequest(http.MethodGet, "/api/update-policies/settings", nil)
@@ -387,6 +390,55 @@ func TestSaveAppTimezoneLocalAcceptsDetectedOffsetTimezone(t *testing.T) {
 	}
 }
 
+func TestAppTimezoneAPIEditableTimezoneKeepsConfiguredOffset(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-offset.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if err := upsertSettingValue(appTimezoneSetting, "+02:00"); err != nil {
+		t.Fatalf("upsertSettingValue(+02:00) unexpected error: %v", err)
+	}
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/app-settings/timezone", nil)
+	getReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get timezone status = %d, want %d (body=%s)", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	var resp AppTimezoneResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal timezone response: %v", err)
+	}
+	if resp.Timezone != "+02:00" {
+		t.Fatalf("response timezone = %q, want %q", resp.Timezone, "+02:00")
+	}
+	if resp.ResolvedTimezone != "+02:00" {
+		t.Fatalf("response resolved timezone = %q, want %q", resp.ResolvedTimezone, "+02:00")
+	}
+	if resp.EditableTimezone != "+02:00" {
+		t.Fatalf("response editable timezone = %q, want %q", resp.EditableTimezone, "+02:00")
+	}
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":"+02:00"}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put timezone status = %d, want %d (body=%s)", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+	var saved AppTimezoneResponse
+	if err := json.Unmarshal(putRec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("unmarshal saved timezone response: %v", err)
+	}
+	if saved.EditableTimezone != "+02:00" {
+		t.Fatalf("saved editable timezone = %q, want %q", saved.EditableTimezone, "+02:00")
+	}
+}
+
 func TestDefaultAppTimezoneNameFallbackDoesNotExposeLocal(t *testing.T) {
 	origDetect := detectSystemTimezoneNameFunc
 	detectSystemTimezoneNameFunc = func() (string, error) {
@@ -428,6 +480,39 @@ func TestLoadCurrentAppTimezoneFallbackKeepsLocationAndNameAligned(t *testing.T)
 	}
 	if name != "+02:00" {
 		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", name, "+02:00")
+	}
+}
+
+func TestLoadCurrentAppTimezoneSkipsFallbackDetectionWhenConfigured(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-configured-no-fallback.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone(America/Toronto) unexpected error: %v", err)
+	}
+
+	origDetect := detectSystemTimezoneNameFunc
+	var detectCalls atomic.Int32
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		detectCalls.Add(1)
+		return "", os.ErrNotExist
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+	})
+
+	loc, name, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
+	if loc == nil || loc.String() != "America/Toronto" {
+		t.Fatalf("loadCurrentAppTimezone() location = %v, want America/Toronto", loc)
+	}
+	if name != "America/Toronto" {
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", name, "America/Toronto")
+	}
+	if detectCalls.Load() != 0 {
+		t.Fatalf("detectSystemTimezoneNameFunc calls = %d, want 0", detectCalls.Load())
 	}
 }
 

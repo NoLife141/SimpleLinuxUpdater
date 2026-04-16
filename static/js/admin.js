@@ -1,6 +1,7 @@
 const scheduledPoliciesState = {
     items: [],
     runs: [],
+    editableTimezone: "UTC",
     timezone: "UTC"
 };
 
@@ -46,13 +47,16 @@ function applyScheduledTimezone(payload) {
         ? window.setAppTimezoneCache(payload)
         : { timezone: String(payload || "").trim() || scheduledPoliciesState.timezone || "UTC" };
     scheduledPoliciesState.timezone = timezoneState.timezone || "UTC";
+    scheduledPoliciesState.editableTimezone = String(
+        timezoneState.editable_timezone || scheduledPoliciesState.editableTimezone || editableTimezoneInputValue(scheduledPoliciesState.timezone)
+    ).trim() || "UTC";
     const timezoneLabel = document.getElementById("scheduled-timezone");
     if (timezoneLabel) {
         timezoneLabel.textContent = scheduledPoliciesState.timezone;
     }
     const timezoneInput = document.getElementById("app-timezone-input");
     if (timezoneInput && document.activeElement !== timezoneInput) {
-        timezoneInput.value = editableTimezoneInputValue(scheduledPoliciesState.timezone);
+        timezoneInput.value = scheduledPoliciesState.editableTimezone;
     }
     updatePolicySummary();
     renderScheduledPolicies();
