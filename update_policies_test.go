@@ -341,6 +341,38 @@ func TestSaveAppTimezoneLocalResolvesSystemTimezoneName(t *testing.T) {
 	}
 }
 
+func TestSaveAppTimezoneLocalAcceptsDetectedOffsetTimezone(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-local-offset-save.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "+02:00", nil
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+	})
+
+	name, err := saveAppTimezone("Local")
+	if err != nil {
+		t.Fatalf("saveAppTimezone(Local) unexpected error: %v", err)
+	}
+	if name != "+02:00" {
+		t.Fatalf("saveAppTimezone(Local) = %q, want %q", name, "+02:00")
+	}
+	loc, currentName := currentAppTimezone()
+	if currentName != "+02:00" {
+		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
+	}
+	if loc == nil {
+		t.Fatalf("currentAppTimezone() location = nil, want fixed offset location")
+	}
+	_, offset := time.Now().In(loc).Zone()
+	if offset != 2*60*60 {
+		t.Fatalf("currentAppTimezone() offset = %d, want %d", offset, 2*60*60)
+	}
+}
+
 func TestDefaultAppTimezoneNameFallbackDoesNotExposeLocal(t *testing.T) {
 	origDetect := detectSystemTimezoneNameFunc
 	detectSystemTimezoneNameFunc = func() (string, error) {

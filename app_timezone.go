@@ -407,6 +407,9 @@ func resolveAppTimezone(raw string) (string, *time.Location, error) {
 			return "Local", loc, nil
 		}
 		name = detected
+		if offsetName, offsetLoc, ok := parseOffsetTimezoneLabel(name); ok {
+			return offsetName, offsetLoc, nil
+		}
 	}
 	if !browserSafeTimezoneName(name) {
 		return "", nil, fmt.Errorf("invalid timezone %q", name)
