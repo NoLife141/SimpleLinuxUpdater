@@ -91,6 +91,13 @@ async function saveAppTimezoneSettings() {
         }
         const data = await res.json().catch(() => ({}));
         applyScheduledTimezone(data);
+        if (!String(data?.resolved_timezone ?? data?.resolvedTimezone ?? "").trim()) {
+            try {
+                await fetchScheduledRuns();
+            } catch (refreshErr) {
+                console.error("Failed to refresh scheduled runs after timezone save:", refreshErr);
+            }
+        }
         setAppTimezoneFeedback("App timezone saved.", "");
     } catch (err) {
         setAppTimezoneFeedback("", err.message || "Failed to save app timezone.");
@@ -464,15 +471,11 @@ function parseStrictBlackoutRow(row, label, index) {
     if (!row || typeof row !== "object" || Array.isArray(row)) {
         throw new Error(`${label} ${index + 1}: each item must be an object.`);
     }
-    const normalized = {
+    return {
         weekdays: parseStrictBlackoutWeekdays(row.weekdays, label, index),
         start_time: parseStrictBlackoutTime(row.start_time, label, index, "start_time"),
         end_time: parseStrictBlackoutTime(row.end_time, label, index, "end_time")
     };
-    if (normalized.start_time >= normalized.end_time) {
-        throw new Error(`${label} ${index + 1}: start_time must be before end_time.`);
-    }
-    return normalized;
 }
 
 function createEmptyBlackoutRow() {
@@ -1012,6 +1015,13 @@ async function saveScheduledSettings() {
         }
         const data = await res.json().catch(() => ({}));
         applyScheduledTimezone(data.timezone ? data : scheduledPoliciesState.timezone || "UTC");
+        if (!String(data?.resolved_timezone ?? data?.resolvedTimezone ?? "").trim()) {
+            try {
+                await fetchScheduledRuns();
+            } catch (refreshErr) {
+                console.error("Failed to refresh scheduled runs after settings save:", refreshErr);
+            }
+        }
         setScheduledSettingsFeedback("Global no-run windows saved.", "");
     } catch (err) {
         setScheduledSettingsFeedback("", err.message || "Failed to save global no-run windows.");
