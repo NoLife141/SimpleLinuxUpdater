@@ -101,6 +101,10 @@
                 appTimezoneState.editable = normalizeEditableTimezone(payload.editable_timezone);
             } else if (Object.prototype.hasOwnProperty.call(payload, "editableTimezone")) {
                 appTimezoneState.editable = normalizeEditableTimezone(payload.editableTimezone);
+            } else {
+                appTimezoneState.editable =
+                    normalizeEditableTimezone(payload.timezone || payload.resolved_timezone || payload.resolvedTimezone) ||
+                    defaultEditableTimezone(appTimezoneState.value);
             }
         } else {
             const timezone = normalizeAppTimezone(payload);

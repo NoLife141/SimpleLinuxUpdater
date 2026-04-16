@@ -469,8 +469,8 @@ function parseStrictBlackoutRow(row, label, index) {
         start_time: parseStrictBlackoutTime(row.start_time, label, index, "start_time"),
         end_time: parseStrictBlackoutTime(row.end_time, label, index, "end_time")
     };
-    if (normalized.start_time === normalized.end_time) {
-        throw new Error(`${label} ${index + 1}: start_time and end_time cannot be identical.`);
+    if (normalized.start_time >= normalized.end_time) {
+        throw new Error(`${label} ${index + 1}: start_time must be before end_time.`);
     }
     return normalized;
 }
