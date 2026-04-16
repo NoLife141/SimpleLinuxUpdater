@@ -4,7 +4,7 @@
     const appTimezoneState = window.__appTimezoneState || {
         value: "UTC",
         resolved: "UTC",
-        editable: "UTC",
+        editable: "",
         loaded: false,
         loadingPromise: null
     };
@@ -98,11 +98,9 @@
                 appTimezoneState.resolved = normalizeResolvedTimezone(payload.timezone);
             }
             if (Object.prototype.hasOwnProperty.call(payload, "editable_timezone")) {
-                appTimezoneState.editable = normalizeEditableTimezone(payload.editable_timezone) || defaultEditableTimezone(appTimezoneState.value);
+                appTimezoneState.editable = normalizeEditableTimezone(payload.editable_timezone);
             } else if (Object.prototype.hasOwnProperty.call(payload, "editableTimezone")) {
-                appTimezoneState.editable = normalizeEditableTimezone(payload.editableTimezone) || defaultEditableTimezone(appTimezoneState.value);
-            } else if (!normalizeEditableTimezone(appTimezoneState.editable)) {
-                appTimezoneState.editable = defaultEditableTimezone(appTimezoneState.value);
+                appTimezoneState.editable = normalizeEditableTimezone(payload.editableTimezone);
             }
         } else {
             const timezone = normalizeAppTimezone(payload);

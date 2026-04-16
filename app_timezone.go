@@ -37,7 +37,7 @@ var appTimezoneZoneinfoRoots = []string{
 type AppTimezoneResponse struct {
 	Timezone         string `json:"timezone"`
 	ResolvedTimezone string `json:"resolved_timezone,omitempty"`
-	EditableTimezone string `json:"editable_timezone,omitempty"`
+	EditableTimezone string `json:"editable_timezone"`
 }
 
 func wrapAppTimezoneValidationError(err error) error {
@@ -509,7 +509,7 @@ func currentAppTimezoneEditableName() string {
 		value := strings.TrimSpace(raw)
 		switch {
 		case value == "":
-			return "Local"
+			return ""
 		case isLocalTimezoneAlias(value):
 			return "Local"
 		default:

@@ -1,7 +1,7 @@
 const scheduledPoliciesState = {
     items: [],
     runs: [],
-    editableTimezone: "UTC",
+    editableTimezone: "",
     timezone: "UTC"
 };
 
@@ -34,22 +34,18 @@ const policyFormState = {
     weekdays: []
 };
 
-function editableTimezoneInputValue(timezone) {
-    const value = String(timezone || "").trim();
-    if (/^[+-]\d{2}:\d{2}$/.test(value)) {
-        return "Local";
-    }
-    return value || "UTC";
-}
-
 function applyScheduledTimezone(payload) {
     const timezoneState = window.setAppTimezoneCache
         ? window.setAppTimezoneCache(payload)
         : { timezone: String(payload || "").trim() || scheduledPoliciesState.timezone || "UTC" };
     scheduledPoliciesState.timezone = timezoneState.timezone || "UTC";
-    scheduledPoliciesState.editableTimezone = String(
-        timezoneState.editable_timezone || scheduledPoliciesState.editableTimezone || editableTimezoneInputValue(scheduledPoliciesState.timezone)
-    ).trim() || "UTC";
+    if (timezoneState && typeof timezoneState === "object") {
+        if (Object.prototype.hasOwnProperty.call(timezoneState, "editable_timezone")) {
+            scheduledPoliciesState.editableTimezone = String(timezoneState.editable_timezone ?? "").trim();
+        } else if (Object.prototype.hasOwnProperty.call(timezoneState, "editableTimezone")) {
+            scheduledPoliciesState.editableTimezone = String(timezoneState.editableTimezone ?? "").trim();
+        }
+    }
     const timezoneLabel = document.getElementById("scheduled-timezone");
     if (timezoneLabel) {
         timezoneLabel.textContent = scheduledPoliciesState.timezone;
@@ -914,7 +910,7 @@ async function fetchScheduledRuns() {
 async function refreshScheduledUpdateViews() {
     try {
         await Promise.all([
-            fetchAppTimezoneSettings(),
+            fetchAppTimezoneSettings(true),
             fetchScheduledPolicies(),
             fetchScheduledSettings(),
             fetchScheduledRuns()

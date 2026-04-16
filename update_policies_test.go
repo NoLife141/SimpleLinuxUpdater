@@ -267,6 +267,12 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	if strings.TrimSpace(initial.Timezone) == "" {
 		t.Fatalf("initial timezone missing from response")
 	}
+	if initial.EditableTimezone != "" {
+		t.Fatalf("initial editable timezone = %q, want empty for unset setting", initial.EditableTimezone)
+	}
+	if !strings.Contains(getRec.Body.String(), `"editable_timezone":""`) {
+		t.Fatalf("initial timezone response missing explicit empty editable_timezone: %s", getRec.Body.String())
+	}
 
 	putRec := httptest.NewRecorder()
 	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":"America/Toronto"}`))
