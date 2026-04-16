@@ -848,8 +848,13 @@ function renderScheduledRuns(items) {
         const row = document.createElement("tr");
         const jobValue = run.job_id ? `<code>${escapeHtml(run.job_id)}</code>` : '<span class="subtle">-</span>';
         const statusToken = safeRunStatusClassToken(run.status);
+        const resolvedTimezone = window.getAppTimezoneResolved ? window.getAppTimezoneResolved() : "";
+        const scheduledOptions = { includeUTC: true };
+        if (!resolvedTimezone && String(run.scheduled_for_display || "").trim()) {
+            scheduledOptions.preformattedPrimary = run.scheduled_for_display;
+        }
         const scheduled = window.formatAppTimestamp
-            ? window.formatAppTimestamp(run.scheduled_for_utc, { includeUTC: true })
+            ? window.formatAppTimestamp(run.scheduled_for_utc, scheduledOptions)
             : { primary: run.scheduled_for_utc || "", secondary: "", title: run.scheduled_for_utc || "" };
         row.innerHTML = `
             <td title="${escapeHtml(scheduled.title || "")}">
