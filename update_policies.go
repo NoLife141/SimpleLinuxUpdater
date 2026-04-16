@@ -104,27 +104,29 @@ type UpdatePolicyOverride struct {
 }
 
 type UpdatePolicyRun struct {
-	ID              int64  `json:"id"`
-	PolicyID        int64  `json:"policy_id"`
-	PolicyName      string `json:"policy_name"`
-	ServerName      string `json:"server_name"`
-	ScheduledForUTC string `json:"scheduled_for_utc"`
-	ExecutionMode   string `json:"execution_mode"`
-	PackageScope    string `json:"package_scope"`
-	Status          string `json:"status"`
-	Reason          string `json:"reason"`
-	Summary         string `json:"summary"`
-	JobID           string `json:"job_id"`
-	ResultJSON      string `json:"result_json"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
-	StartedAt       string `json:"started_at"`
-	FinishedAt      string `json:"finished_at"`
+	ID                  int64  `json:"id"`
+	PolicyID            int64  `json:"policy_id"`
+	PolicyName          string `json:"policy_name"`
+	ServerName          string `json:"server_name"`
+	ScheduledForUTC     string `json:"scheduled_for_utc"`
+	ScheduledForDisplay string `json:"scheduled_for_display,omitempty"`
+	ExecutionMode       string `json:"execution_mode"`
+	PackageScope        string `json:"package_scope"`
+	Status              string `json:"status"`
+	Reason              string `json:"reason"`
+	Summary             string `json:"summary"`
+	JobID               string `json:"job_id"`
+	ResultJSON          string `json:"result_json"`
+	CreatedAt           string `json:"created_at"`
+	UpdatedAt           string `json:"updated_at"`
+	StartedAt           string `json:"started_at"`
+	FinishedAt          string `json:"finished_at"`
 }
 
 type UpdatePolicySettingsResponse struct {
-	Timezone        string                       `json:"timezone"`
-	GlobalBlackouts []UpdatePolicyBlackoutWindow `json:"global_blackouts"`
+	Timezone         string                       `json:"timezone"`
+	ResolvedTimezone string                       `json:"resolved_timezone,omitempty"`
+	GlobalBlackouts  []UpdatePolicyBlackoutWindow `json:"global_blackouts"`
 }
 
 type updatePolicyRunUpdate struct {
@@ -229,13 +231,6 @@ func ensureUpdatePolicySchema(db *sql.DB) error {
 		return err
 	}
 	return nil
-}
-
-func currentAppTimezoneName() string {
-	if time.Local == nil {
-		return "Local"
-	}
-	return time.Local.String()
 }
 
 func getSettingValue(key string) (string, error) {
@@ -1154,7 +1149,7 @@ func nextWeekdayToken(token string) string {
 func canonicalScheduledForUTC(slotLocal time.Time) string {
 	loc := slotLocal.Location()
 	if loc == nil {
-		loc = time.Local
+		loc = currentAppLocation()
 	}
 	// Rebuilding the wall-clock minute through time.Date makes the repeated
 	// fallback-hour slot resolve to its first occurrence, so the scheduler
@@ -1859,7 +1854,7 @@ func processDueUpdatePolicies(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	slotLocal := now.In(time.Local).Truncate(time.Minute)
+	slotLocal := now.In(currentAppLocation()).Truncate(time.Minute)
 	scheduledForUTC := canonicalScheduledForUTC(slotLocal)
 	serversSnapshot := snapshotServers()
 
@@ -1974,8 +1969,9 @@ func handleUpdatePoliciesList(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"items":    enrichPoliciesWithMatches(policies),
-		"timezone": currentAppTimezoneName(),
+		"items":             enrichPoliciesWithMatches(policies),
+		"timezone":          currentAppTimezoneDisplayName(),
+		"resolved_timezone": currentAppTimezoneResolvedName(),
 	})
 }
 
@@ -2064,9 +2060,14 @@ func handleUpdatePolicyRuns(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load policy runs"})
 		return
 	}
+	loc, timezoneName := currentAppTimezone()
+	for i := range runs {
+		runs[i].ScheduledForDisplay, _ = formatTimestampForAppDisplayWithTimezone(runs[i].ScheduledForUTC, loc, timezoneName)
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"items":    runs,
-		"timezone": currentAppTimezoneName(),
+		"items":             runs,
+		"timezone":          currentAppTimezoneDisplayName(),
+		"resolved_timezone": currentAppTimezoneResolvedName(),
 	})
 }
 
@@ -2142,8 +2143,9 @@ func handleUpdatePolicySettingsStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, UpdatePolicySettingsResponse{
-		Timezone:        currentAppTimezoneName(),
-		GlobalBlackouts: windows,
+		Timezone:         currentAppTimezoneDisplayName(),
+		ResolvedTimezone: currentAppTimezoneResolvedName(),
+		GlobalBlackouts:  windows,
 	})
 }
 
@@ -2166,7 +2168,8 @@ func handleUpdatePolicySettingsUpdate(c *gin.Context) {
 	}
 	audit(c, "update_policy.settings", "update_policy", "global", "success", "Scheduled update settings saved", map[string]any{"global_blackout_count": len(normalizedBlackouts)})
 	c.JSON(http.StatusOK, UpdatePolicySettingsResponse{
-		Timezone:        currentAppTimezoneName(),
-		GlobalBlackouts: normalizedBlackouts,
+		Timezone:         currentAppTimezoneDisplayName(),
+		ResolvedTimezone: currentAppTimezoneResolvedName(),
+		GlobalBlackouts:  normalizedBlackouts,
 	})
 }

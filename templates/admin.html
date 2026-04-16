@@ -33,106 +33,193 @@
             </div>
         </header>
 
-        <section class="card fade-in">
-            <h2>Metrics API Token</h2>
-            <p class="subtle"><code>/metrics</code> stays disabled until you generate a token. The token is shown once on creation/rotation.</p>
-            <div class="nav key-actions">
-                <button class="btn-success" type="button" id="metrics-token-generate">Generate Token</button>
-                <button class="btn-ghost" type="button" id="metrics-token-rotate">Rotate Token</button>
-                <button class="btn-danger" type="button" id="metrics-token-disable">Disable Token</button>
-            </div>
-            <div id="metrics-token-status" class="subtle"></div>
-            <div id="metrics-token-once" class="secret-box">
-                <div class="subtle">Copy this token now. It will not be shown again.</div>
-                <code id="metrics-token-value"></code>
-                <button class="btn-ghost inline-btn" type="button" id="metrics-token-copy">Copy Token</button>
+        <section class="card fade-in app-time-card">
+            <div class="app-time-grid">
+                <div>
+                    <h2>App Time</h2>
+                    <p class="subtle">One global timezone drives scheduled-update evaluation and the structured timestamp display across Admin, Manage, Observability, and maintenance mode.</p>
+                </div>
+                <div class="admin-block">
+                    <label for="app-timezone-input" class="form-label">Global app timezone</label>
+                    <input type="text" id="app-timezone-input" placeholder="America/Toronto" spellcheck="false" autocomplete="off">
+                    <div class="table-secondary">Use an IANA timezone like <code>America/Toronto</code>, <code>Europe/Paris</code>, <code>UTC</code>, or <code>Local</code>.</div>
+                    <div class="policy-actions app-time-actions">
+                        <button class="btn-success" type="button" id="app-timezone-save">Save Timezone</button>
+                    </div>
+                    <div id="app-timezone-error" class="form-feedback form-feedback-error" aria-live="polite"></div>
+                    <div id="app-timezone-status" class="form-feedback form-feedback-success"></div>
+                </div>
             </div>
         </section>
 
-        <section class="card fade-in section-spaced">
+        <section class="card fade-in">
             <h2>Scheduled Updates</h2>
-            <p class="subtle">Define recurring update policies by tag, opt into scan-only or approval workflows, and keep runs inside blackout windows without manual babysitting.</p>
+            <p class="subtle">Define recurring update policies by tag, choose how they execute, and use guided no-run windows to keep scheduling out of noisy maintenance periods.</p>
             <div class="admin-grid">
                 <div class="admin-block">
-                    <h3>Policy Editor</h3>
+                    <div class="block-head">
+                        <div>
+                            <h3>Policy Editor</h3>
+                            <p class="subtle block-summary">Build one policy at a time with guided schedule controls and a live summary before saving.</p>
+                        </div>
+                        <span class="pill pill-muted" id="policy-editor-mode">Create new policy</span>
+                    </div>
                     <form id="update-policy-form" class="policy-form">
                         <input type="hidden" id="policy-id" aria-label="Policy ID">
-                        <div>
-                            <label for="policy-name" class="form-label">Policy name</label>
-                            <input type="text" id="policy-name" placeholder="Policy name" required>
+                        <div class="field-span form-section">
+                            <div class="form-section-head">
+                                <h4>Identity</h4>
+                                <p class="subtle">Name the rule and decide which tagged servers it targets.</p>
+                            </div>
+                            <div class="section-grid">
+                                <div>
+                                    <label for="policy-name" class="form-label">Policy name</label>
+                                    <input type="text" id="policy-name" placeholder="Production weekend rollout" required>
+                                </div>
+                                <div>
+                                    <label for="policy-target-tag" class="form-label">Target tag</label>
+                                    <input type="text" id="policy-target-tag" placeholder="prod" required>
+                                </div>
+                                <div class="field-span checkbox-inline checkbox-row">
+                                    <input type="checkbox" id="policy-enabled" checked>
+                                    <label for="policy-enabled">Policy enabled</label>
+                                </div>
+                            </div>
                         </div>
-                        <div>
-                            <label for="policy-target-tag" class="form-label">Target tag</label>
-                            <input type="text" id="policy-target-tag" placeholder="Target tag" required>
+                        <div class="field-span form-section">
+                            <div class="form-section-head">
+                                <h4>Schedule</h4>
+                                <p class="subtle">All scheduling uses the app timezone shown in settings.</p>
+                            </div>
+                            <div class="section-grid">
+                                <div>
+                                    <label for="policy-time-local" class="form-label">Local time</label>
+                                    <input type="time" id="policy-time-local" required>
+                                </div>
+                                <div>
+                                    <label for="policy-cadence-kind" class="form-label">Cadence</label>
+                                    <select id="policy-cadence-kind">
+                                        <option value="daily">Daily</option>
+                                        <option value="weekly">Weekly</option>
+                                    </select>
+                                </div>
+                                <div class="field-span" id="policy-weekday-section">
+                                    <div class="weekday-head">
+                                        <label class="form-label">Weekdays</label>
+                                        <button class="btn-ghost inline-btn small-btn" type="button" id="policy-weekdays-clear">Clear</button>
+                                    </div>
+                                    <div class="weekday-picker" id="policy-weekdays-picker" role="group" aria-label="Weekdays for weekly cadence">
+                                        <button class="day-chip" type="button" data-weekday="mon">Mon</button>
+                                        <button class="day-chip" type="button" data-weekday="tue">Tue</button>
+                                        <button class="day-chip" type="button" data-weekday="wed">Wed</button>
+                                        <button class="day-chip" type="button" data-weekday="thu">Thu</button>
+                                        <button class="day-chip" type="button" data-weekday="fri">Fri</button>
+                                        <button class="day-chip" type="button" data-weekday="sat">Sat</button>
+                                        <button class="day-chip" type="button" data-weekday="sun">Sun</button>
+                                    </div>
+                                </div>
+                                <div class="field-span summary-card" id="policy-summary" aria-live="polite"></div>
+                            </div>
                         </div>
-                        <div>
-                            <label for="policy-time-local" class="form-label">Local time</label>
-                            <input type="time" id="policy-time-local" required>
+                        <div class="field-span form-section">
+                            <div class="form-section-head">
+                                <h4>Execution</h4>
+                                <p class="subtle">Choose whether the policy only scans, waits for approval, or auto-applies updates.</p>
+                            </div>
+                            <div class="section-grid">
+                                <div>
+                                    <label for="policy-execution-mode" class="form-label">Execution mode</label>
+                                    <select id="policy-execution-mode">
+                                        <option value="scan_only">Scan only</option>
+                                        <option value="approval_required">Approval required</option>
+                                        <option value="auto_apply">Auto apply</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label for="policy-package-scope" class="form-label">Package scope</label>
+                                    <select id="policy-package-scope">
+                                        <option value="security">Security only</option>
+                                        <option value="full">Full updates</option>
+                                    </select>
+                                </div>
+                                <div id="policy-approval-timeout-wrap">
+                                    <label for="policy-approval-timeout" class="form-label">Approval timeout (minutes)</label>
+                                    <input type="number" id="policy-approval-timeout" min="1" placeholder="720">
+                                </div>
+                            </div>
                         </div>
-                        <div>
-                            <label for="policy-execution-mode" class="form-label">Execution mode</label>
-                            <select id="policy-execution-mode">
-                                <option value="scan_only">Scan only</option>
-                                <option value="approval_required">Approval required</option>
-                                <option value="auto_apply">Auto apply</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label for="policy-package-scope" class="form-label">Package scope</label>
-                            <select id="policy-package-scope">
-                                <option value="security">Security only</option>
-                                <option value="full">Full updates</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label for="policy-cadence-kind" class="form-label">Cadence</label>
-                            <select id="policy-cadence-kind">
-                                <option value="daily">Daily</option>
-                                <option value="weekly">Weekly</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label for="policy-weekdays" class="form-label">Weekdays for weekly</label>
-                            <input type="text" id="policy-weekdays" placeholder="Weekdays for weekly (e.g. mon,thu)">
-                        </div>
-                        <div>
-                            <label for="policy-approval-timeout" class="form-label">Approval timeout (minutes)</label>
-                            <input type="number" id="policy-approval-timeout" min="1" placeholder="Approval timeout (minutes)">
-                        </div>
-                        <div class="field-span checkbox-inline">
-                            <input type="checkbox" id="policy-enabled" checked>
-                            <label for="policy-enabled">Policy enabled</label>
-                        </div>
-                        <div class="field-span">
-                            <label for="policy-blackouts" class="form-label">Policy blackout windows (JSON array)</label>
-                            <textarea id="policy-blackouts" rows="5" placeholder='[{"weekdays":["sat"],"start_time":"00:00","end_time":"06:00"}]'></textarea>
+                        <div class="field-span form-section">
+                            <div class="form-section-head">
+                                <h4>Policy No-Run Windows</h4>
+                                <p class="subtle">Use no-run windows to skip scheduled executions during recurring quiet hours. This is separate from maintenance mode.</p>
+                            </div>
+                            <div id="policy-blackout-rows" class="blackout-editor" aria-live="polite"></div>
+                            <div class="policy-actions">
+                                <button class="btn-ghost" type="button" id="policy-blackout-add">Add No-Run Window</button>
+                            </div>
+                            <details class="json-fallback">
+                                <summary>Advanced JSON fallback</summary>
+                                <p class="subtle">Paste existing JSON here if you need it, then apply it to the guided editor before saving.</p>
+                                <textarea id="policy-blackouts-json" rows="6" placeholder='[{"weekdays":["sat"],"start_time":"00:00","end_time":"06:00"}]'></textarea>
+                                <div class="policy-actions">
+                                    <button class="btn-ghost" type="button" id="policy-blackouts-json-apply">Apply JSON to Editor</button>
+                                </div>
+                                <div id="policy-blackouts-json-status" class="subtle"></div>
+                            </details>
                         </div>
                         <div class="field-span policy-actions">
-                            <button class="btn-success" type="submit" id="policy-save-btn">Save Policy</button>
-                            <button class="btn-ghost" type="button" id="policy-reset-btn">Clear</button>
+                            <button class="btn-success" type="submit" id="policy-save-btn">Create Policy</button>
+                            <button class="btn-ghost" type="button" id="policy-reset-btn">Start New Policy</button>
                         </div>
+                        <div id="update-policy-error" class="form-feedback form-feedback-error field-span" aria-live="polite"></div>
                     </form>
-                    <div id="update-policy-status" class="subtle"></div>
+                    <div id="update-policy-status" class="form-feedback form-feedback-success"></div>
                 </div>
                 <div class="admin-block">
-                    <h3>Global Schedule Settings</h3>
-                    <p class="subtle">App timezone: <strong id="scheduled-timezone">Loading...</strong></p>
-                    <label for="scheduled-global-blackouts" class="form-label">Global blackout windows (JSON array)</label>
-                    <textarea id="scheduled-global-blackouts" rows="8" placeholder='[{"weekdays":["sun"],"start_time":"01:00","end_time":"04:00"}]'></textarea>
-                    <div class="policy-actions">
-                        <button class="btn-success" type="button" id="scheduled-settings-save">Save Global Blackouts</button>
+                    <div class="block-head">
+                        <div>
+                            <h3>Global Schedule Settings</h3>
+                            <p class="subtle block-summary">Set fleet-wide no-run windows that apply to every scheduled update policy.</p>
+                        </div>
                     </div>
-                    <div id="scheduled-settings-status" class="subtle"></div>
+                    <div class="timezone-card">
+                        <div class="hero-panel-label">App Timezone</div>
+                        <div class="hero-panel-value small-value" id="scheduled-timezone">Loading...</div>
+                        <p class="subtle">No-run windows are local recurring schedule guards, not maintenance-mode locks.</p>
+                    </div>
+                    <div class="form-section compact-section">
+                        <div class="form-section-head">
+                            <h4>Global No-Run Windows</h4>
+                            <p class="subtle">Any matching window skips scheduled runs before they queue a job.</p>
+                        </div>
+                        <div id="global-blackout-rows" class="blackout-editor" aria-live="polite"></div>
+                        <div class="policy-actions">
+                            <button class="btn-ghost" type="button" id="global-blackout-add">Add No-Run Window</button>
+                        </div>
+                        <details class="json-fallback">
+                            <summary>Advanced JSON fallback</summary>
+                            <p class="subtle">Paste existing JSON here if you need it, then apply it back into the guided rows.</p>
+                            <textarea id="scheduled-global-blackouts-json" rows="8" placeholder='[{"weekdays":["sun"],"start_time":"01:00","end_time":"04:00"}]'></textarea>
+                            <div class="policy-actions">
+                                <button class="btn-ghost" type="button" id="scheduled-global-blackouts-json-apply">Apply JSON to Editor</button>
+                            </div>
+                            <div id="scheduled-global-blackouts-json-status" class="subtle"></div>
+                        </details>
+                    </div>
+                    <div class="policy-actions">
+                        <button class="btn-success" type="button" id="scheduled-settings-save">Save Global No-Run Windows</button>
+                    </div>
+                    <div id="scheduled-settings-error" class="form-feedback form-feedback-error" aria-live="polite"></div>
+                    <div id="scheduled-settings-status" class="form-feedback form-feedback-success"></div>
                 </div>
             </div>
             <div class="table-wrap section-spaced">
                 <table id="scheduled-policy-table">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Target</th>
-                            <th>Cadence</th>
-                            <th>Mode</th>
+                            <th>Policy</th>
+                            <th>Schedule</th>
+                            <th>Execution</th>
                             <th>Matched Servers</th>
                             <th>Actions</th>
                         </tr>
@@ -182,6 +269,22 @@
                 </div>
             </div>
             <div id="backup-status" class="subtle"></div>
+        </section>
+
+        <section class="card fade-in section-spaced">
+            <h2>Metrics API Token</h2>
+            <p class="subtle"><code>/metrics</code> stays disabled until you generate a token. The token is shown once on creation or rotation.</p>
+            <div class="nav key-actions">
+                <button class="btn-success" type="button" id="metrics-token-generate">Generate Token</button>
+                <button class="btn-ghost" type="button" id="metrics-token-rotate">Rotate Token</button>
+                <button class="btn-danger" type="button" id="metrics-token-disable">Disable Token</button>
+            </div>
+            <div id="metrics-token-status" class="subtle"></div>
+            <div id="metrics-token-once" class="secret-box">
+                <div class="subtle">Copy this token now. It will not be shown again.</div>
+                <code id="metrics-token-value"></code>
+                <button class="btn-ghost inline-btn" type="button" id="metrics-token-copy">Copy Token</button>
+            </div>
         </section>
     </div>
 

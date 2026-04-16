@@ -154,17 +154,18 @@ var cveRegex = regexp.MustCompile(`CVE-[0-9]{4}-[0-9]+`)
 var securitySuiteTokenRegex = regexp.MustCompile(`(?:^|[\s/:])[a-z0-9][a-z0-9+.-]*-security(?:$|[\s/\],:\)])`)
 
 type AuditEvent struct {
-	ID         int64  `json:"id"`
-	CreatedAt  string `json:"created_at"`
-	Actor      string `json:"actor"`
-	Action     string `json:"action"`
-	TargetType string `json:"target_type"`
-	TargetName string `json:"target_name"`
-	Status     string `json:"status"`
-	Message    string `json:"message"`
-	MetaJSON   string `json:"meta_json"`
-	RequestID  string `json:"request_id"`
-	ClientIP   string `json:"client_ip"`
+	ID               int64  `json:"id"`
+	CreatedAt        string `json:"created_at"`
+	CreatedAtDisplay string `json:"created_at_display,omitempty"`
+	Actor            string `json:"actor"`
+	Action           string `json:"action"`
+	TargetType       string `json:"target_type"`
+	TargetName       string `json:"target_name"`
+	Status           string `json:"status"`
+	Message          string `json:"message"`
+	MetaJSON         string `json:"meta_json"`
+	RequestID        string `json:"request_id"`
+	ClientIP         string `json:"client_ip"`
 }
 
 type observabilityFailureItem struct {
@@ -178,10 +179,12 @@ type observabilityStatusItem struct {
 }
 
 type observabilitySummaryResponse struct {
-	Window string `json:"window"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Totals struct {
+	Window      string `json:"window"`
+	From        string `json:"from"`
+	FromDisplay string `json:"from_display,omitempty"`
+	To          string `json:"to"`
+	ToDisplay   string `json:"to_display,omitempty"`
+	Totals      struct {
 		UpdatesTotal   int     `json:"updates_total"`
 		UpdatesSuccess int     `json:"updates_success"`
 		UpdatesFailure int     `json:"updates_failure"`
@@ -1723,6 +1726,7 @@ func handleAuditEvents(c *gin.Context) {
 	defer rows.Close()
 
 	items := make([]AuditEvent, 0, pageSize)
+	loc, timezoneName := currentAppTimezone()
 	for rows.Next() {
 		var evt AuditEvent
 		if err := rows.Scan(
@@ -1741,6 +1745,7 @@ func handleAuditEvents(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
 			return
 		}
+		evt.CreatedAtDisplay, _ = formatTimestampForAppDisplayWithTimezone(evt.CreatedAt, loc, timezoneName)
 		items = append(items, evt)
 	}
 	if err := rows.Err(); err != nil {
@@ -1871,6 +1876,9 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 		From:   from.Format(time.RFC3339),
 		To:     to.Format(time.RFC3339),
 	}
+	loc, timezoneName := currentAppTimezone()
+	summary.FromDisplay, _ = formatTimestampForAppDisplayWithTimezone(summary.From, loc, timezoneName)
+	summary.ToDisplay, _ = formatTimestampForAppDisplayWithTimezone(summary.To, loc, timezoneName)
 	summary.StatusBreakdown = []observabilityStatusItem{
 		{Status: "success", Count: 0},
 		{Status: "failure", Count: 0},
@@ -4617,6 +4625,8 @@ func setupRouter() (*gin.Engine, error) {
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
 	r.GET("/api/backup/status", handleBackupStatus)
+	r.GET("/api/app-settings/timezone", handleAppTimezoneStatus)
+	r.PUT("/api/app-settings/timezone", handleAppTimezoneUpdate)
 	r.POST("/api/backup/export", handleBackupExport)
 	r.POST("/api/backup/restore", handleBackupRestore)
 	r.GET("/api/update-policies", handleUpdatePoliciesList)
