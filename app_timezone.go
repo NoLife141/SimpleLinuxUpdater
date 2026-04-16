@@ -618,13 +618,20 @@ func handleAppTimezoneStatus(c *gin.Context) {
 }
 
 func handleAppTimezoneUpdate(c *gin.Context) {
-	var req AppTimezoneResponse
+	var req struct {
+		Timezone *string `json:"timezone"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		audit(c, "app_settings.timezone", "settings", "app_timezone", "failure", "Invalid app timezone payload", nil)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	timezone, err := saveAppTimezone(req.Timezone)
+	if req.Timezone == nil {
+		audit(c, "app_settings.timezone", "settings", "app_timezone", "failure", "Invalid app timezone payload", nil)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timezone is required"})
+		return
+	}
+	timezone, err := saveAppTimezone(*req.Timezone)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
 		if isAppTimezoneValidationError(err) {

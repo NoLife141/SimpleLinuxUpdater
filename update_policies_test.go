@@ -362,6 +362,35 @@ func TestAppTimezoneAPIBlankSaveKeepsUnsetDefault(t *testing.T) {
 	}
 }
 
+func TestAppTimezoneAPIMissingTimezoneFieldIsRejected(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-missing.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone(America/Toronto) unexpected error: %v", err)
+	}
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusBadRequest {
+		t.Fatalf("missing timezone field status = %d, want %d (body=%s)", putRec.Code, http.StatusBadRequest, putRec.Body.String())
+	}
+
+	raw, err := getSettingValue(appTimezoneSetting)
+	if err != nil {
+		t.Fatalf("getSettingValue(app_timezone) unexpected error: %v", err)
+	}
+	if raw != "America/Toronto" {
+		t.Fatalf("stored app timezone after missing field = %q, want %q", raw, "America/Toronto")
+	}
+}
+
 func TestTimezoneResponsesKeepExplicitEmptyResolvedTimezone(t *testing.T) {
 	appPayload, err := json.Marshal(AppTimezoneResponse{
 		Timezone:         appTimezoneLocalDisplayLabel,
