@@ -346,12 +346,15 @@ func TestSaveAppTimezoneLocalAcceptsDetectedOffsetTimezone(t *testing.T) {
 	prepareUpdatePolicyTestState(t, dbFile)
 
 	origDetect := detectSystemTimezoneNameFunc
+	oldLocal := time.Local
 	detectSystemTimezoneNameFunc = func() (string, error) {
 		return "+02:00", nil
 	}
 	t.Cleanup(func() {
 		detectSystemTimezoneNameFunc = origDetect
+		time.Local = oldLocal
 	})
+	time.Local = time.FixedZone("XST", 2*60*60)
 
 	name, err := saveAppTimezone("Local")
 	if err != nil {
@@ -360,16 +363,27 @@ func TestSaveAppTimezoneLocalAcceptsDetectedOffsetTimezone(t *testing.T) {
 	if name != "+02:00" {
 		t.Fatalf("saveAppTimezone(Local) = %q, want %q", name, "+02:00")
 	}
-	loc, currentName := currentAppTimezone()
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	time.Local = time.UTC
+
+	loc, currentName, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
 	if currentName != "+02:00" {
-		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", currentName, "+02:00")
 	}
 	if loc == nil {
-		t.Fatalf("currentAppTimezone() location = nil, want fixed offset location")
+		t.Fatalf("loadCurrentAppTimezone() location = nil, want fixed offset location")
+	}
+	if loc.String() != "+02:00" {
+		t.Fatalf("loadCurrentAppTimezone() location name = %q, want %q", loc.String(), "+02:00")
 	}
 	_, offset := time.Now().In(loc).Zone()
 	if offset != 2*60*60 {
-		t.Fatalf("currentAppTimezone() offset = %d, want %d", offset, 2*60*60)
+		t.Fatalf("loadCurrentAppTimezone() offset = %d, want %d", offset, 2*60*60)
 	}
 }
 
@@ -464,42 +478,29 @@ func TestDetectSystemTimezoneNamePrefersLocaltimeOverMetadata(t *testing.T) {
 	}
 }
 
-func TestSaveAppTimezoneRejectsBrowserUnsafeAlias(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "app-timezone-invalid-alias.db")
+func TestSaveAppTimezoneRejectsBrowserUnsafeNames(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-invalid-names.db")
 	prepareUpdatePolicyTestState(t, dbFile)
 
-	_, err := saveAppTimezone("Factory")
-	if err == nil {
-		t.Fatalf("saveAppTimezone(Factory) expected error, got nil")
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{name: "browser-unsafe-alias", input: "Factory"},
+		{name: "short-name", input: "EST"},
+		{name: "offset-label", input: "+02:00"},
 	}
-	if !isAppTimezoneValidationError(err) {
-		t.Fatalf("saveAppTimezone(Factory) error = %v, want app timezone validation error", err)
-	}
-}
 
-func TestSaveAppTimezoneRejectsBrowserUnsafeShortName(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "app-timezone-short-name.db")
-	prepareUpdatePolicyTestState(t, dbFile)
-
-	_, err := saveAppTimezone("EST")
-	if err == nil {
-		t.Fatalf("saveAppTimezone(EST) expected error, got nil")
-	}
-	if !isAppTimezoneValidationError(err) {
-		t.Fatalf("saveAppTimezone(EST) error = %v, want app timezone validation error", err)
-	}
-}
-
-func TestSaveAppTimezoneRejectsOffsetLabel(t *testing.T) {
-	dbFile := filepath.Join(t.TempDir(), "app-timezone-offset-name.db")
-	prepareUpdatePolicyTestState(t, dbFile)
-
-	_, err := saveAppTimezone("+02:00")
-	if err == nil {
-		t.Fatalf("saveAppTimezone(+02:00) expected error, got nil")
-	}
-	if !isAppTimezoneValidationError(err) {
-		t.Fatalf("saveAppTimezone(+02:00) error = %v, want app timezone validation error", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := saveAppTimezone(tc.input)
+			if err == nil {
+				t.Fatalf("saveAppTimezone(%q) expected error, got nil", tc.input)
+			}
+			if !isAppTimezoneValidationError(err) {
+				t.Fatalf("saveAppTimezone(%q) error = %v, want app timezone validation error", tc.input, err)
+			}
+		})
 	}
 }
 
@@ -529,8 +530,8 @@ func TestSaveAppTimezoneLocalFallsBackWhenNameUnresolved(t *testing.T) {
 	if currentName != "+02:00" {
 		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
 	}
-	if loc == nil || loc.String() != "XST" {
-		t.Fatalf("currentAppTimezone() location = %v, want XST", loc)
+	if loc == nil || loc.String() != "+02:00" {
+		t.Fatalf("currentAppTimezone() location = %v, want +02:00", loc)
 	}
 }
 

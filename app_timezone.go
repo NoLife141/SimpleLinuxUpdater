@@ -455,6 +455,9 @@ func loadCurrentAppTimezone() (*time.Location, string, error) {
 	if raw == "" {
 		return fallbackLoc, fallbackName, nil
 	}
+	if offsetName, offsetLoc, ok := parseOffsetTimezoneLabel(raw); ok {
+		return offsetLoc, offsetName, nil
+	}
 	name, loc, err := resolveAppTimezone(raw)
 	if err != nil {
 		return fallbackLoc, fallbackName, fmt.Errorf("load configured app timezone %q: %w", raw, err)

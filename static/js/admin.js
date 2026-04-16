@@ -510,6 +510,23 @@ function buildBlackoutWeekdayButtons(kind, row, index) {
     }).join("");
 }
 
+function blackoutRowSummaryText(row) {
+    const weekdays = normalizeWeekdays(Array.isArray(row?.weekdays) ? row.weekdays : []);
+    const startTime = String(row?.start_time || "").trim() || "--:--";
+    const endTime = String(row?.end_time || "").trim() || "--:--";
+    return `${formatWeekdayList(weekdays)} · ${startTime} to ${endTime}`;
+}
+
+function updateBlackoutRowSummary(kind, index) {
+    const editor = getBlackoutEditor(kind);
+    const row = editor ? editor.rows[index] : null;
+    const summary = editor
+        ? document.querySelector(`#${editor.rowsId} [data-blackout-row-index="${String(index)}"] [data-blackout-summary]`)
+        : null;
+    if (!row || !summary) return;
+    summary.textContent = blackoutRowSummaryText(row);
+}
+
 function renderBlackoutEditor(kind) {
     const editor = getBlackoutEditor(kind);
     const container = editor ? document.getElementById(editor.rowsId) : null;
@@ -521,7 +538,7 @@ function renderBlackoutEditor(kind) {
         return;
     }
     container.innerHTML = editor.rows.map((row, index) => `
-        <div class="blackout-row">
+        <div class="blackout-row" data-blackout-row-index="${escapeHtml(String(index))}">
             <div class="blackout-row-top">
                 <span class="pill pill-muted">${escapeHtml(`Window ${index + 1}`)}</span>
                 <button class="btn-danger inline-btn small-btn" type="button" data-blackout-kind="${escapeHtml(kind)}" data-blackout-action="remove-window" data-index="${escapeHtml(String(index))}">Remove</button>
@@ -532,6 +549,7 @@ function renderBlackoutEditor(kind) {
                     ${buildBlackoutWeekdayButtons(kind, row, index)}
                 </div>
             </div>
+            <div class="table-secondary" data-blackout-summary>${escapeHtml(blackoutRowSummaryText(row))}</div>
             <div class="blackout-time-grid">
                 <div>
                     <label class="form-label" for="${escapeHtml(`${kind}-blackout-start-${index}`)}">Start</label>
@@ -823,7 +841,7 @@ function renderScheduledRuns(items) {
         const jobValue = run.job_id ? `<code>${escapeHtml(run.job_id)}</code>` : '<span class="subtle">-</span>';
         const statusToken = safeRunStatusClassToken(run.status);
         const scheduled = window.formatAppTimestamp
-            ? window.formatAppTimestamp(run.scheduled_for_utc, { includeUTC: true, preformattedPrimary: run.scheduled_for_display })
+            ? window.formatAppTimestamp(run.scheduled_for_utc, { includeUTC: true })
             : { primary: run.scheduled_for_utc || "", secondary: "", title: run.scheduled_for_utc || "" };
         row.innerHTML = `
             <td title="${escapeHtml(scheduled.title || "")}">
@@ -1031,6 +1049,7 @@ function updateBlackoutRowField(kind, index, field, value) {
     if (!editor || !editor.rows[index]) return;
     editor.rows[index][field] = value;
     syncBlackoutTextarea(kind);
+    updateBlackoutRowSummary(kind, index);
     if (kind === "policy") updatePolicySummary();
 }
 
@@ -1057,7 +1076,12 @@ function handleBlackoutEditorClick(event) {
             ? editor.rows[index].weekdays.filter((item) => item !== day)
             : [...editor.rows[index].weekdays, day];
         editor.rows[index].weekdays = normalizeWeekdays(nextDays);
-        renderBlackoutEditor(kind);
+        const isActive = editor.rows[index].weekdays.includes(day);
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        syncBlackoutTextarea(kind);
+        updateBlackoutRowSummary(kind, index);
+        if (kind === "policy") updatePolicySummary();
     }
 }
 
