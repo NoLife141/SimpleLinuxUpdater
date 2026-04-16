@@ -541,6 +541,12 @@ func currentAppTimezoneResponse() AppTimezoneResponse {
 }
 
 func saveAppTimezone(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		if err := upsertSettingValue(appTimezoneSetting, ""); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
 	name, _, err := normalizeAppTimezoneName(raw)
 	if err != nil {
 		if offsetName, _, ok := parseOffsetTimezoneLabel(raw); ok {

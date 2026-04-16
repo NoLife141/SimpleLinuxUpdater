@@ -326,6 +326,42 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	}
 }
 
+func TestAppTimezoneAPIBlankSaveKeepsUnsetDefault(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-blank.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":""}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("blank timezone status = %d, want %d (body=%s)", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+
+	var resp AppTimezoneResponse
+	if err := json.Unmarshal(putRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal blank timezone response: %v", err)
+	}
+	if strings.TrimSpace(resp.Timezone) == "" {
+		t.Fatalf("blank timezone response missing display timezone")
+	}
+	if resp.EditableTimezone != "" {
+		t.Fatalf("blank timezone editable timezone = %q, want empty", resp.EditableTimezone)
+	}
+
+	raw, err := getSettingValue(appTimezoneSetting)
+	if err != nil {
+		t.Fatalf("getSettingValue(app_timezone) unexpected error: %v", err)
+	}
+	if strings.TrimSpace(raw) != "" {
+		t.Fatalf("stored app timezone = %q, want empty", raw)
+	}
+}
+
 func TestTimezoneResponsesKeepExplicitEmptyResolvedTimezone(t *testing.T) {
 	appPayload, err := json.Marshal(AppTimezoneResponse{
 		Timezone:         appTimezoneLocalDisplayLabel,
