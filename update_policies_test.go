@@ -284,6 +284,9 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	if saved.Timezone != "America/Toronto" {
 		t.Fatalf("saved timezone = %q, want %q", saved.Timezone, "America/Toronto")
 	}
+	if saved.ResolvedTimezone != "America/Toronto" {
+		t.Fatalf("saved resolved timezone = %q, want %q", saved.ResolvedTimezone, "America/Toronto")
+	}
 
 	settingsRec := httptest.NewRecorder()
 	settingsReq := httptest.NewRequest(http.MethodGet, "/api/update-policies/settings", nil)
@@ -298,6 +301,9 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	}
 	if settingsResp.Timezone != "America/Toronto" {
 		t.Fatalf("scheduled settings timezone = %q, want %q", settingsResp.Timezone, "America/Toronto")
+	}
+	if settingsResp.ResolvedTimezone != "America/Toronto" {
+		t.Fatalf("scheduled settings resolved timezone = %q, want %q", settingsResp.ResolvedTimezone, "America/Toronto")
 	}
 
 	invalidRec := httptest.NewRecorder()
@@ -439,39 +445,29 @@ func TestSaveAppTimezoneRejectsBrowserUnsafeAlias(t *testing.T) {
 	}
 }
 
-func TestSaveAppTimezoneAcceptsBrowserSafeShortName(t *testing.T) {
+func TestSaveAppTimezoneRejectsBrowserUnsafeShortName(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "app-timezone-short-name.db")
 	prepareUpdatePolicyTestState(t, dbFile)
 
-	name, err := saveAppTimezone("EST")
-	if err != nil {
-		t.Fatalf("saveAppTimezone(EST) unexpected error: %v", err)
+	_, err := saveAppTimezone("EST")
+	if err == nil {
+		t.Fatalf("saveAppTimezone(EST) expected error, got nil")
 	}
-	if name != "EST" {
-		t.Fatalf("saveAppTimezone(EST) = %q, want %q", name, "EST")
-	}
-	if got := currentAppTimezoneName(); got != "EST" {
-		t.Fatalf("currentAppTimezoneName() = %q, want %q", got, "EST")
+	if !isAppTimezoneValidationError(err) {
+		t.Fatalf("saveAppTimezone(EST) error = %v, want app timezone validation error", err)
 	}
 }
 
-func TestSaveAppTimezoneAcceptsOffsetLabel(t *testing.T) {
+func TestSaveAppTimezoneRejectsOffsetLabel(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "app-timezone-offset-name.db")
 	prepareUpdatePolicyTestState(t, dbFile)
 
-	name, err := saveAppTimezone("+02:00")
-	if err != nil {
-		t.Fatalf("saveAppTimezone(+02:00) unexpected error: %v", err)
+	_, err := saveAppTimezone("+02:00")
+	if err == nil {
+		t.Fatalf("saveAppTimezone(+02:00) expected error, got nil")
 	}
-	if name != "+02:00" {
-		t.Fatalf("saveAppTimezone(+02:00) = %q, want %q", name, "+02:00")
-	}
-	loc, currentName := currentAppTimezone()
-	if currentName != "+02:00" {
-		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
-	}
-	if loc == nil || loc.String() != "+02:00" {
-		t.Fatalf("currentAppTimezone() location = %v, want +02:00", loc)
+	if !isAppTimezoneValidationError(err) {
+		t.Fatalf("saveAppTimezone(+02:00) error = %v, want app timezone validation error", err)
 	}
 }
 
@@ -501,8 +497,8 @@ func TestSaveAppTimezoneLocalFallsBackWhenNameUnresolved(t *testing.T) {
 	if currentName != "+02:00" {
 		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
 	}
-	if loc == nil || loc.String() != "+02:00" {
-		t.Fatalf("currentAppTimezone() location = %v, want +02:00", loc)
+	if loc == nil || loc.String() != "XST" {
+		t.Fatalf("currentAppTimezone() location = %v, want XST", loc)
 	}
 }
 

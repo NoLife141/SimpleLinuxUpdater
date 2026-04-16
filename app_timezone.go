@@ -170,7 +170,7 @@ func browserSafeTimezoneName(name string) bool {
 		strings.EqualFold(name, "posixrules"):
 		return false
 	default:
-		return true
+		return false
 	}
 }
 

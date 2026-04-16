@@ -5,13 +5,13 @@ const scheduledPoliciesState = {
 };
 
 const weekdayOptions = [
-    { value: "mon", label: "Mon" },
-    { value: "tue", label: "Tue" },
-    { value: "wed", label: "Wed" },
-    { value: "thu", label: "Thu" },
-    { value: "fri", label: "Fri" },
-    { value: "sat", label: "Sat" },
-    { value: "sun", label: "Sun" }
+    { value: "mon", label: "Mon", fullLabel: "Monday" },
+    { value: "tue", label: "Tue", fullLabel: "Tuesday" },
+    { value: "wed", label: "Wed", fullLabel: "Wednesday" },
+    { value: "thu", label: "Thu", fullLabel: "Thursday" },
+    { value: "fri", label: "Fri", fullLabel: "Friday" },
+    { value: "sat", label: "Sat", fullLabel: "Saturday" },
+    { value: "sun", label: "Sun", fullLabel: "Sunday" }
 ];
 
 const blackoutEditors = {
@@ -504,8 +504,9 @@ function setBlackoutEditorRows(kind, rows) {
 
 function buildBlackoutWeekdayButtons(kind, row, index) {
     return weekdayOptions.map((day) => {
-        const active = row.weekdays.includes(day.value) ? " active" : "";
-        return `<button class="day-chip${active}" type="button" data-blackout-kind="${escapeHtml(kind)}" data-blackout-action="toggle-day" data-index="${escapeHtml(String(index))}" data-day="${escapeHtml(day.value)}">${escapeHtml(day.label)}</button>`;
+        const isActive = row.weekdays.includes(day.value);
+        const active = isActive ? " active" : "";
+        return `<button class="day-chip${active}" type="button" aria-pressed="${isActive ? "true" : "false"}" aria-label="${escapeHtml(day.fullLabel)}" data-blackout-kind="${escapeHtml(kind)}" data-blackout-action="toggle-day" data-index="${escapeHtml(String(index))}" data-day="${escapeHtml(day.value)}">${escapeHtml(day.label)}</button>`;
     }).join("");
 }
 
@@ -593,7 +594,9 @@ function setPolicyWeekdays(weekdays) {
     policyFormState.weekdays = normalizeWeekdays(weekdays);
     document.querySelectorAll("#policy-weekdays-picker .day-chip").forEach((button) => {
         const day = button.dataset.weekday || "";
-        button.classList.toggle("active", policyFormState.weekdays.includes(day));
+        const isActive = policyFormState.weekdays.includes(day);
+        button.classList.toggle("active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
     });
     updatePolicySummary();
 }
@@ -1027,7 +1030,8 @@ function updateBlackoutRowField(kind, index, field, value) {
     const editor = getBlackoutEditor(kind);
     if (!editor || !editor.rows[index]) return;
     editor.rows[index][field] = value;
-    renderBlackoutEditor(kind);
+    syncBlackoutTextarea(kind);
+    if (kind === "policy") updatePolicySummary();
 }
 
 function handleBlackoutEditorClick(event) {

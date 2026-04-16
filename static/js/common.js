@@ -79,6 +79,8 @@
             appTimezoneState.value = normalizeAppTimezone(payload.timezone);
             if (Object.prototype.hasOwnProperty.call(payload, "resolved_timezone")) {
                 appTimezoneState.resolved = normalizeResolvedTimezone(payload.resolved_timezone);
+            } else if (Object.prototype.hasOwnProperty.call(payload, "resolvedTimezone")) {
+                appTimezoneState.resolved = normalizeResolvedTimezone(payload.resolvedTimezone);
             } else {
                 appTimezoneState.resolved = normalizeResolvedTimezone(payload.timezone);
             }
@@ -90,6 +92,7 @@
         appTimezoneState.loaded = true;
         return {
             timezone: appTimezoneState.value,
+            resolved_timezone: appTimezoneState.resolved,
             resolvedTimezone: appTimezoneState.resolved
         };
     };
@@ -106,6 +109,7 @@
         if (appTimezoneState.loaded && !force) {
             return {
                 timezone: appTimezoneState.value,
+                resolved_timezone: appTimezoneState.resolved,
                 resolvedTimezone: appTimezoneState.resolved
             };
         }
@@ -129,6 +133,7 @@
                 }
                 return {
                     timezone: appTimezoneState.value,
+                    resolved_timezone: appTimezoneState.resolved,
                     resolvedTimezone: appTimezoneState.resolved
                 };
             } finally {
