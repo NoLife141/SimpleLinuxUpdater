@@ -1718,6 +1718,7 @@ func handleAuditEvents(c *gin.Context) {
 	query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
 			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	queryArgs := append(append([]any{}, args...), pageSize, offset)
+	loc, timezoneName := currentAppTimezone()
 	rows, err := db.Query(query, queryArgs...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
@@ -1726,7 +1727,6 @@ func handleAuditEvents(c *gin.Context) {
 	defer rows.Close()
 
 	items := make([]AuditEvent, 0, pageSize)
-	loc, timezoneName := currentAppTimezone()
 	for rows.Next() {
 		var evt AuditEvent
 		if err := rows.Scan(
