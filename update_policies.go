@@ -125,7 +125,7 @@ type UpdatePolicyRun struct {
 
 type UpdatePolicySettingsResponse struct {
 	Timezone         string                       `json:"timezone"`
-	ResolvedTimezone string                       `json:"resolved_timezone,omitempty"`
+	ResolvedTimezone string                       `json:"resolved_timezone"`
 	GlobalBlackouts  []UpdatePolicyBlackoutWindow `json:"global_blackouts"`
 }
 

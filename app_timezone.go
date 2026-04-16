@@ -36,7 +36,7 @@ var appTimezoneZoneinfoRoots = []string{
 
 type AppTimezoneResponse struct {
 	Timezone         string `json:"timezone"`
-	ResolvedTimezone string `json:"resolved_timezone,omitempty"`
+	ResolvedTimezone string `json:"resolved_timezone"`
 	EditableTimezone string `json:"editable_timezone"`
 }
 

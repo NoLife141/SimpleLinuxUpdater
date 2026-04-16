@@ -326,6 +326,32 @@ func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
 	}
 }
 
+func TestTimezoneResponsesKeepExplicitEmptyResolvedTimezone(t *testing.T) {
+	appPayload, err := json.Marshal(AppTimezoneResponse{
+		Timezone:         appTimezoneLocalDisplayLabel,
+		ResolvedTimezone: "",
+		EditableTimezone: "",
+	})
+	if err != nil {
+		t.Fatalf("marshal app timezone response: %v", err)
+	}
+	if !strings.Contains(string(appPayload), `"resolved_timezone":""`) {
+		t.Fatalf("app timezone response missing explicit empty resolved_timezone: %s", string(appPayload))
+	}
+
+	settingsPayload, err := json.Marshal(UpdatePolicySettingsResponse{
+		Timezone:         appTimezoneLocalDisplayLabel,
+		ResolvedTimezone: "",
+		GlobalBlackouts:  nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal update policy settings response: %v", err)
+	}
+	if !strings.Contains(string(settingsPayload), `"resolved_timezone":""`) {
+		t.Fatalf("update policy settings response missing explicit empty resolved_timezone: %s", string(settingsPayload))
+	}
+}
+
 func TestSaveAppTimezoneLocalResolvesSystemTimezoneName(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "app-timezone-local-save.db")
 	prepareUpdatePolicyTestState(t, dbFile)
