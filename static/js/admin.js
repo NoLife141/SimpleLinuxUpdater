@@ -33,6 +33,14 @@ const policyFormState = {
     weekdays: []
 };
 
+function editableTimezoneInputValue(timezone) {
+    const value = String(timezone || "").trim();
+    if (/^[+-]\d{2}:\d{2}$/.test(value)) {
+        return "Local";
+    }
+    return value || "UTC";
+}
+
 function applyScheduledTimezone(payload) {
     const timezoneState = window.setAppTimezoneCache
         ? window.setAppTimezoneCache(payload)
@@ -44,7 +52,7 @@ function applyScheduledTimezone(payload) {
     }
     const timezoneInput = document.getElementById("app-timezone-input");
     if (timezoneInput && document.activeElement !== timezoneInput) {
-        timezoneInput.value = scheduledPoliciesState.timezone;
+        timezoneInput.value = editableTimezoneInputValue(scheduledPoliciesState.timezone);
     }
     updatePolicySummary();
     renderScheduledPolicies();
