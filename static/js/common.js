@@ -101,7 +101,7 @@
                 appTimezoneState.editable = normalizeEditableTimezone(payload.editable_timezone);
             } else if (Object.prototype.hasOwnProperty.call(payload, "editableTimezone")) {
                 appTimezoneState.editable = normalizeEditableTimezone(payload.editableTimezone);
-            } else {
+            } else if (!appTimezoneState.loaded && !normalizeEditableTimezone(appTimezoneState.editable)) {
                 appTimezoneState.editable =
                     normalizeEditableTimezone(payload.timezone || payload.resolved_timezone || payload.resolvedTimezone) ||
                     defaultEditableTimezone(appTimezoneState.value);
