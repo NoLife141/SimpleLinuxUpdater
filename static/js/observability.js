@@ -71,6 +71,9 @@ let refreshIntervalId = null;
         async function fetchObservabilitySummary() {
             const selectedWindow = windowSelect.value || '7d';
             try {
+                if (window.ensureAppTimezoneLoaded) {
+                    await window.ensureAppTimezoneLoaded();
+                }
                 const res = await fetch(`/api/observability/summary?window=${encodeURIComponent(selectedWindow)}`);
                 if (!res.ok) {
                     throw new Error(`HTTP ${res.status}`);
@@ -91,13 +94,20 @@ let refreshIntervalId = null;
             const avgMs = Number(duration.avg_ms || 0);
             const withDuration = Number(duration.samples_with_duration || 0);
             const withoutDuration = Number(duration.samples_without_duration || 0);
+            const from = window.formatAppTimestamp
+                ? window.formatAppTimestamp(summary?.from, { titleUTC: true, preformattedPrimary: summary?.from_display })
+                : { primary: summary?.from || '-', title: summary?.from || '' };
+            const to = window.formatAppTimestamp
+                ? window.formatAppTimestamp(summary?.to, { titleUTC: true, preformattedPrimary: summary?.to_display })
+                : { primary: summary?.to || '-', title: summary?.to || '' };
 
             document.getElementById('kpi-success-rate').textContent = `${successRate.toFixed(2)}%`;
             document.getElementById('kpi-total').textContent = String(totalRuns);
             document.getElementById('kpi-duration').textContent = formatDuration(avgMs);
             document.getElementById('kpi-duration-samples').textContent =
                 `Duration samples: ${withDuration} with data, ${withoutDuration} without data`;
-            rangeLabel.textContent = `Range: ${summary?.from || '-'} to ${summary?.to || '-'}`;
+            rangeLabel.textContent = `Range: ${from.primary} to ${to.primary}`;
+            rangeLabel.title = `UTC range: ${summary?.from || '-'} to ${summary?.to || '-'}`;
 
             renderTableRows(
                 document.getElementById('failure-causes-body'),

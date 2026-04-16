@@ -247,6 +247,514 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 }
 
+func TestAppTimezoneAPIAndScheduledSettingsMirror(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/app-settings/timezone", nil)
+	getReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get timezone status = %d, want %d (body=%s)", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	var initial AppTimezoneResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &initial); err != nil {
+		t.Fatalf("unmarshal initial timezone response: %v", err)
+	}
+	if strings.TrimSpace(initial.Timezone) == "" {
+		t.Fatalf("initial timezone missing from response")
+	}
+	if initial.EditableTimezone != "" {
+		t.Fatalf("initial editable timezone = %q, want empty for unset setting", initial.EditableTimezone)
+	}
+	if !strings.Contains(getRec.Body.String(), `"editable_timezone":""`) {
+		t.Fatalf("initial timezone response missing explicit empty editable_timezone: %s", getRec.Body.String())
+	}
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":"America/Toronto"}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put timezone status = %d, want %d (body=%s)", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+	var saved AppTimezoneResponse
+	if err := json.Unmarshal(putRec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("unmarshal saved timezone response: %v", err)
+	}
+	if saved.Timezone != "America/Toronto" {
+		t.Fatalf("saved timezone = %q, want %q", saved.Timezone, "America/Toronto")
+	}
+	if saved.ResolvedTimezone != "America/Toronto" {
+		t.Fatalf("saved resolved timezone = %q, want %q", saved.ResolvedTimezone, "America/Toronto")
+	}
+	if saved.EditableTimezone != "America/Toronto" {
+		t.Fatalf("saved editable timezone = %q, want %q", saved.EditableTimezone, "America/Toronto")
+	}
+
+	settingsRec := httptest.NewRecorder()
+	settingsReq := httptest.NewRequest(http.MethodGet, "/api/update-policies/settings", nil)
+	settingsReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(settingsRec, settingsReq)
+	if settingsRec.Code != http.StatusOK {
+		t.Fatalf("scheduled settings status = %d, want %d (body=%s)", settingsRec.Code, http.StatusOK, settingsRec.Body.String())
+	}
+	var settingsResp UpdatePolicySettingsResponse
+	if err := json.Unmarshal(settingsRec.Body.Bytes(), &settingsResp); err != nil {
+		t.Fatalf("unmarshal scheduled settings response: %v", err)
+	}
+	if settingsResp.Timezone != "America/Toronto" {
+		t.Fatalf("scheduled settings timezone = %q, want %q", settingsResp.Timezone, "America/Toronto")
+	}
+	if settingsResp.ResolvedTimezone != "America/Toronto" {
+		t.Fatalf("scheduled settings resolved timezone = %q, want %q", settingsResp.ResolvedTimezone, "America/Toronto")
+	}
+
+	invalidRec := httptest.NewRecorder()
+	invalidReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":"Mars/Olympus"}`))
+	invalidReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(invalidReq)
+	invalidReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(invalidRec, invalidReq)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timezone status = %d, want %d (body=%s)", invalidRec.Code, http.StatusBadRequest, invalidRec.Body.String())
+	}
+}
+
+func TestAppTimezoneAPIBlankSaveKeepsUnsetDefault(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-blank.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":""}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("blank timezone status = %d, want %d (body=%s)", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+
+	var resp AppTimezoneResponse
+	if err := json.Unmarshal(putRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal blank timezone response: %v", err)
+	}
+	if strings.TrimSpace(resp.Timezone) == "" {
+		t.Fatalf("blank timezone response missing display timezone")
+	}
+	if resp.EditableTimezone != "" {
+		t.Fatalf("blank timezone editable timezone = %q, want empty", resp.EditableTimezone)
+	}
+
+	raw, err := getSettingValue(appTimezoneSetting)
+	if err != nil {
+		t.Fatalf("getSettingValue(app_timezone) unexpected error: %v", err)
+	}
+	if strings.TrimSpace(raw) != "" {
+		t.Fatalf("stored app timezone = %q, want empty", raw)
+	}
+}
+
+func TestAppTimezoneAPIMissingTimezoneFieldIsRejected(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-missing.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone(America/Toronto) unexpected error: %v", err)
+	}
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusBadRequest {
+		t.Fatalf("missing timezone field status = %d, want %d (body=%s)", putRec.Code, http.StatusBadRequest, putRec.Body.String())
+	}
+
+	raw, err := getSettingValue(appTimezoneSetting)
+	if err != nil {
+		t.Fatalf("getSettingValue(app_timezone) unexpected error: %v", err)
+	}
+	if raw != "America/Toronto" {
+		t.Fatalf("stored app timezone after missing field = %q, want %q", raw, "America/Toronto")
+	}
+}
+
+func TestTimezoneResponsesKeepExplicitEmptyResolvedTimezone(t *testing.T) {
+	appPayload, err := json.Marshal(AppTimezoneResponse{
+		Timezone:         appTimezoneLocalDisplayLabel,
+		ResolvedTimezone: "",
+		EditableTimezone: "",
+	})
+	if err != nil {
+		t.Fatalf("marshal app timezone response: %v", err)
+	}
+	if !strings.Contains(string(appPayload), `"resolved_timezone":""`) {
+		t.Fatalf("app timezone response missing explicit empty resolved_timezone: %s", string(appPayload))
+	}
+
+	settingsPayload, err := json.Marshal(UpdatePolicySettingsResponse{
+		Timezone:         appTimezoneLocalDisplayLabel,
+		ResolvedTimezone: "",
+		GlobalBlackouts:  nil,
+	})
+	if err != nil {
+		t.Fatalf("marshal update policy settings response: %v", err)
+	}
+	if !strings.Contains(string(settingsPayload), `"resolved_timezone":""`) {
+		t.Fatalf("update policy settings response missing explicit empty resolved_timezone: %s", string(settingsPayload))
+	}
+}
+
+func TestSaveAppTimezoneLocalResolvesSystemTimezoneName(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-local-save.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "Europe/London", nil
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+	})
+
+	name, err := saveAppTimezone("Local")
+	if err != nil {
+		t.Fatalf("saveAppTimezone(Local) unexpected error: %v", err)
+	}
+	if name != "Europe/London" {
+		t.Fatalf("saveAppTimezone(Local) = %q, want %q", name, "Europe/London")
+	}
+	if got := currentAppTimezoneName(); got != "Europe/London" {
+		t.Fatalf("currentAppTimezoneName() = %q, want %q", got, "Europe/London")
+	}
+}
+
+func TestSaveAppTimezoneLocalAcceptsDetectedOffsetTimezone(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-local-offset-save.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	origDetect := detectSystemTimezoneNameFunc
+	oldLocal := time.Local
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "+02:00", nil
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+		time.Local = oldLocal
+	})
+	time.Local = time.FixedZone("XST", 2*60*60)
+
+	name, err := saveAppTimezone("Local")
+	if err != nil {
+		t.Fatalf("saveAppTimezone(Local) unexpected error: %v", err)
+	}
+	if name != "+02:00" {
+		t.Fatalf("saveAppTimezone(Local) = %q, want %q", name, "+02:00")
+	}
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	time.Local = time.UTC
+
+	loc, currentName, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
+	if currentName != "+02:00" {
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", currentName, "+02:00")
+	}
+	if loc == nil {
+		t.Fatalf("loadCurrentAppTimezone() location = nil, want fixed offset location")
+	}
+	if loc.String() != "+02:00" {
+		t.Fatalf("loadCurrentAppTimezone() location name = %q, want %q", loc.String(), "+02:00")
+	}
+	_, offset := time.Now().In(loc).Zone()
+	if offset != 2*60*60 {
+		t.Fatalf("loadCurrentAppTimezone() offset = %d, want %d", offset, 2*60*60)
+	}
+}
+
+func TestAppTimezoneAPIEditableTimezoneKeepsConfiguredOffset(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-api-offset.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if err := upsertSettingValue(appTimezoneSetting, "+02:00"); err != nil {
+		t.Fatalf("upsertSettingValue(+02:00) unexpected error: %v", err)
+	}
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	getRec := httptest.NewRecorder()
+	getReq := httptest.NewRequest(http.MethodGet, "/api/app-settings/timezone", nil)
+	getReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get timezone status = %d, want %d (body=%s)", getRec.Code, http.StatusOK, getRec.Body.String())
+	}
+	var resp AppTimezoneResponse
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal timezone response: %v", err)
+	}
+	if resp.Timezone != "+02:00" {
+		t.Fatalf("response timezone = %q, want %q", resp.Timezone, "+02:00")
+	}
+	if resp.ResolvedTimezone != "+02:00" {
+		t.Fatalf("response resolved timezone = %q, want %q", resp.ResolvedTimezone, "+02:00")
+	}
+	if resp.EditableTimezone != "+02:00" {
+		t.Fatalf("response editable timezone = %q, want %q", resp.EditableTimezone, "+02:00")
+	}
+
+	putRec := httptest.NewRecorder()
+	putReq := httptest.NewRequest(http.MethodPut, "/api/app-settings/timezone", bytes.NewBufferString(`{"timezone":"+02:00"}`))
+	putReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(putReq)
+	putReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("put timezone status = %d, want %d (body=%s)", putRec.Code, http.StatusOK, putRec.Body.String())
+	}
+	var saved AppTimezoneResponse
+	if err := json.Unmarshal(putRec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("unmarshal saved timezone response: %v", err)
+	}
+	if saved.EditableTimezone != "+02:00" {
+		t.Fatalf("saved editable timezone = %q, want %q", saved.EditableTimezone, "+02:00")
+	}
+}
+
+func TestDefaultAppTimezoneNameFallbackDoesNotExposeLocal(t *testing.T) {
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	oldLocal := time.Local
+	time.Local = time.FixedZone("XST", 2*60*60)
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+		time.Local = oldLocal
+	})
+
+	if got := defaultAppTimezoneName(); got != "+02:00" {
+		t.Fatalf("defaultAppTimezoneName() = %q, want %q", got, "+02:00")
+	}
+}
+
+func TestLoadCurrentAppTimezoneFallbackKeepsLocationAndNameAligned(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-fallback-aligned.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	oldLocal := time.Local
+	time.Local = time.FixedZone("XST", 2*60*60)
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+		time.Local = oldLocal
+	})
+
+	loc, name, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
+	if loc == nil || loc.String() != "XST" {
+		t.Fatalf("loadCurrentAppTimezone() location = %v, want XST", loc)
+	}
+	if name != "+02:00" {
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", name, "+02:00")
+	}
+}
+
+func TestLoadCurrentAppTimezoneSkipsFallbackDetectionWhenConfigured(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-configured-no-fallback.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone(America/Toronto) unexpected error: %v", err)
+	}
+
+	origDetect := detectSystemTimezoneNameFunc
+	var detectCalls atomic.Int32
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		detectCalls.Add(1)
+		return "", os.ErrNotExist
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+	})
+
+	loc, name, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
+	if loc == nil || loc.String() != "America/Toronto" {
+		t.Fatalf("loadCurrentAppTimezone() location = %v, want America/Toronto", loc)
+	}
+	if name != "America/Toronto" {
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", name, "America/Toronto")
+	}
+	if detectCalls.Load() != 0 {
+		t.Fatalf("detectSystemTimezoneNameFunc calls = %d, want 0", detectCalls.Load())
+	}
+}
+
+func TestDetectSystemTimezoneNamePrefersLocaltimeOverMetadata(t *testing.T) {
+	t.Setenv("TZ", "")
+	oldLocal := time.Local
+	time.Local = time.FixedZone("Local", 0)
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+
+	tempDir := t.TempDir()
+	zoneinfoRoot := filepath.Join(tempDir, "zoneinfo")
+	if err := os.MkdirAll(filepath.Join(zoneinfoRoot, "America"), 0o755); err != nil {
+		t.Fatalf("mkdir zoneinfo root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zoneinfoRoot, "America", "Toronto"), []byte("toronto-zone"), 0o644); err != nil {
+		t.Fatalf("write zoneinfo file: %v", err)
+	}
+	localtimePath := filepath.Join(tempDir, "localtime")
+	if err := os.WriteFile(localtimePath, []byte("toronto-zone"), 0o644); err != nil {
+		t.Fatalf("write localtime file: %v", err)
+	}
+	metadataPath := filepath.Join(tempDir, "timezone")
+	if err := os.WriteFile(metadataPath, []byte("UTC"), 0o644); err != nil {
+		t.Fatalf("write metadata timezone file: %v", err)
+	}
+
+	origLocaltimePath := appTimezoneLocaltimePath
+	origMetadataPaths := appTimezoneMetadataPaths
+	origZoneinfoRoots := appTimezoneZoneinfoRoots
+	t.Cleanup(func() {
+		appTimezoneLocaltimePath = origLocaltimePath
+		appTimezoneMetadataPaths = origMetadataPaths
+		appTimezoneZoneinfoRoots = origZoneinfoRoots
+	})
+
+	appTimezoneLocaltimePath = localtimePath
+	appTimezoneMetadataPaths = []string{metadataPath}
+	appTimezoneZoneinfoRoots = []string{zoneinfoRoot}
+
+	name, err := detectSystemTimezoneName()
+	if err != nil {
+		t.Fatalf("detectSystemTimezoneName() unexpected error: %v", err)
+	}
+	if name != "America/Toronto" {
+		t.Fatalf("detectSystemTimezoneName() = %q, want %q", name, "America/Toronto")
+	}
+}
+
+func TestSaveAppTimezoneRejectsBrowserUnsafeNames(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-invalid-names.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{name: "browser-unsafe-alias", input: "Factory"},
+		{name: "short-name", input: "EST"},
+		{name: "offset-label", input: "+02:00"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := saveAppTimezone(tc.input)
+			if err == nil {
+				t.Fatalf("saveAppTimezone(%q) expected error, got nil", tc.input)
+			}
+			if !isAppTimezoneValidationError(err) {
+				t.Fatalf("saveAppTimezone(%q) error = %v, want app timezone validation error", tc.input, err)
+			}
+		})
+	}
+}
+
+func TestSaveAppTimezoneLocalFallsBackWhenNameUnresolved(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-local-fallback.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "", os.ErrNotExist
+	}
+	oldLocal := time.Local
+	time.Local = time.FixedZone("XST", 2*60*60)
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+		time.Local = oldLocal
+	})
+
+	name, err := saveAppTimezone("Local")
+	if err != nil {
+		t.Fatalf("saveAppTimezone(Local) unexpected error: %v", err)
+	}
+	if name != "+02:00" {
+		t.Fatalf("saveAppTimezone(Local) = %q, want %q", name, "+02:00")
+	}
+	loc, currentName := currentAppTimezone()
+	if currentName != "+02:00" {
+		t.Fatalf("currentAppTimezone() name = %q, want %q", currentName, "+02:00")
+	}
+	if loc == nil || loc.String() != "+02:00" {
+		t.Fatalf("currentAppTimezone() location = %v, want +02:00", loc)
+	}
+}
+
+func TestAppTimezoneDisplayAndResolvedForLocalUsesFriendlyLabel(t *testing.T) {
+	display, resolved := appTimezoneDisplayAndResolved(time.FixedZone("XST", 2*60*60), "Local", time.Now())
+	if display != appTimezoneLocalDisplayLabel {
+		t.Fatalf("appTimezoneDisplayAndResolved() display = %q, want %q", display, appTimezoneLocalDisplayLabel)
+	}
+	if resolved != "" {
+		t.Fatalf("appTimezoneDisplayAndResolved() resolved = %q, want empty", resolved)
+	}
+}
+
+func TestCurrentAppTimezoneResolvesLegacyLocalSetting(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "app-timezone-legacy-local.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if err := upsertSettingValue(appTimezoneSetting, "Local"); err != nil {
+		t.Fatalf("upsertSettingValue(Local) unexpected error: %v", err)
+	}
+
+	origDetect := detectSystemTimezoneNameFunc
+	detectSystemTimezoneNameFunc = func() (string, error) {
+		return "Europe/London", nil
+	}
+	t.Cleanup(func() {
+		detectSystemTimezoneNameFunc = origDetect
+	})
+
+	loc, name, err := loadCurrentAppTimezone()
+	if err != nil {
+		t.Fatalf("loadCurrentAppTimezone() unexpected error: %v", err)
+	}
+	if loc == nil || loc.String() != "Europe/London" {
+		t.Fatalf("loadCurrentAppTimezone() location = %v, want Europe/London", loc)
+	}
+	if name != "Europe/London" {
+		t.Fatalf("loadCurrentAppTimezone() name = %q, want %q", name, "Europe/London")
+	}
+}
+
 func TestSetUpdatePolicyOverrideFalseRemovesPersistedOptOut(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "update-policy-override-clear.db")
 	prepareUpdatePolicyTestState(t, dbFile)
@@ -368,6 +876,130 @@ func TestCanonicalScheduledForUTCUsesFirstFallbackOccurrence(t *testing.T) {
 	}
 	if got := canonicalScheduledForUTC(secondOccurrence); got != want {
 		t.Fatalf("canonicalScheduledForUTC(second) = %q, want %q", got, want)
+	}
+}
+
+func TestProcessDueUpdatePoliciesUsesConfiguredAppTimezone(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-configured-timezone.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	t.Setenv(postchecksEnabledEnv, "false")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+
+	oldLocal := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() {
+		time.Local = oldLocal
+	})
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone() unexpected error: %v", err)
+	}
+
+	now := time.Date(2026, time.January, 15, 7, 5, 0, 0, time.UTC)
+	server := Server{Name: "srv-configured-timezone", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Configured timezone scan",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     "02:05",
+	})
+	if err != nil {
+		t.Fatalf("createUpdatePolicy() unexpected error: %v", err)
+	}
+
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			precheckDiskSpaceCmd:               {stdout: "2048000\n2097152\n"},
+			precheckLocksCmd:                   {err: fakeExitStatusError{code: 1, msg: "no process found"}},
+			precheckDpkgAuditCmd:               {},
+			precheckAptCheckCmd:                {},
+			aptUpdateCmd:                       {},
+			aptListUpgradableCmd:               {stdout: "Inst openssl [3.0.0-1] (3.0.1-1 Debian-Security:12/stable-security [amd64])\n"},
+			buildPackageCVEQueryCmd("openssl"): {stdout: "CVE-2026-1001\n"},
+		},
+	}
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		return conn, nil
+	})
+	t.Cleanup(func() { setDialSSHConnection(origDial) })
+
+	if err := processDueUpdatePolicies(now); err != nil {
+		t.Fatalf("processDueUpdatePolicies() unexpected error: %v", err)
+	}
+
+	waitForCondition(t, 10*time.Second, func() bool {
+		runs, err := listUpdatePolicyRuns(10)
+		if err != nil {
+			return false
+		}
+		for _, run := range runs {
+			if run.PolicyID == policy.ID && run.ServerName == server.Name && run.Status == updatePolicyRunSucceeded {
+				return true
+			}
+		}
+		return false
+	}, "configured-timezone run to complete")
+
+	runs, err := listUpdatePolicyRuns(10)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyRuns() unexpected error: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("run count = %d, want 1", len(runs))
+	}
+	if runs[0].ScheduledForUTC != now.Format(jobTimestampLayout) {
+		t.Fatalf("scheduled_for_utc = %q, want %q", runs[0].ScheduledForUTC, now.Format(jobTimestampLayout))
+	}
+}
+
+func TestAppTimezoneChangeKeepsPolicyWallClockMeaning(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-timezone-wallclock.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	policy := UpdatePolicy{
+		CadenceKind: updatePolicyCadenceDaily,
+		TimeLocal:   "02:00",
+	}
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone(Toronto) unexpected error: %v", err)
+	}
+	torontoSlot := time.Date(2026, time.January, 15, 2, 0, 0, 0, currentAppLocation())
+	if !policyDueAt(policy, torontoSlot) {
+		t.Fatalf("policyDueAt(Toronto slot) = false, want true")
+	}
+	wantToronto := time.Date(2026, time.January, 15, 7, 0, 0, 0, time.UTC).Format(jobTimestampLayout)
+	if got := canonicalScheduledForUTC(torontoSlot); got != wantToronto {
+		t.Fatalf("canonicalScheduledForUTC(Toronto slot) = %q, want %q", got, wantToronto)
+	}
+
+	if _, err := saveAppTimezone("UTC"); err != nil {
+		t.Fatalf("saveAppTimezone(UTC) unexpected error: %v", err)
+	}
+	utcSlot := time.Date(2026, time.January, 16, 2, 0, 0, 0, currentAppLocation())
+	if !policyDueAt(policy, utcSlot) {
+		t.Fatalf("policyDueAt(UTC slot) = false, want true")
+	}
+	wantUTC := time.Date(2026, time.January, 16, 2, 0, 0, 0, time.UTC).Format(jobTimestampLayout)
+	if got := canonicalScheduledForUTC(utcSlot); got != wantUTC {
+		t.Fatalf("canonicalScheduledForUTC(UTC slot) = %q, want %q", got, wantUTC)
 	}
 }
 
@@ -505,6 +1137,35 @@ func TestProcessDueUpdatePoliciesDedupesAndHandlesSkips(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&dialCalls); got != 1 {
 		t.Fatalf("dial calls = %d, want 1", got)
+	}
+}
+
+func TestMaintenancePageHTMLUsesAppTimezoneFormatting(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "maintenance-page-timezone.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	if _, err := saveAppTimezone("America/Toronto"); err != nil {
+		t.Fatalf("saveAppTimezone() unexpected error: %v", err)
+	}
+
+	oldState := currentMaintenanceState()
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(oldState)
+	})
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      jobKindBackupRestore,
+		JobID:     "job-maint-timezone",
+		StartedAt: "2026-01-15T12:34:56Z",
+		Message:   "Timezone-aware maintenance page.",
+	})
+
+	html := maintenancePageHTML()
+	if !strings.Contains(html, "America/Toronto") {
+		t.Fatalf("maintenance HTML missing timezone label: %s", html)
+	}
+	if !strings.Contains(html, "2026-01-15 07:34:56 EST") {
+		t.Fatalf("maintenance HTML missing localized timestamp: %s", html)
 	}
 }
 

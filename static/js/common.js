@@ -1,6 +1,59 @@
 (function () {
     if (window.__commonHelpersReady) return;
     window.__commonHelpersReady = true;
+    const appTimezoneState = window.__appTimezoneState || {
+        value: "UTC",
+        resolved: "UTC",
+        editable: "",
+        loaded: false,
+        loadingPromise: null
+    };
+    window.__appTimezoneState = appTimezoneState;
+
+    function normalizeAppTimezone(value) {
+        const raw = String(value ?? "").trim();
+        return raw || "UTC";
+    }
+
+    function normalizeResolvedTimezone(value) {
+        return String(value ?? "").trim();
+    }
+
+    function normalizeEditableTimezone(value) {
+        return String(value ?? "").trim();
+    }
+
+    function defaultEditableTimezone(timezone) {
+        const value = normalizeAppTimezone(timezone);
+        if (/^[+-]\d{2}:\d{2}$/.test(value)) {
+            return "Local";
+        }
+        return value || "UTC";
+    }
+
+    function timezoneForIntl(timezone) {
+        return normalizeResolvedTimezone(timezone);
+    }
+
+    function buildTimestampFormatter(timeZone) {
+        return new Intl.DateTimeFormat(undefined, {
+            timeZone,
+            year: "numeric",
+            month: "short",
+            day: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+            timeZoneName: "short"
+        });
+    }
+
+    function parseTimestamp(value) {
+        const raw = String(value ?? "").trim();
+        if (!raw) return null;
+        const parsed = new Date(raw);
+        return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
 
     window.escapeHtml = window.escapeHtml || function escapeHtml(value) {
         return String(value ?? "")
@@ -32,5 +85,127 @@
         if (!label) return;
         const file = input.files && input.files[0];
         label.textContent = file ? file.name : emptyLabel;
+    };
+
+    window.setAppTimezoneCache = window.setAppTimezoneCache || function setAppTimezoneCache(payload) {
+        if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+            appTimezoneState.value = normalizeAppTimezone(payload.timezone);
+            if (Object.prototype.hasOwnProperty.call(payload, "resolved_timezone")) {
+                appTimezoneState.resolved = normalizeResolvedTimezone(payload.resolved_timezone);
+            } else if (Object.prototype.hasOwnProperty.call(payload, "resolvedTimezone")) {
+                appTimezoneState.resolved = normalizeResolvedTimezone(payload.resolvedTimezone);
+            } else {
+                appTimezoneState.resolved = normalizeResolvedTimezone(payload.timezone);
+            }
+            if (Object.prototype.hasOwnProperty.call(payload, "editable_timezone")) {
+                appTimezoneState.editable = normalizeEditableTimezone(payload.editable_timezone);
+            } else if (Object.prototype.hasOwnProperty.call(payload, "editableTimezone")) {
+                appTimezoneState.editable = normalizeEditableTimezone(payload.editableTimezone);
+            } else if (!appTimezoneState.loaded && !normalizeEditableTimezone(appTimezoneState.editable)) {
+                appTimezoneState.editable =
+                    normalizeEditableTimezone(payload.timezone || payload.resolved_timezone || payload.resolvedTimezone) ||
+                    defaultEditableTimezone(appTimezoneState.value);
+            }
+        } else {
+            const timezone = normalizeAppTimezone(payload);
+            appTimezoneState.value = timezone;
+            appTimezoneState.resolved = normalizeResolvedTimezone(timezone);
+            appTimezoneState.editable = defaultEditableTimezone(timezone);
+        }
+        appTimezoneState.loaded = true;
+        return {
+            timezone: appTimezoneState.value,
+            resolved_timezone: appTimezoneState.resolved,
+            resolvedTimezone: appTimezoneState.resolved,
+            editable_timezone: appTimezoneState.editable,
+            editableTimezone: appTimezoneState.editable
+        };
+    };
+
+    window.getAppTimezoneLabel = window.getAppTimezoneLabel || function getAppTimezoneLabel() {
+        return normalizeAppTimezone(appTimezoneState.value);
+    };
+
+    window.getAppTimezoneResolved = window.getAppTimezoneResolved || function getAppTimezoneResolved() {
+        return normalizeResolvedTimezone(appTimezoneState.resolved);
+    };
+
+    window.ensureAppTimezoneLoaded = window.ensureAppTimezoneLoaded || async function ensureAppTimezoneLoaded(force = false) {
+        if (appTimezoneState.loaded && !force) {
+            return {
+                timezone: appTimezoneState.value,
+                resolved_timezone: appTimezoneState.resolved,
+                resolvedTimezone: appTimezoneState.resolved,
+                editable_timezone: appTimezoneState.editable,
+                editableTimezone: appTimezoneState.editable
+            };
+        }
+        if (appTimezoneState.loadingPromise && !force) {
+            return appTimezoneState.loadingPromise;
+        }
+        appTimezoneState.loadingPromise = (async () => {
+            try {
+                const res = await fetch("/api/app-settings/timezone", { cache: "no-store" });
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json().catch(() => ({}));
+                return window.setAppTimezoneCache(data);
+            } catch (err) {
+                console.error("Failed to load app timezone:", err);
+                if (!appTimezoneState.loaded) {
+                    appTimezoneState.value = normalizeAppTimezone(appTimezoneState.value || "UTC");
+                    appTimezoneState.resolved = normalizeResolvedTimezone(appTimezoneState.resolved || appTimezoneState.value);
+                    appTimezoneState.editable = normalizeEditableTimezone(appTimezoneState.editable) || defaultEditableTimezone(appTimezoneState.value);
+                    appTimezoneState.loaded = true;
+                }
+                return {
+                    timezone: appTimezoneState.value,
+                    resolved_timezone: appTimezoneState.resolved,
+                    resolvedTimezone: appTimezoneState.resolved,
+                    editable_timezone: appTimezoneState.editable,
+                    editableTimezone: appTimezoneState.editable
+                };
+            } finally {
+                appTimezoneState.loadingPromise = null;
+            }
+        })();
+        return appTimezoneState.loadingPromise;
+    };
+
+    window.formatAppTimestamp = window.formatAppTimestamp || function formatAppTimestamp(value, options = {}) {
+        const fallback = String(value ?? "").trim();
+        const parsed = parseTimestamp(value);
+        const timezone = window.getAppTimezoneLabel();
+        const resolvedTimezone = window.getAppTimezoneResolved ? window.getAppTimezoneResolved() : timezone;
+        if (!parsed) {
+            return {
+                primary: options.preformattedPrimary || fallback || "-",
+                secondary: "",
+                title: options.preformattedTitle || fallback || "",
+                timezone
+            };
+        }
+
+        let primary = options.preformattedPrimary || fallback || parsed.toISOString();
+        let utcValue = parsed.toISOString();
+        if (!options.preformattedPrimary && resolvedTimezone) {
+            try {
+                primary = buildTimestampFormatter(timezoneForIntl(resolvedTimezone)).format(parsed);
+            } catch (err) {
+                console.error("Failed to format timestamp in app timezone:", err);
+            }
+        }
+        try {
+            utcValue = buildTimestampFormatter("UTC").format(parsed);
+        } catch (_) {
+            utcValue = parsed.toISOString();
+        }
+        return {
+            primary,
+            secondary: options.preformattedSecondary || (options.includeUTC ? `UTC: ${utcValue}` : ""),
+            title: options.preformattedTitle || (options.includeUTC || options.titleUTC ? `UTC: ${utcValue}` : utcValue),
+            timezone
+        };
     };
 }());

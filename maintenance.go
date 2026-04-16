@@ -140,6 +140,7 @@ func maintenancePageHTML() string {
 	if kind == "" {
 		kind = "maintenance"
 	}
+	startedAtDisplay, timezoneLabel := formatTimestampForAppDisplay(state.StartedAt)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -233,6 +234,10 @@ func maintenancePageHTML() string {
       <div class="label">Started</div>
       <div class="value">%s</div>
     </div>
+    <div class="meta">
+      <div class="label">Timezone</div>
+      <div class="value">%s</div>
+    </div>
   </main>
   <script>
     (function poll() {
@@ -254,7 +259,8 @@ func maintenancePageHTML() string {
 </html>`,
 		html.EscapeString(message),
 		html.EscapeString(kind),
-		html.EscapeString(state.StartedAt),
+		html.EscapeString(startedAtDisplay),
+		html.EscapeString(timezoneLabel),
 	)
 }
 

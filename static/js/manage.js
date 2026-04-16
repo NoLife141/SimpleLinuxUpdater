@@ -557,8 +557,11 @@ let editPolicyOverrideStates = new Map();
                     const row = document.createElement('tr');
                     const status = escapeHtml(evt.status || 'unknown');
                     const statusClass = `status-${safeStatusClassToken(evt.status)}`;
+                    const createdAt = window.formatAppTimestamp
+                        ? window.formatAppTimestamp(evt.created_at, { titleUTC: true, preformattedPrimary: evt.created_at_display })
+                        : { primary: evt.created_at || '', title: evt.created_at || '' };
                     row.innerHTML = `
-                        <td>${escapeHtml(evt.created_at || '')}</td>
+                        <td title="${escapeHtml(createdAt.title || '')}">${escapeHtml(createdAt.primary || '')}</td>
                         <td>${escapeHtml(evt.actor || '')}</td>
                         <td>${escapeHtml(evt.action || '')}</td>
                         <td>${escapeHtml(evt.target_type || '')}: ${escapeHtml(evt.target_name || '')}</td>
@@ -574,6 +577,9 @@ let editPolicyOverrideStates = new Map();
         }
 
         async function fetchAuditEvents() {
+            if (window.ensureAppTimezoneLoaded) {
+                await window.ensureAppTimezoneLoaded();
+            }
             const params = new URLSearchParams({
                 page: String(auditPage),
                 page_size: String(auditPageSize)
