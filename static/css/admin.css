@@ -380,6 +380,15 @@ input:not([type="checkbox"]) {
     width: 100%;
 }
 
+input[type="time"] {
+    color-scheme: dark;
+}
+
+input[type="time"]::-webkit-calendar-picker-indicator {
+    opacity: 0.85;
+    filter: invert(0.92) sepia(0.08) saturate(4.5) hue-rotate(168deg);
+}
+
 button:disabled,
 .btn-link:disabled,
 .file-btn:disabled {

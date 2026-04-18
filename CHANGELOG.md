@@ -6,17 +6,22 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-04-18
+
 ### Added
 
-- No entries yet.
+- Add app-wide timezone management with an Admin settings flow that drives scheduled updates and shared timestamp formatting.
+- Add richer scheduled update policy controls, including guided blackout window editors, weekday chips, and recent run visibility in Admin.
 
 ### Changed
 
-- No entries yet.
+- Localize audit history, observability ranges, maintenance state, and scheduled update timestamps to the configured app timezone.
+- Improve scheduled policy editing and blackout handling so local-recurring quiet hours, overnight windows, and accessibility state behave consistently.
 
 ### Fixed
 
-- No entries yet.
+- Fix the audit-events handler DB access order so CI Go test jobs no longer hang on the single SQLite connection path.
+- Fix Admin timezone save, unresolved local timezone rerendering, and dark theme polish for the policy time input before release.
 
 ## [v0.1.9] - 2026-03-22
 
