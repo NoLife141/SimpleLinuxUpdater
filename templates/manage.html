@@ -5,147 +5,211 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Manage Servers</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/css/base.css">
-    <link rel="stylesheet" href="/static/css/manage.css">
+    <link rel="stylesheet" href="/static/css/base.css?v=dense-all-pages-20260430b">
+    <link rel="stylesheet" href="/static/css/manage.css?v=dense-all-pages-20260430b">
 </head>
 <body>
-    <div class="page">
-        <header class="hero fade-in">
-            <div class="hero-grid">
-                <div class="hero-copy">
-                    <div class="hero-kicker">Fleet Registry</div>
-                    <h1>Manage Servers</h1>
-                    <p class="subtle hero-summary">Register hosts, tune credentials, rotate keys, and review the activity trail from the same dark operations workflow.</p>
-                </div>
-                <div class="hero-side">
-                    <div class="hero-panel">
-                        <div class="hero-panel-label">Workspace</div>
-                        <div class="hero-panel-value">Server Directory</div>
-                        <p class="subtle">Provision entries, inspect audit activity, and keep SSH access tidy without leaving the page.</p>
-                    </div>
-                    <div class="nav">
-                        <a class="btn-link" href="/">View Status</a>
-                        <a class="btn-link" href="/observability">Observability</a>
-                        <a class="btn-link" href="/admin">Admin</a>
-                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
-                    </div>
-                </div>
-            </div>
+    <div class="dashboard-shell">
+        <header class="app-header fade-in">
+            <a class="brand-lockup" href="/" aria-label="SimpleLinuxUpdater dashboard">
+                <img class="brand-logo" src="/static/logo.png" alt="Linux updates logo">
+                <span>
+                    <strong>SimpleLinuxUpdater</strong>
+                    <small>Fleet update dashboard</small>
+                </span>
+            </a>
+            <nav class="app-nav" aria-label="Main navigation">
+                <a href="/">Status</a>
+                <a class="active" href="/manage">Manage Servers</a>
+                <a href="/observability">Observability</a>
+                <a href="/admin">Admin</a>
+                <button type="button" id="logout-btn">Logout</button>
+            </nav>
         </header>
 
-        <section class="card fade-in">
-            <h2>Server Management</h2>
-            <p class="subtle">Upload a global SSH key to use for all servers without a per-server key.</p>
-            <div class="nav key-actions">
-                <input class="file-input" type="file" id="global-key-file" accept=".pem,.key,.rsa,.ed25519">
-                <label class="file-btn" for="global-key-file">Click to upload key</label>
-                <button class="btn-success" id="upload-global-key-btn" type="button">Upload Global Key</button>
-                <button class="btn-danger" id="clear-global-key-btn" type="button">Clear Global Key</button>
-            </div>
-            <div id="global-key-status" class="subtle"></div>
-            <hr class="section-sep">
-            <form id="add-server-form" class="add-server-form">
-                <span class="subtle form-note">Auth is password or SSH key (key takes priority). Leave one empty.</span>
-                <input type="text" id="name" placeholder="Name" required>
-                <input type="text" id="host" placeholder="Host" required>
-                <input type="number" id="port" placeholder="SSH Port" min="1" max="65535">
-                <input type="text" id="user" placeholder="User" required>
-                <input type="password" id="pass" placeholder="Password (optional)">
-                <input type="text" id="tags" placeholder="Tags (comma-separated)">
-                <label class="checkbox-inline"><input type="checkbox" id="trust-host-key" checked> Trust SSH host key now (confirm fingerprint)</label>
-                <div class="form-actions">
-                    <button class="btn-success action-left" type="submit">Add Server</button>
-                    <div class="action-right">
-                        <input class="file-input" type="file" id="key_file" accept=".pem,.key,.rsa,.ed25519">
-                        <label class="file-btn" for="key_file">Click to upload key</label>
+        <main class="dashboard-main manage-main">
+            <section class="dashboard-head fade-in" aria-label="Fleet registry summary">
+                <div>
+                    <div class="eyebrow">Fleet registry</div>
+                    <h1>Manage Servers</h1>
+                    <p class="muted">Register hosts, tune credentials, rotate keys, and review activity from the same dense operations workspace.</p>
+                </div>
+                <div class="head-meta" aria-label="Registry metadata">
+                    <span class="meta-pill">Server directory</span>
+                    <span class="meta-pill">SSH credentials</span>
+                    <span class="meta-pill">Audit trail</span>
+                </div>
+            </section>
+
+            <section class="manage-grid fade-in">
+                <article class="workspace global-key-panel">
+                    <div class="workspace-head">
+                        <div>
+                            <div class="eyebrow">Global key</div>
+                            <h2>Shared SSH access</h2>
+                        </div>
+                        <p class="muted workspace-note">Use one SSH key for servers without a per-host key.</p>
+                    </div>
+                    <div class="key-actions">
+                        <input class="file-input" type="file" id="global-key-file" accept=".pem,.key,.rsa,.ed25519">
+                        <label class="file-btn" for="global-key-file">Choose global key</label>
+                        <button class="primary-action" id="upload-global-key-btn" type="button">Upload Global Key</button>
+                        <button class="btn-danger" id="clear-global-key-btn" type="button">Clear Global Key</button>
+                    </div>
+                    <div id="global-key-status" class="muted"></div>
+                </article>
+
+                <article class="workspace add-server-panel">
+                    <div class="workspace-head">
+                        <div>
+                            <div class="eyebrow">New host</div>
+                            <h2>Add server</h2>
+                        </div>
+                        <p class="muted workspace-note">Auth is password or SSH key; a per-server key takes priority.</p>
+                    </div>
+                    <form id="add-server-form" class="add-server-form">
+                        <span class="muted form-note">Leave password and key empty only when the global SSH key should be used.</span>
+                        <input type="text" id="name" placeholder="Name" required>
+                        <input type="text" id="host" placeholder="Host" required>
+                        <input type="number" id="port" placeholder="SSH Port" min="1" max="65535">
+                        <input type="text" id="user" placeholder="User" required>
+                        <input type="password" id="pass" placeholder="Password (optional)">
+                        <input type="text" id="tags" placeholder="Tags (comma-separated)">
+                        <label class="checkbox-inline"><input type="checkbox" id="trust-host-key" checked> Trust SSH host key now (confirm fingerprint)</label>
+                        <div class="form-actions">
+                            <button class="primary-action action-left" type="submit">Add Server</button>
+                            <div class="action-right">
+                                <input class="file-input" type="file" id="key_file" accept=".pem,.key,.rsa,.ed25519">
+                                <label class="file-btn" for="key_file">Choose host key</label>
+                            </div>
+                        </div>
+                    </form>
+                </article>
+            </section>
+
+            <section class="workspace fade-in section-spaced">
+                <div class="workspace-head">
+                    <div>
+                        <div class="eyebrow">Registry table</div>
+                        <h2>Server directory</h2>
+                    </div>
+                    <p class="muted workspace-note">Search, group, edit, and delete host entries without leaving the page.</p>
+                </div>
+                <div class="control-strip">
+                    <div class="controls">
+                        <input type="text" id="search" placeholder="Search name/host/user/tags">
+                        <input type="text" id="tag-filter" placeholder="Filter tag">
+                        <select id="auth-filter" aria-label="Authentication">
+                            <option value="">All auth</option>
+                            <option value="password">Has password</option>
+                            <option value="key">Has key</option>
+                        </select>
+                        <select id="group-by" aria-label="Group by">
+                            <option value="">No grouping</option>
+                            <option value="tag">Group by tag</option>
+                            <option value="auth">Group by auth</option>
+                        </select>
+                        <select id="page-size" aria-label="Page size">
+                            <option value="25">25 per page</option>
+                            <option value="50">50 per page</option>
+                            <option value="100">100 per page</option>
+                        </select>
                     </div>
                 </div>
-            </form>
 
-            <div class="controls">
-                <input type="text" id="search" placeholder="Search name/host/user/tags">
-                <input type="text" id="tag-filter" placeholder="Filter tag">
-                <select id="auth-filter">
-                    <option value="">All auth</option>
-                    <option value="password">Has password</option>
-                    <option value="key">Has key</option>
-                </select>
-                <select id="group-by">
-                    <option value="">No grouping</option>
-                    <option value="tag">Group by tag</option>
-                    <option value="auth">Group by auth</option>
-                </select>
-                <select id="page-size">
-                    <option value="25">25 per page</option>
-                    <option value="50">50 per page</option>
-                    <option value="100">100 per page</option>
-                </select>
-            </div>
+                <div class="table-shell">
+                    <div class="table-shell-head">
+                        <div class="table-shell-title">
+                            <span class="table-shell-label">Hosts</span>
+                            <span class="table-shell-subtle">Registered SSH targets and auth posture.</span>
+                        </div>
+                        <div class="pagination">
+                            <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
+                            <span id="page-info" class="muted"></span>
+                            <button class="btn-ghost inline-btn" id="next-page">Next</button>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table id="manage-servers-table">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" data-sort-key="name">Name</th>
+                                    <th class="sortable" data-sort-key="host">Host</th>
+                                    <th class="sortable" data-sort-key="user">User</th>
+                                    <th class="sortable" data-sort-key="tags">Tags</th>
+                                    <th>Auth</th>
+                                    <th class="actions-col">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
 
-            <div class="table-wrap">
-                <table id="manage-servers-table">
-                    <thead>
-                        <tr>
-                            <th class="sortable" data-sort-key="name">Name</th>
-                            <th class="sortable" data-sort-key="host">Host</th>
-                            <th class="sortable" data-sort-key="user">User</th>
-                            <th class="sortable" data-sort-key="tags">Tags</th>
-                            <th>Auth</th>
-                            <th class="actions-col">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="pagination">
-                <button class="btn-ghost inline-btn" id="prev-page">Prev</button>
-                <span id="page-info" class="subtle"></span>
-                <button class="btn-ghost inline-btn" id="next-page">Next</button>
-            </div>
-        </section>
-
-        <section class="card fade-in section-spaced">
-            <h2>Activity History</h2>
-            <p class="subtle">Tracks who did what and when. Entries older than 90 days are auto-pruned.</p>
-            <div class="audit-controls">
-                <input type="text" id="audit-target-filter" placeholder="Target name">
-                <input type="text" id="audit-action-filter" placeholder="Action (e.g. server.create)">
-                <select id="audit-status-filter">
-                    <option value="">All statuses</option>
-                    <option value="success">Success</option>
-                    <option value="failure">Failure</option>
-                    <option value="started">Started</option>
-                    <option value="ignored">Ignored</option>
-                </select>
-                <button class="btn-ghost inline-btn" id="audit-refresh">Refresh</button>
-                <button class="btn-ghost inline-btn" id="audit-prune">Prune (90d)</button>
-            </div>
-            <div class="table-wrap">
-                <table id="audit-table">
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Actor</th>
-                            <th>Action</th>
-                            <th>Target</th>
-                            <th>Status</th>
-                            <th>Message</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
-            <div class="audit-pagination">
-                <button class="btn-ghost inline-btn" id="audit-prev-page">Prev</button>
-                <span id="audit-page-info" class="subtle"></span>
-                <button class="btn-ghost inline-btn" id="audit-next-page">Next</button>
-            </div>
-        </section>
+            <section class="workspace fade-in section-spaced">
+                <div class="workspace-head">
+                    <div>
+                        <div class="eyebrow">Activity history</div>
+                        <h2>Audit trail</h2>
+                    </div>
+                    <p class="muted workspace-note">Tracks who did what and when. Entries older than 90 days are auto-pruned.</p>
+                </div>
+                <div class="control-strip">
+                    <div class="audit-controls">
+                        <input type="text" id="audit-target-filter" placeholder="Target name">
+                        <input type="text" id="audit-action-filter" placeholder="Action (e.g. server.create)">
+                        <select id="audit-status-filter" aria-label="Audit status">
+                            <option value="">All statuses</option>
+                            <option value="success">Success</option>
+                            <option value="failure">Failure</option>
+                            <option value="started">Started</option>
+                            <option value="ignored">Ignored</option>
+                        </select>
+                        <button class="btn-ghost inline-btn" id="audit-refresh">Refresh</button>
+                        <button class="btn-ghost inline-btn" id="audit-prune">Prune (90d)</button>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <div class="table-shell-head">
+                        <div class="table-shell-title">
+                            <span class="table-shell-label">Audit events</span>
+                            <span class="table-shell-subtle">Recent registry and update actions.</span>
+                        </div>
+                        <div class="audit-pagination">
+                            <button class="btn-ghost inline-btn" id="audit-prev-page">Prev</button>
+                            <span id="audit-page-info" class="muted"></span>
+                            <button class="btn-ghost inline-btn" id="audit-next-page">Next</button>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table id="audit-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Actor</th>
+                                    <th>Action</th>
+                                    <th>Target</th>
+                                    <th>Status</th>
+                                    <th>Message</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
     </div>
 
     <div class="modal-backdrop" id="edit-modal">
         <div class="modal">
-            <h3>Edit Server</h3>
+            <div class="workspace-head">
+                <div>
+                    <div class="eyebrow">Server record</div>
+                    <h3>Edit Server</h3>
+                </div>
+            </div>
             <div class="modal-grid">
                 <div class="field">
                     <label for="edit-name">Name</label>
@@ -179,40 +243,41 @@
                     <button class="btn-danger" id="edit-clear-password">Clear Password</button>
                 </div>
                 <div class="policy-override-section full-width">
-                    <div class="subtle">Scheduled update opt-outs</div>
-                    <p class="subtle">Policies targeting this server’s tags can be disabled for this specific host.</p>
+                    <div class="eyebrow">Scheduled update opt-outs</div>
+                    <p class="muted">Policies targeting this server's tags can be disabled for this specific host.</p>
                     <div id="edit-policy-overrides" class="policy-override-list"></div>
                 </div>
                 <div class="key-section full-width">
-                    <div class="subtle">SSH key management</div>
+                    <div class="eyebrow">SSH key management</div>
                     <input class="file-input" type="file" id="edit-key" accept=".pem,.key,.rsa,.ed25519">
-                    <label class="file-btn small" for="edit-key">Click to upload key</label>
-                    <button class="btn-success" id="edit-upload-key">Upload Key</button>
+                    <label class="file-btn small" for="edit-key">Choose key</label>
+                    <button class="primary-action" id="edit-upload-key">Upload Key</button>
                     <button class="btn-danger" id="edit-clear-key">Clear Key</button>
                 </div>
                 <div class="known-host-section full-width">
-                    <div class="subtle">Known host management</div>
-                    <p class="subtle">Checks and clears known_hosts for the current host and SSH port in this form.</p>
+                    <div class="eyebrow">Known host management</div>
+                    <p class="muted">Checks and clears known_hosts for the current host and SSH port in this form.</p>
                     <button class="btn-ghost" id="edit-check-known-host" type="button">Check Known Host</button>
                     <button class="btn-danger" id="edit-clear-known-host" type="button">Clear Known Host</button>
                 </div>
-                <div id="edit-hostkey-status" class="subtle full-width" aria-live="polite"></div>
+                <div id="edit-hostkey-status" class="muted full-width" aria-live="polite"></div>
                 <div id="edit-error" class="form-error full-width" aria-live="polite"></div>
             </div>
             <div class="modal-actions">
                 <button class="btn-ghost inline-btn" id="edit-cancel">Cancel</button>
-                <button class="btn-success inline-btn" id="edit-save">Save</button>
+                <button class="primary-action inline-btn" id="edit-save">Save</button>
             </div>
         </div>
     </div>
     <div class="modal-backdrop" id="hostkey-modal">
         <div class="modal">
+            <div class="eyebrow">SSH fingerprint</div>
             <h3>Trust SSH Host Key</h3>
-            <p class="subtle">Verify this fingerprint before saving it to known_hosts.</p>
+            <p class="muted">Verify this fingerprint before saving it to known_hosts.</p>
             <pre id="hostkey-modal-details" class="hostkey-details"></pre>
             <div class="modal-actions">
                 <button class="btn-ghost inline-btn" id="hostkey-modal-cancel" type="button">Cancel</button>
-                <button class="btn-success inline-btn" id="hostkey-modal-trust" type="button">Trust Key</button>
+                <button class="primary-action inline-btn" id="hostkey-modal-trust" type="button">Trust Key</button>
             </div>
         </div>
     </div>

@@ -143,7 +143,10 @@ const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
 const updateCompleteAction = "update.complete"
-const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
+const serverFactsRefreshAction = "server.facts.refresh"
+const serverFactsOSCmd = "sh -c '. /etc/os-release 2>/dev/null; printf \"%s\\n\" \"${PRETTY_NAME:-unknown}\"'"
+const serverFactsUptimeCmd = "cat /proc/uptime"
+const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -202,6 +205,98 @@ type observabilitySummaryResponse struct {
 type observabilityCacheEntry struct {
 	summary  observabilitySummaryResponse
 	cachedAt time.Time
+}
+
+type serverFactsRecord struct {
+	ServerName     string `json:"server_name"`
+	CollectedAt    string `json:"collected_at"`
+	OSPrettyName   string `json:"os_pretty_name"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	DiskStatus     string `json:"disk_status"`
+	DiskFreeKB     int64  `json:"disk_free_kb"`
+	DiskDetails    string `json:"disk_details"`
+	AptStatus      string `json:"apt_status"`
+	AptDetails     string `json:"apt_details"`
+	RebootRequired *bool  `json:"reboot_required"`
+	RawJSON        string `json:"raw_json,omitempty"`
+}
+
+type dashboardUpdateHistory struct {
+	Status            string  `json:"status"`
+	FinishedAt        string  `json:"finished_at"`
+	FinishedAtDisplay string  `json:"finished_at_display,omitempty"`
+	DurationMS        float64 `json:"duration_ms"`
+	Message           string  `json:"message"`
+	FailureCause      string  `json:"failure_cause,omitempty"`
+}
+
+type dashboardCommandHistoryItem struct {
+	CreatedAt        string `json:"created_at"`
+	CreatedAtDisplay string `json:"created_at_display,omitempty"`
+	Action           string `json:"action"`
+	Status           string `json:"status"`
+	Message          string `json:"message"`
+	Actor            string `json:"actor"`
+}
+
+type dashboardScheduleInfo struct {
+	State               string `json:"state"`
+	PolicyName          string `json:"policy_name,omitempty"`
+	ScheduledForUTC     string `json:"scheduled_for_utc,omitempty"`
+	ScheduledForDisplay string `json:"scheduled_for_display,omitempty"`
+	Status              string `json:"status,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+	Summary             string `json:"summary,omitempty"`
+}
+
+type dashboardNoRunInfo struct {
+	Active   bool   `json:"active"`
+	Scope    string `json:"scope,omitempty"`
+	Summary  string `json:"summary"`
+	Timezone string `json:"timezone"`
+}
+
+type dashboardHealthInfo struct {
+	RebootRequired *bool  `json:"reboot_required"`
+	DiskStatus     string `json:"disk_status"`
+	DiskFreeKB     int64  `json:"disk_free_kb"`
+	DiskDetails    string `json:"disk_details"`
+	AptStatus      string `json:"apt_status"`
+	AptDetails     string `json:"apt_details"`
+	OSPrettyName   string `json:"os_pretty_name"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	CollectedAt    string `json:"collected_at"`
+	Source         string `json:"source"`
+}
+
+type dashboardRiskInfo struct {
+	Level           string   `json:"level"`
+	Summary         string   `json:"summary"`
+	PendingPackages int      `json:"pending_packages"`
+	SecurityUpdates int      `json:"security_updates"`
+	CVEs            []string `json:"cves"`
+}
+
+type dashboardServerSummary struct {
+	Name             string                        `json:"name"`
+	LastUpdate       *dashboardUpdateHistory       `json:"last_update,omitempty"`
+	LastFailedUpdate *dashboardUpdateHistory       `json:"last_failed_update,omitempty"`
+	AvgDurationMS    float64                       `json:"avg_duration_ms"`
+	DurationSamples  int                           `json:"duration_samples"`
+	NextRun          dashboardScheduleInfo         `json:"next_run"`
+	NoRun            dashboardNoRunInfo            `json:"no_run"`
+	Health           dashboardHealthInfo           `json:"health"`
+	Risk             dashboardRiskInfo             `json:"risk"`
+	CommandHistory   []dashboardCommandHistoryItem `json:"command_history"`
+}
+
+type dashboardSummaryResponse struct {
+	Window      string                   `json:"window"`
+	From        string                   `json:"from"`
+	To          string                   `json:"to"`
+	GeneratedAt string                   `json:"generated_at"`
+	Fleet       map[string]any           `json:"fleet"`
+	Servers     []dashboardServerSummary `json:"servers"`
 }
 
 type RetryPolicy struct {
@@ -614,6 +709,26 @@ func ensureSchema(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS server_facts (
+			server_name TEXT PRIMARY KEY,
+			collected_at TEXT NOT NULL,
+			os_pretty_name TEXT NOT NULL DEFAULT '',
+			uptime_seconds INTEGER NOT NULL DEFAULT 0,
+			disk_status TEXT NOT NULL DEFAULT 'unknown',
+			disk_free_kb INTEGER NOT NULL DEFAULT 0,
+			disk_details TEXT NOT NULL DEFAULT '',
+			apt_status TEXT NOT NULL DEFAULT 'unknown',
+			apt_details TEXT NOT NULL DEFAULT '',
+			reboot_required INTEGER,
+			raw_json TEXT NOT NULL DEFAULT '{}'
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_server_facts_collected_at ON server_facts (collected_at DESC)"); err != nil {
 		return err
 	}
 	if err := ensureJobSchema(db); err != nil {
@@ -1986,6 +2101,705 @@ func handleObservabilitySummary(c *gin.Context) {
 	c.JSON(http.StatusOK, summary)
 }
 
+func saveServerFacts(record serverFactsRecord) error {
+	record.ServerName = strings.TrimSpace(record.ServerName)
+	if record.ServerName == "" {
+		return errors.New("server name is required")
+	}
+	if strings.TrimSpace(record.CollectedAt) == "" {
+		record.CollectedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(record.DiskStatus) == "" {
+		record.DiskStatus = "unknown"
+	}
+	if strings.TrimSpace(record.AptStatus) == "" {
+		record.AptStatus = "unknown"
+	}
+	if strings.TrimSpace(record.RawJSON) == "" {
+		record.RawJSON = "{}"
+	}
+	var rebootValue any
+	if record.RebootRequired != nil {
+		rebootValue = boolToInt(*record.RebootRequired)
+	}
+	_, err := getDB().Exec(`
+		INSERT INTO server_facts (
+			server_name, collected_at, os_pretty_name, uptime_seconds,
+			disk_status, disk_free_kb, disk_details, apt_status, apt_details,
+			reboot_required, raw_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(server_name) DO UPDATE SET
+			collected_at = excluded.collected_at,
+			os_pretty_name = excluded.os_pretty_name,
+			uptime_seconds = excluded.uptime_seconds,
+			disk_status = excluded.disk_status,
+			disk_free_kb = excluded.disk_free_kb,
+			disk_details = excluded.disk_details,
+			apt_status = excluded.apt_status,
+			apt_details = excluded.apt_details,
+			reboot_required = excluded.reboot_required,
+			raw_json = excluded.raw_json
+	`,
+		record.ServerName,
+		record.CollectedAt,
+		record.OSPrettyName,
+		record.UptimeSeconds,
+		record.DiskStatus,
+		record.DiskFreeKB,
+		record.DiskDetails,
+		record.AptStatus,
+		record.AptDetails,
+		rebootValue,
+		record.RawJSON,
+	)
+	return err
+}
+
+func loadServerFacts() (map[string]serverFactsRecord, error) {
+	rows, err := getDB().Query(`
+		SELECT server_name, collected_at, os_pretty_name, uptime_seconds,
+		       disk_status, disk_free_kb, disk_details, apt_status, apt_details,
+		       reboot_required, raw_json
+		  FROM server_facts
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := map[string]serverFactsRecord{}
+	for rows.Next() {
+		var record serverFactsRecord
+		var reboot sql.NullInt64
+		if err := rows.Scan(
+			&record.ServerName,
+			&record.CollectedAt,
+			&record.OSPrettyName,
+			&record.UptimeSeconds,
+			&record.DiskStatus,
+			&record.DiskFreeKB,
+			&record.DiskDetails,
+			&record.AptStatus,
+			&record.AptDetails,
+			&reboot,
+			&record.RawJSON,
+		); err != nil {
+			return nil, err
+		}
+		if reboot.Valid {
+			required := reboot.Int64 != 0
+			record.RebootRequired = &required
+		}
+		records[record.ServerName] = record
+	}
+	return records, rows.Err()
+}
+
+func renameServerFactsTx(tx *sql.Tx, oldName, newName string) error {
+	if strings.TrimSpace(oldName) == "" || strings.TrimSpace(newName) == "" || oldName == newName {
+		return nil
+	}
+	_, err := tx.Exec("UPDATE server_facts SET server_name = ? WHERE server_name = ?", newName, oldName)
+	return err
+}
+
+func deleteServerFacts(name string) error {
+	_, err := getDB().Exec("DELETE FROM server_facts WHERE server_name = ?", name)
+	return err
+}
+
+func diskFreeKBFromOutput(output string) int64 {
+	minFree := int64(0)
+	for _, field := range strings.Fields(output) {
+		value, err := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
+		if err != nil {
+			continue
+		}
+		if minFree == 0 || value < minFree {
+			minFree = value
+		}
+	}
+	return minFree
+}
+
+func healthStatusFromResult(result updatePrecheckResult) string {
+	if result.Passed {
+		return "ok"
+	}
+	return "critical"
+}
+
+func parseUptimeSeconds(output string) int64 {
+	fields := strings.Fields(output)
+	if len(fields) == 0 {
+		return 0
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0
+	}
+	return int64(seconds)
+}
+
+func collectServerFactsWithConnection(server Server, client sshConnection, timeout time.Duration) serverFactsRecord {
+	record := serverFactsRecord{
+		ServerName:  server.Name,
+		CollectedAt: time.Now().UTC().Format(time.RFC3339),
+		DiskStatus:  "unknown",
+		AptStatus:   "unknown",
+		RawJSON:     "{}",
+	}
+	osOut, osErrOut, osErr := runSSHCommandWithTimeout(client, serverFactsOSCmd, nil, timeout)
+	if osErr == nil {
+		record.OSPrettyName = truncateString(osOut, 160)
+	} else {
+		record.OSPrettyName = "Unknown"
+	}
+	uptimeOut, _, uptimeErr := runSSHCommandWithTimeout(client, serverFactsUptimeCmd, nil, timeout)
+	if uptimeErr == nil {
+		record.UptimeSeconds = parseUptimeSeconds(uptimeOut)
+	}
+	diskOut, _, _ := runSSHCommandWithTimeout(client, precheckDiskSpaceCmd, nil, timeout)
+	disk := checkDiskSpace(client)
+	record.DiskStatus = healthStatusFromResult(disk)
+	record.DiskFreeKB = diskFreeKBFromOutput(diskOut)
+	record.DiskDetails = disk.Details
+	apt := checkAptHealth(client)
+	record.AptStatus = healthStatusFromResult(apt)
+	record.AptDetails = apt.Details
+	reboot := checkRebootRequired(client)
+	required := !reboot.Passed && strings.Contains(strings.ToLower(reboot.Details+" "+reboot.Output), "reboot")
+	record.RebootRequired = &required
+	raw, _ := json.Marshal(map[string]any{
+		"os_stderr":     truncateString(osErrOut, 160),
+		"os_error":      errorString(osErr),
+		"uptime_error":  errorString(uptimeErr),
+		"disk_result":   disk,
+		"apt_result":    apt,
+		"reboot_result": reboot,
+	})
+	record.RawJSON = string(raw)
+	return record
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func refreshServerFacts(server Server) (serverFactsRecord, error) {
+	authMethods, err := buildAuthMethods(server)
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	config := &ssh.ClientConfig{
+		User:            server.User,
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
+	}
+	conn, err := getDialSSHConnection()(server, config)
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	defer conn.Close()
+	record := collectServerFactsWithConnection(server, conn, loadSSHCommandTimeoutFromEnv())
+	if err := saveServerFacts(record); err != nil {
+		return serverFactsRecord{}, err
+	}
+	return record, nil
+}
+
+func handleServerFactsRefresh(c *gin.Context) {
+	name := strings.TrimSpace(c.Param("name"))
+	mu.Lock()
+	server, ok := findServerByNameLocked(name)
+	mu.Unlock()
+	if !ok {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server not found", nil)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		return
+	}
+	record, err := refreshServerFacts(server)
+	if err != nil {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Facts refresh failed", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to refresh host facts: %v", err)})
+		return
+	}
+	audit(c, serverFactsRefreshAction, "server", name, "success", "Host facts refreshed", map[string]any{
+		"collected_at":    record.CollectedAt,
+		"disk_status":     record.DiskStatus,
+		"apt_status":      record.AptStatus,
+		"reboot_required": record.RebootRequired,
+		"uptime_seconds":  record.UptimeSeconds,
+		"os_pretty_name":  record.OSPrettyName,
+	})
+	c.JSON(http.StatusOK, record)
+}
+
+func updateHealthFromResults(health *dashboardHealthInfo, results []updatePrecheckResult, source, collectedAt string) {
+	if health == nil {
+		return
+	}
+	for _, result := range results {
+		switch result.Name {
+		case "disk_space":
+			health.DiskStatus = healthStatusFromResult(result)
+			health.DiskFreeKB = diskFreeKBFromOutput(result.Output)
+			health.DiskDetails = result.Details
+			health.Source = source
+			health.CollectedAt = collectedAt
+		case "apt_health", postcheckNameAptHealth:
+			health.AptStatus = healthStatusFromResult(result)
+			health.AptDetails = result.Details
+			health.Source = source
+			health.CollectedAt = collectedAt
+		case postcheckNameRebootRequired:
+			required := !result.Passed
+			health.RebootRequired = &required
+			health.Source = source
+			health.CollectedAt = collectedAt
+		}
+	}
+}
+
+func precheckResultsFromMeta(meta map[string]any, key string) []updatePrecheckResult {
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var results []updatePrecheckResult
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil
+	}
+	return results
+}
+
+func dashboardRiskFromStatus(status *ServerStatus) dashboardRiskInfo {
+	risk := dashboardRiskInfo{Level: "unknown", Summary: "No package data", CVEs: []string{}}
+	if status == nil {
+		return risk
+	}
+	updates := status.PendingUpdates
+	risk.PendingPackages = len(updates)
+	if risk.PendingPackages == 0 && len(status.Upgradable) > 0 {
+		risk.PendingPackages = len(status.Upgradable)
+	}
+	seenCVEs := map[string]struct{}{}
+	for _, update := range updates {
+		if update.Security {
+			risk.SecurityUpdates++
+		}
+		for _, cve := range update.CVEs {
+			cve = strings.TrimSpace(cve)
+			if cve == "" {
+				continue
+			}
+			if _, ok := seenCVEs[cve]; ok {
+				continue
+			}
+			seenCVEs[cve] = struct{}{}
+			risk.CVEs = append(risk.CVEs, cve)
+		}
+	}
+	sort.Strings(risk.CVEs)
+	switch {
+	case len(risk.CVEs) > 0:
+		risk.Level = "critical"
+		risk.Summary = fmt.Sprintf("%d CVE", len(risk.CVEs))
+	case risk.SecurityUpdates > 0:
+		risk.Level = "elevated"
+		risk.Summary = fmt.Sprintf("%d security", risk.SecurityUpdates)
+	case risk.PendingPackages > 0:
+		risk.Level = "normal"
+		risk.Summary = fmt.Sprintf("%d package", risk.PendingPackages)
+	default:
+		risk.Level = "normal"
+		risk.Summary = "No CVE exposure"
+	}
+	return risk
+}
+
+func buildNoRunInfo(server Server, policies []UpdatePolicy, overrides map[int64]map[string]bool, globalBlackouts []UpdatePolicyBlackoutWindow, now time.Time) dashboardNoRunInfo {
+	loc, timezoneName := currentAppTimezone()
+	localNow := now.In(loc)
+	if blackoutApplies(localNow, globalBlackouts) {
+		return dashboardNoRunInfo{Active: true, Scope: "global", Summary: "Global no-run window active", Timezone: timezoneName}
+	}
+	for _, policy := range policies {
+		if !policyMatchesServer(policy, server, overrides) {
+			continue
+		}
+		if blackoutApplies(localNow, policy.PolicyBlackouts) {
+			return dashboardNoRunInfo{Active: true, Scope: "policy", Summary: fmt.Sprintf("%s no-run window active", policy.Name), Timezone: timezoneName}
+		}
+	}
+	return dashboardNoRunInfo{Active: false, Summary: "No no-run window active", Timezone: timezoneName}
+}
+
+type dashboardProjectedPolicyRun struct {
+	policy         UpdatePolicy
+	scheduledLocal time.Time
+	scheduledUTC   string
+}
+
+func nextPolicyOccurrenceLocal(policy UpdatePolicy, fromLocal time.Time, globalBlackouts []UpdatePolicyBlackoutWindow) (time.Time, bool) {
+	minutes, err := parseTimeLocalMinutes(policy.TimeLocal)
+	if err != nil {
+		return time.Time{}, false
+	}
+	hour := minutes / 60
+	minute := minutes % 60
+	loc := fromLocal.Location()
+	if loc == nil {
+		loc = currentAppLocation()
+	}
+	startDay := time.Date(fromLocal.Year(), fromLocal.Month(), fromLocal.Day(), 0, 0, 0, 0, loc)
+	for offset := 0; offset <= 14; offset++ {
+		day := startDay.AddDate(0, 0, offset)
+		slot := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, loc)
+		if slot.Before(fromLocal) {
+			continue
+		}
+		if !policyDueAt(policy, slot) {
+			continue
+		}
+		if blackoutApplies(slot, globalBlackouts) || blackoutApplies(slot, policy.PolicyBlackouts) {
+			continue
+		}
+		return slot, true
+	}
+	return time.Time{}, false
+}
+
+func projectedPolicyRunBefore(candidate, current dashboardProjectedPolicyRun) bool {
+	if current.scheduledUTC == "" {
+		return true
+	}
+	candidateUTC := candidate.scheduledLocal.UTC()
+	currentUTC := current.scheduledLocal.UTC()
+	if !candidateUTC.Equal(currentUTC) {
+		return candidateUTC.Before(currentUTC)
+	}
+	return comparePolicyCandidates(
+		scheduledPolicyCandidate{policy: candidate.policy, scheduledForUTC: candidate.scheduledUTC},
+		scheduledPolicyCandidate{policy: current.policy, scheduledForUTC: current.scheduledUTC},
+	)
+}
+
+func mergeProjectedNextRun(result map[string]dashboardScheduleInfo, serverName string, projected dashboardProjectedPolicyRun, loc *time.Location, timezoneName string) {
+	if projected.scheduledUTC == "" {
+		return
+	}
+	if current, exists := result[serverName]; exists {
+		currentTime, err := time.Parse(jobTimestampLayout, current.ScheduledForUTC)
+		if err == nil && !currentTime.After(projected.scheduledLocal.UTC()) {
+			return
+		}
+	}
+	display, _ := formatTimestampForAppDisplayWithTimezone(projected.scheduledUTC, loc, timezoneName)
+	result[serverName] = dashboardScheduleInfo{
+		State:               "scheduled",
+		PolicyName:          projected.policy.Name,
+		ScheduledForUTC:     projected.scheduledUTC,
+		ScheduledForDisplay: display,
+		Status:              "scheduled",
+		Summary:             "Scheduled run pending",
+	}
+}
+
+func buildNextRunMap(now time.Time, serversSnapshot []Server, policies []UpdatePolicy, overrides map[int64]map[string]bool, globalBlackouts []UpdatePolicyBlackoutWindow) map[string]dashboardScheduleInfo {
+	runs, err := listUpdatePolicyRuns(500)
+	if err != nil {
+		return map[string]dashboardScheduleInfo{}
+	}
+	loc, timezoneName := currentAppTimezone()
+	result := map[string]dashboardScheduleInfo{}
+	cutoff := now.UTC().Truncate(time.Minute)
+	for _, run := range runs {
+		scheduled, err := time.Parse(jobTimestampLayout, strings.TrimSpace(run.ScheduledForUTC))
+		if err != nil {
+			scheduled, err = time.Parse(time.RFC3339, strings.TrimSpace(run.ScheduledForUTC))
+		}
+		if err != nil || scheduled.Before(cutoff) {
+			continue
+		}
+		current, exists := result[run.ServerName]
+		if exists {
+			currentTime, currentErr := time.Parse(jobTimestampLayout, current.ScheduledForUTC)
+			if currentErr == nil && !scheduled.Before(currentTime) {
+				continue
+			}
+		}
+		display, _ := formatTimestampForAppDisplayWithTimezone(run.ScheduledForUTC, loc, timezoneName)
+		result[run.ServerName] = dashboardScheduleInfo{
+			State:               "scheduled",
+			PolicyName:          run.PolicyName,
+			ScheduledForUTC:     run.ScheduledForUTC,
+			ScheduledForDisplay: display,
+			Status:              run.Status,
+			Reason:              run.Reason,
+			Summary:             run.Summary,
+		}
+	}
+	localNow := now.In(loc).Truncate(time.Minute)
+	projectedByServer := map[string]dashboardProjectedPolicyRun{}
+	for _, server := range serversSnapshot {
+		for _, policy := range policies {
+			if !policyMatchesServer(policy, server, overrides) {
+				continue
+			}
+			slotLocal, ok := nextPolicyOccurrenceLocal(policy, localNow, globalBlackouts)
+			if !ok {
+				continue
+			}
+			projected := dashboardProjectedPolicyRun{
+				policy:         policy,
+				scheduledLocal: slotLocal,
+				scheduledUTC:   canonicalScheduledForUTC(slotLocal),
+			}
+			if projectedPolicyRunBefore(projected, projectedByServer[server.Name]) {
+				projectedByServer[server.Name] = projected
+			}
+		}
+	}
+	for serverName, projected := range projectedByServer {
+		mergeProjectedNextRun(result, serverName, projected, loc, timezoneName)
+	}
+	return result
+}
+
+func defaultScheduleInfo() dashboardScheduleInfo {
+	return dashboardScheduleInfo{State: "none", Summary: "No scheduled run"}
+}
+
+func buildDashboardSummary(rawWindow string, now time.Time) (dashboardSummaryResponse, error) {
+	window, span, err := parseObservabilityWindow(rawWindow)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	to := now.UTC()
+	from := to.Add(-span)
+	response := dashboardSummaryResponse{
+		Window:      window,
+		From:        from.Format(time.RFC3339),
+		To:          to.Format(time.RFC3339),
+		GeneratedAt: to.Format(time.RFC3339),
+		Fleet:       map[string]any{},
+		Servers:     []dashboardServerSummary{},
+	}
+
+	statusByName := map[string]*ServerStatus{}
+	mu.Lock()
+	serversSnapshot := cloneServers(servers)
+	for _, server := range serversSnapshot {
+		if status := statusMap[server.Name]; status != nil {
+			copyStatus := *status
+			copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+			copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
+			copyStatus.Tags = append([]string(nil), status.Tags...)
+			statusByName[server.Name] = &copyStatus
+		}
+	}
+	mu.Unlock()
+
+	facts, err := loadServerFacts()
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	policies, _ := listUpdatePolicies()
+	overrides, _ := loadAllUpdatePolicyOverrides()
+	globalBlackouts, _ := loadGlobalUpdatePolicyBlackouts()
+	nextRuns := buildNextRunMap(now, serversSnapshot, policies, overrides, globalBlackouts)
+	loc, timezoneName := currentAppTimezone()
+
+	type updateAgg struct {
+		lastSuccess *dashboardUpdateHistory
+		lastFailure *dashboardUpdateHistory
+		meta        map[string]any
+		metaAt      string
+		durationSum float64
+		samples     int
+	}
+	updateByServer := map[string]*updateAgg{}
+	rows, err := getDB().Query(
+		`SELECT created_at, target_name, status, message, meta_json
+		   FROM audit_events
+		  WHERE action = ? AND target_type = 'server' AND created_at >= ? AND created_at <= ?
+		  ORDER BY created_at DESC, id DESC`,
+		updateCompleteAction,
+		from.Format(time.RFC3339),
+		to.Format(time.RFC3339),
+	)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	for rows.Next() {
+		var createdAt, targetName, status, message, metaJSON string
+		if err := rows.Scan(&createdAt, &targetName, &status, &message, &metaJSON); err != nil {
+			rows.Close()
+			return dashboardSummaryResponse{}, err
+		}
+		agg := updateByServer[targetName]
+		if agg == nil {
+			agg = &updateAgg{}
+			updateByServer[targetName] = agg
+		}
+		meta := map[string]any{}
+		metaValid := false
+		if strings.TrimSpace(metaJSON) != "" {
+			if err := json.Unmarshal([]byte(metaJSON), &meta); err == nil {
+				metaValid = true
+			}
+		}
+		duration, hasDuration := metaDurationMS(meta)
+		if hasDuration {
+			agg.durationSum += duration
+			agg.samples++
+		}
+		display, _ := formatTimestampForAppDisplayWithTimezone(createdAt, loc, timezoneName)
+		item := &dashboardUpdateHistory{
+			Status:            strings.ToLower(strings.TrimSpace(status)),
+			FinishedAt:        createdAt,
+			FinishedAtDisplay: display,
+			DurationMS:        duration,
+			Message:           message,
+		}
+		if item.Status == "failure" {
+			item.FailureCause = failureCauseFromMeta(meta, metaValid)
+			if agg.lastFailure == nil {
+				agg.lastFailure = item
+			}
+		}
+		if item.Status == "success" && agg.lastSuccess == nil {
+			agg.lastSuccess = item
+		}
+		if agg.meta == nil && metaValid {
+			agg.meta = meta
+			agg.metaAt = createdAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dashboardSummaryResponse{}, err
+	}
+	rows.Close()
+
+	commandHistory := map[string][]dashboardCommandHistoryItem{}
+	commandRows, err := getDB().Query(
+		`SELECT created_at, target_name, action, status, message, actor
+		   FROM audit_events
+		  WHERE target_type = 'server' AND created_at >= ? AND created_at <= ?
+		  ORDER BY created_at DESC, id DESC
+		  LIMIT 400`,
+		from.Format(time.RFC3339),
+		to.Format(time.RFC3339),
+	)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	for commandRows.Next() {
+		var item dashboardCommandHistoryItem
+		var targetName string
+		if err := commandRows.Scan(&item.CreatedAt, &targetName, &item.Action, &item.Status, &item.Message, &item.Actor); err != nil {
+			commandRows.Close()
+			return dashboardSummaryResponse{}, err
+		}
+		if len(commandHistory[targetName]) >= 8 {
+			continue
+		}
+		item.CreatedAtDisplay, _ = formatTimestampForAppDisplayWithTimezone(item.CreatedAt, loc, timezoneName)
+		commandHistory[targetName] = append(commandHistory[targetName], item)
+	}
+	if err := commandRows.Err(); err != nil {
+		commandRows.Close()
+		return dashboardSummaryResponse{}, err
+	}
+	commandRows.Close()
+
+	fleetReboot := 0
+	fleetStaleFacts := 0
+	for _, server := range serversSnapshot {
+		status := statusByName[server.Name]
+		fact := facts[server.Name]
+		health := dashboardHealthInfo{
+			DiskStatus:    "unknown",
+			AptStatus:     "unknown",
+			OSPrettyName:  fact.OSPrettyName,
+			UptimeSeconds: fact.UptimeSeconds,
+			CollectedAt:   fact.CollectedAt,
+			Source:        "facts",
+		}
+		if fact.ServerName != "" {
+			health.RebootRequired = fact.RebootRequired
+			health.DiskStatus = fact.DiskStatus
+			health.DiskFreeKB = fact.DiskFreeKB
+			health.DiskDetails = fact.DiskDetails
+			health.AptStatus = fact.AptStatus
+			health.AptDetails = fact.AptDetails
+		} else {
+			health.Source = "unknown"
+			fleetStaleFacts++
+		}
+		agg := updateByServer[server.Name]
+		if agg != nil && agg.meta != nil {
+			updateHealthFromResults(&health, precheckResultsFromMeta(agg.meta, "precheck_results"), "audit", agg.metaAt)
+			updateHealthFromResults(&health, precheckResultsFromMeta(agg.meta, "postcheck_results"), "audit", agg.metaAt)
+		}
+		if health.RebootRequired != nil && *health.RebootRequired {
+			fleetReboot++
+		}
+		nextRun := nextRuns[server.Name]
+		if nextRun.State == "" {
+			nextRun = defaultScheduleInfo()
+		}
+		serverSummary := dashboardServerSummary{
+			Name:           server.Name,
+			NextRun:        nextRun,
+			NoRun:          buildNoRunInfo(server, policies, overrides, globalBlackouts, now),
+			Health:         health,
+			Risk:           dashboardRiskFromStatus(status),
+			CommandHistory: commandHistory[server.Name],
+		}
+		if agg != nil {
+			serverSummary.LastUpdate = agg.lastSuccess
+			serverSummary.LastFailedUpdate = agg.lastFailure
+			serverSummary.DurationSamples = agg.samples
+			if agg.samples > 0 {
+				serverSummary.AvgDurationMS = agg.durationSum / float64(agg.samples)
+			}
+		}
+		response.Servers = append(response.Servers, serverSummary)
+	}
+	sort.Slice(response.Servers, func(i, j int) bool { return response.Servers[i].Name < response.Servers[j].Name })
+	response.Fleet["hosts_needing_reboot"] = fleetReboot
+	response.Fleet["stale_facts"] = fleetStaleFacts
+	return response, nil
+}
+
+func handleDashboardSummary(c *gin.Context) {
+	summary, err := buildDashboardSummary(c.Query("window"), time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, errInvalidWindow) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
+			return
+		}
+		log.Printf("handleDashboardSummary: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build dashboard summary"})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
 func prometheusEscapeLabel(v string) string {
 	value := strings.ReplaceAll(v, `\`, `\\`)
 	value = strings.ReplaceAll(value, `"`, `\"`)
@@ -3017,6 +3831,16 @@ func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]a
 	}
 }
 
+func (r *withActorRunner) refreshFactsAfterSuccessfulUpdate() {
+	if r == nil || r.client == nil {
+		return
+	}
+	record := collectServerFactsWithConnection(r.server, r.client, r.commandTimeout)
+	if err := saveServerFacts(record); err != nil {
+		log.Printf("failed to refresh facts after update for %q: %v", r.server.Name, err)
+	}
+}
+
 func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
 	runUpdateJobWithActor(server, actor, clientIP, policy, "")
 }
@@ -3154,6 +3978,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					status.PendingUpdates = nil
 					status.Logs = logs + "\nNo packages to upgrade."
 				})
+				r.refreshFactsAfterSuccessfulUpdate()
 				return
 			}
 
@@ -3259,6 +4084,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					status.PendingUpdates = nil
 					status.Logs += "\nApproval received: security-only upgrade.\nNo security upgrades detected in pending package set; skipped upgrade."
 				})
+				r.refreshFactsAfterSuccessfulUpdate()
 				return
 			}
 
@@ -3320,6 +4146,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					status.PendingUpdates = nil
 					status.Logs = logs + "\nUpgrade completed."
 				})
+				r.refreshFactsAfterSuccessfulUpdate()
 				return
 			}
 
@@ -3369,6 +4196,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 					status.PendingUpdates = nil
 					status.Logs = finalLogs + fmt.Sprintf("\nUpgrade completed with %d post-check warning(s).", postcheckSummary.Warnings)
 				})
+				r.refreshFactsAfterSuccessfulUpdate()
 				return
 			}
 
@@ -3378,6 +4206,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 				status.PendingUpdates = nil
 				status.Logs = finalLogs + "\nUpgrade completed.\nPost-update health checks passed."
 			})
+			r.refreshFactsAfterSuccessfulUpdate()
 		},
 	)
 }
@@ -4815,7 +5644,10 @@ func setupRouter() (*gin.Engine, error) {
 					oldServerName := name
 					newServerName := updatedServer.Name
 					txHook = func(tx *sql.Tx) error {
-						return renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName)
+						if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
+							return err
+						}
+						return renameServerFactsTx(tx, oldServerName, newServerName)
 					}
 				}
 				if err := saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, txHook); err != nil {
@@ -4844,7 +5676,11 @@ func setupRouter() (*gin.Engine, error) {
 			if s.Name == name {
 				servers = append(servers[:i], servers[i+1:]...)
 				delete(statusMap, name)
-				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
+				txHook := func(tx *sql.Tx) error {
+					_, err := tx.Exec("DELETE FROM server_facts WHERE server_name = ?", name)
+					return err
+				}
+				if err := saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, txHook); err != nil {
 					mu.Unlock()
 					audit(c, "server.delete", "server", name, "failure", "Failed to persist deletion", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
@@ -5016,6 +5852,8 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/api/audit-events", handleAuditEvents)
 	r.GET("/api/observability/summary", handleObservabilitySummary)
+	r.GET("/api/dashboard/summary", handleDashboardSummary)
+	r.POST("/api/servers/:name/facts/refresh", handleServerFactsRefresh)
 
 	r.POST("/api/audit-events/prune", func(c *gin.Context) {
 		if err := pruneAuditEvents(auditRetentionDays); err != nil {

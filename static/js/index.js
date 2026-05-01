@@ -2,6 +2,15 @@ const LOG_BOTTOM_THRESHOLD = 20;
         let sortKey = "name";
         let sortDir = "asc";
         let allServers = [];
+        let selectedServerName = "";
+        let lastSuccessfulSyncAt = null;
+        let lastFetchError = null;
+        let recentActivity = [];
+        let observabilitySummary = null;
+        let policySummary = null;
+        let dashboardSummary = null;
+        let dashboardByServer = new Map();
+        let globalKeyAvailable = false;
         let page = 1;
         let selectedServers = new Set();
         let hoveredName = null;
@@ -16,26 +25,106 @@ const LOG_BOTTOM_THRESHOLD = 20;
         let passwordResolve = null;
         let passwordReject = null;
         let suppressSortClickUntil = 0;
-        const columnResizeStorageKey = "simplelinuxupdater.statusTableColWidths.v5";
+        const columnResizeStorageKey = "simplelinuxupdater.statusTableColWidths.v8";
+        const dashboardFilterStorageKey = "simplelinuxupdater.dashboard.filters.v1";
         const defaultColumnWidths = Object.freeze({
-            name: 220,
-            status: 120,
-            actions: 500
+            name: 154,
+            status: 126,
+            actions: 312
         });
         const minColumnWidths = Object.freeze({
-            name: 140,
-            status: 96,
-            actions: 420
+            name: 120,
+            status: 110,
+            actions: 260
         });
         const maxColumnWidths = Object.freeze({
-            name: 520,
-            status: 180,
-            actions: 760
+            name: 240,
+            status: 170,
+            actions: 420
         });
         const allowedStatuses = new Set([
             "idle", "updating", "pending_approval", "approved", "cancelled",
-            "upgrading", "autoremove", "sudoers", "done", "error"
+            "upgrading", "autoremove", "sudoers", "done", "error", "success",
+            "failure", "failed", "started", "ignored", "running", "queued", "skipped"
         ]);
+        const activeStatuses = new Set(["updating", "upgrading", "autoremove", "sudoers"]);
+        const nonFailedStatuses = new Set(["idle", "updating", "pending_approval", "approved", "upgrading", "autoremove", "sudoers", "done"]);
+
+        function setText(id, value) {
+            const el = document.getElementById(id);
+            if (el) {
+                el.textContent = value;
+            }
+        }
+
+        function pluralize(count, singular, plural = `${singular}s`) {
+            return `${count} ${count === 1 ? singular : plural}`;
+        }
+
+        function formatDuration(ms) {
+            const value = Number(ms || 0);
+            if (!Number.isFinite(value) || value <= 0) return "--";
+            if (value < 1000) return `${Math.round(value)}ms`;
+            const seconds = value / 1000;
+            if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+            const minutes = Math.floor(seconds / 60);
+            const remainder = Math.round(seconds % 60);
+            return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`;
+        }
+
+        function formatDiskFree(kb) {
+            const value = Number(kb || 0);
+            if (!Number.isFinite(value) || value <= 0) return "--";
+            const gib = value / 1024 / 1024;
+            if (gib >= 1) return `${gib.toFixed(gib >= 10 ? 0 : 1)} GiB`;
+            return `${Math.round(value / 1024)} MiB`;
+        }
+
+        function formatUptime(seconds) {
+            const value = Number(seconds || 0);
+            if (!Number.isFinite(value) || value <= 0) return "--";
+            const days = Math.floor(value / 86400);
+            if (days > 0) return `${days}d`;
+            const hours = Math.floor(value / 3600);
+            if (hours > 0) return `${hours}h`;
+            return `${Math.floor(value / 60)}m`;
+        }
+
+        function statusLabel(value) {
+            return String(value || "unknown").replace(/_/g, " ");
+        }
+
+        function formatRelativeTime(date) {
+            if (!date) return "Waiting for sync";
+            const seconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+            if (seconds < 5) return "Synced just now";
+            if (seconds < 60) return `Synced ${seconds}s ago`;
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `Synced ${minutes}m ago`;
+            return `Synced ${Math.floor(minutes / 60)}h ago`;
+        }
+
+        function formatRelativeTimestamp(raw, empty = "--") {
+            if (!raw) return empty;
+            const parsed = new Date(raw);
+            if (Number.isNaN(parsed.getTime())) return raw;
+            const seconds = Math.max(0, Math.round((Date.now() - parsed.getTime()) / 1000));
+            if (seconds < 60) return "just now";
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `${minutes}m ago`;
+            const hours = Math.floor(minutes / 60);
+            if (hours < 48) return `${hours}h ago`;
+            return `${Math.floor(hours / 24)}d ago`;
+        }
+
+        function isFailedServer(server) {
+            return server?.status === "error";
+        }
+
+        function isReachableServer(server) {
+            const status = String(server?.status || "").toLowerCase();
+            return nonFailedStatuses.has(status) || (status && status !== "error");
+        }
 
         function safeStatusClass(value) {
             const normalized = String(value ?? "").toLowerCase();
@@ -100,6 +189,112 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 total,
                 security: totalFromPending > 0 ? securityFromPending : null
             };
+        }
+
+        function getPendingPackageCount(server) {
+            return getPendingApprovalCounts(server).total;
+        }
+
+        function getSecurityUpdateCount(server) {
+            const updates = Array.isArray(server?.pending_updates) ? server.pending_updates : [];
+            if (updates.length > 0) {
+                return updates.filter(update => !!update?.security).length;
+            }
+            return 0;
+        }
+
+        function getRiskLabel(server) {
+            const intelligence = getServerIntelligence(server?.name);
+            if (intelligence?.risk?.summary) return intelligence.risk.summary;
+            const updates = Array.isArray(server?.pending_updates) ? server.pending_updates : [];
+            const cveCount = updates.reduce((sum, update) => sum + (Array.isArray(update?.cves) ? update.cves.length : 0), 0);
+            const securityCount = getSecurityUpdateCount(server);
+            if (cveCount > 0) return `${cveCount} CVE`;
+            if (securityCount > 0) return `${securityCount} security`;
+            if (getPendingPackageCount(server) > 0) return "Package updates";
+            return "Normal";
+        }
+
+        function getRiskLevel(server) {
+            return String(getServerIntelligence(server?.name)?.risk?.level || "normal").toLowerCase();
+        }
+
+        function getServerIntelligence(name) {
+            if (!name) return null;
+            return dashboardByServer.get(name) || null;
+        }
+
+        function hasEffectiveKey(server) {
+            return !!server?.has_key || (!!globalKeyAvailable && !server?.has_key);
+        }
+
+        function usesGlobalKey(server) {
+            return !!globalKeyAvailable && !server?.has_key;
+        }
+
+        function getAuthLabel(server) {
+            if (server?.has_key && server?.has_password) return "Server key + password";
+            if (usesGlobalKey(server) && server?.has_password) return "Global SSH key + password";
+            if (server?.has_key) return "Server key";
+            if (usesGlobalKey(server)) return "Global SSH key";
+            if (server?.has_password) return "Password";
+            return "Missing";
+        }
+
+        function getLatestLogLines(server, limit = 5) {
+            const lines = String(server?.logs || "")
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean);
+            return lines.slice(-limit);
+        }
+
+        function getAuthPostureMetrics(servers) {
+            const withKey = servers.filter(hasEffectiveKey).length;
+            const withServerKey = servers.filter(server => !!server.has_key).length;
+            const withGlobalKey = servers.filter(usesGlobalKey).length;
+            const withPassword = servers.filter(server => !!server.has_password).length;
+            const missing = servers.filter(server => !hasEffectiveKey(server) && !server.has_password).length;
+            const mixed = servers.filter(server => hasEffectiveKey(server) && !!server.has_password).length;
+
+            let label = "--";
+            if (servers.length === 0) {
+                label = "--";
+            } else if (missing > 0) {
+                label = "Gaps";
+            } else if (mixed > 0 || (withKey > 0 && withPassword > 0)) {
+                label = "Mixed";
+            } else if (withKey > 0) {
+                label = "Key";
+            } else if (withPassword > 0) {
+                label = "Password";
+            }
+
+            return { label, withKey, withServerKey, withGlobalKey, withPassword, missing };
+        }
+
+        function renderDashboardMetrics() {
+            const total = allServers.length;
+            const reachable = allServers.filter(isReachableServer).length;
+            const pending = allServers.filter(server => server.status === "pending_approval").length;
+            const active = allServers.filter(server => activeStatuses.has(server.status)).length;
+            const failed = allServers.filter(server => server.status === "error").length;
+            const pendingPackages = allServers.reduce((sum, server) => sum + getPendingPackageCount(server), 0);
+            const securityUpdates = allServers.reduce((sum, server) => sum + getSecurityUpdateCount(server), 0);
+            const staleFacts = Number(dashboardSummary?.fleet?.stale_facts || 0);
+            const auth = getAuthPostureMetrics(allServers);
+
+            setText("metric-total-hosts", String(total));
+            setText("metric-total-note", total === 0 ? "No servers loaded" : `${pluralize(total, "host")} monitored`);
+            setText("metric-reachable-hosts", String(reachable));
+            setText("metric-pending-approvals", String(pending));
+            setText("metric-active-runs", String(active));
+            setText("metric-failed-hosts", String(failed));
+            setText("metric-pending-packages", String(pendingPackages));
+            setText("metric-security-updates", String(securityUpdates));
+            setText("metric-stale-facts", String(staleFacts));
+            setText("metric-auth-posture", auth.label);
+            setText("metric-auth-note", `${auth.withServerKey} server key · ${auth.withGlobalKey} global SSH key · ${auth.withPassword} password · ${auth.missing} missing`);
         }
 
         function renderPendingUpdatesHtml(server, includeHeading = true) {
@@ -179,6 +374,333 @@ const LOG_BOTTOM_THRESHOLD = 20;
             `;
         }
 
+        function renderSyncState() {
+            const pollingEl = document.getElementById('polling-state-label');
+            const lastSyncEl = document.getElementById('last-sync-label');
+            if (pollingEl) {
+                pollingEl.textContent = lastFetchError ? "Polling degraded" : "Live polling 2s";
+                pollingEl.classList.toggle('warning', !!lastFetchError);
+                pollingEl.classList.toggle('live', !lastFetchError);
+            }
+            if (lastSyncEl) {
+                lastSyncEl.textContent = lastFetchError
+                    ? `Last sync error: ${lastFetchError.message || "unknown"}`
+                    : formatRelativeTime(lastSuccessfulSyncAt);
+                lastSyncEl.classList.toggle('warning', !!lastFetchError);
+            }
+        }
+
+        function miniEmpty(text) {
+            return `<p class="empty-state">${escapeHtml(text)}</p>`;
+        }
+
+        function renderServerTags(server) {
+            const tags = Array.isArray(server?.tags) ? server.tags.filter(Boolean) : [];
+            if (tags.length === 0) return `<span class="chip muted-chip">untagged</span>`;
+            return tags.map(tag => `<span class="chip">${escapeHtml(tag)}</span>`).join("");
+        }
+
+        function renderMiniServerList(id, servers, emptyText, options = {}) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            if (!Array.isArray(servers) || servers.length === 0) {
+                el.innerHTML = miniEmpty(emptyText);
+                return;
+            }
+            el.innerHTML = servers.slice(0, options.limit || 5).map(server => {
+                const safeName = escapeHtml(server.name || "");
+                const safeDataName = escapeHtml(server.name || "");
+                const status = statusLabel(server.status);
+                const risk = getRiskLabel(server);
+                const action = options.action || "open-drawer";
+                const actionLabel = options.actionLabel || "Logs";
+                const actionTab = options.actionTab || "logs";
+                return `
+                    <div class="mini-row">
+                        <button type="button" class="mini-row-main" data-select-server="${safeDataName}">
+                            <strong>${safeName || "Unnamed host"}</strong>
+                            <span>${escapeHtml(status)} · ${escapeHtml(risk)}</span>
+                        </button>
+                        <button type="button" class="mini-action" data-action="${action}" data-name="${safeDataName}" data-tab="${actionTab}">${actionLabel}</button>
+                    </div>
+                `;
+            }).join("");
+        }
+
+        function renderTagSummary() {
+            const el = document.getElementById('tag-summary');
+            if (!el) return;
+            const counts = new Map();
+            allServers.forEach(server => {
+                const tags = Array.isArray(server.tags) && server.tags.length ? server.tags : ["untagged"];
+                tags.forEach(tag => counts.set(tag, (counts.get(tag) || 0) + 1));
+            });
+            const entries = Array.from(counts.entries()).sort((a, b) => {
+                if (b[1] === a[1]) return a[0].localeCompare(b[0]);
+                return b[1] - a[1];
+            });
+            if (entries.length === 0) {
+                el.innerHTML = miniEmpty("No tags yet.");
+                return;
+            }
+            el.innerHTML = entries.slice(0, 10).map(([tag, count]) => (
+                `<span class="chip">${escapeHtml(tag)} <strong>${count}</strong></span>`
+            )).join("");
+        }
+
+        function formatActivityTime(evt) {
+            if (window.formatAppTimestamp) {
+                const formatted = window.formatAppTimestamp(evt?.created_at, { titleUTC: true, preformattedPrimary: evt?.created_at_display });
+                return formatted.primary || evt?.created_at || "";
+            }
+            return evt?.created_at_display || evt?.created_at || "";
+        }
+
+        function renderRecentActivity() {
+            const el = document.getElementById('recent-activity');
+            if (!el) return;
+            if (!Array.isArray(recentActivity) || recentActivity.length === 0) {
+                el.innerHTML = miniEmpty("No recent activity.");
+                return;
+            }
+            el.innerHTML = recentActivity.slice(0, 8).map(evt => {
+                const status = String(evt.status || "unknown").toLowerCase();
+                const statusClass = safeStatusClass(status === "failure" ? "error" : status);
+                const target = [evt.target_type, evt.target_name].filter(Boolean).join(": ");
+                return `
+                    <div class="activity-row">
+                        <span class="status-pill status-${statusClass}">${escapeHtml(status || "unknown")}</span>
+                        <div>
+                            <strong>${escapeHtml(evt.action || "activity")}</strong>
+                            <span>${escapeHtml(target || evt.message || "system")} · ${escapeHtml(formatActivityTime(evt))}</span>
+                        </div>
+                    </div>
+                `;
+            }).join("");
+        }
+
+        function renderIntelligenceLists() {
+            const rebootHosts = allServers.filter(server => getServerIntelligence(server.name)?.health?.reboot_required === true);
+            const riskHosts = allServers.filter(server => {
+                const level = getRiskLevel(server);
+                return level === "critical" || level === "elevated";
+            });
+            setText("reboot-required-count", String(rebootHosts.length));
+            setText("risk-exposure-count", String(riskHosts.length));
+            renderMiniServerList("reboot-required-panel", rebootHosts, "No reboot required.", { action: "open-drawer", actionLabel: "Logs" });
+            renderMiniServerList("risk-exposure-panel", riskHosts, "No CVE exposure.", { action: "open-drawer", actionLabel: "Review", actionTab: "pending" });
+            renderCommandHistoryPanel();
+        }
+
+        function renderCommandHistoryPanel() {
+            const el = document.getElementById('command-history-panel');
+            if (!el) return;
+            const intelligence = getServerIntelligence(selectedServerName);
+            const history = Array.isArray(intelligence?.command_history) ? intelligence.command_history : [];
+            setText("command-history-count", String(history.length));
+            if (history.length === 0) {
+                el.innerHTML = miniEmpty("No command history.");
+                return;
+            }
+            el.innerHTML = history.slice(0, 8).map(item => {
+                const status = String(item.status || "unknown").toLowerCase();
+                const statusClass = safeStatusClass(status === "failure" ? "error" : status);
+                return `
+                    <div class="activity-row">
+                        <span class="status-pill status-${statusClass}">${escapeHtml(status || "unknown")}</span>
+                        <div>
+                            <strong>${escapeHtml(item.action || "command")}</strong>
+                            <span>${escapeHtml(item.message || selectedServerName || "server")} · ${escapeHtml(item.created_at_display || formatRelativeTimestamp(item.created_at))}</span>
+                        </div>
+                    </div>
+                `;
+            }).join("");
+        }
+
+        function renderSummaryBadges() {
+            const policyEl = document.getElementById('policy-summary-label');
+            if (policyEl) {
+                const count = Array.isArray(policySummary) ? policySummary.length : null;
+                policyEl.textContent = count === null ? "Policies --" : `Policies ${count}`;
+            }
+            const obsEl = document.getElementById('observability-summary-label');
+            if (obsEl) {
+                const total = Number(observabilitySummary?.totals?.updates_total || 0);
+                const success = Number(observabilitySummary?.totals?.success_rate_pct || 0);
+                obsEl.textContent = total > 0 ? `7d ${success.toFixed(0)}%` : "7d no runs";
+            }
+        }
+
+        function renderSelectedHostPanel() {
+            const panel = document.getElementById('selected-host-panel');
+            const title = document.getElementById('selected-host-title');
+            const subtitle = document.getElementById('selected-host-subtitle');
+            if (!panel || !title || !subtitle) return;
+            const server = getServerByName(selectedServerName);
+            if (!server) {
+                title.textContent = "No host selected";
+                subtitle.textContent = "Select a table row to inspect host details.";
+                panel.innerHTML = miniEmpty("No host selected.");
+                return;
+            }
+            const safeName = escapeHtml(server.name || "");
+            const safeDataName = escapeHtml(server.name || "");
+            const safeStatus = safeStatusClass(server.status);
+            const pendingCount = getPendingPackageCount(server);
+            const securityCount = getSecurityUpdateCount(server);
+            const latestLogs = getLatestLogLines(server, 5);
+            const intelligence = getServerIntelligence(server.name);
+            const health = intelligence?.health || {};
+            const nextRun = intelligence?.next_run || {};
+            const noRun = intelligence?.no_run || {};
+            const lastUpdate = intelligence?.last_update;
+            const lastFailed = intelligence?.last_failed_update;
+            const rebootText = health.reboot_required === true ? "Required" : (health.reboot_required === false ? "Not required" : "Unknown");
+            const factsAge = health.collected_at ? formatRelativeTimestamp(health.collected_at, "Facts not collected") : "Facts not collected";
+            title.textContent = server.name || "Selected host";
+            subtitle.textContent = `${server.user || "user"}@${server.host || "host"}:${server.port || 22}`;
+            panel.innerHTML = `
+                <div class="selected-status-row">
+                    <span class="status-pill status-${safeStatus}">${escapeHtml(statusLabel(server.status))}</span>
+                    <span class="risk-chip risk-${escapeHtml(getRiskLevel(server))}">${escapeHtml(getRiskLabel(server))}</span>
+                </div>
+                <dl class="host-facts">
+                    <div><dt>Host</dt><dd>${escapeHtml(server.host || "-")}</dd></div>
+                    <div><dt>User</dt><dd>${escapeHtml(server.user || "-")}</dd></div>
+                    <div><dt>Port</dt><dd>${escapeHtml(String(server.port || 22))}</dd></div>
+                    <div><dt>Auth</dt><dd>${escapeHtml(getAuthLabel(server))}</dd></div>
+                    <div><dt>Packages</dt><dd>${pendingCount} pending · ${securityCount} security</dd></div>
+                    <div><dt>OS</dt><dd>${escapeHtml(health.os_pretty_name || "Facts not collected")}</dd></div>
+                    <div><dt>Uptime</dt><dd>${escapeHtml(formatUptime(health.uptime_seconds))}</dd></div>
+                    <div><dt>Last update</dt><dd>${escapeHtml(lastUpdate ? `${formatRelativeTimestamp(lastUpdate.finished_at)} · ${formatDuration(lastUpdate.duration_ms)}` : "No update history")}</dd></div>
+                    <div><dt>Avg duration</dt><dd>${escapeHtml(intelligence?.duration_samples ? formatDuration(intelligence.avg_duration_ms) : "No samples")}</dd></div>
+                    <div><dt>Last failure</dt><dd>${escapeHtml(lastFailed ? `${formatRelativeTimestamp(lastFailed.finished_at)} · ${lastFailed.failure_cause || "failure"}` : "No failed update")}</dd></div>
+                    <div><dt>Next run</dt><dd>${escapeHtml(nextRun.state === "scheduled" ? `${nextRun.policy_name || "Policy"} · ${nextRun.scheduled_for_display || nextRun.scheduled_for_utc}` : "No scheduled run")}</dd></div>
+                    <div><dt>No-run</dt><dd>${escapeHtml(noRun.summary || "No no-run window active")}</dd></div>
+                    <div><dt>Reboot</dt><dd>${escapeHtml(rebootText)}</dd></div>
+                    <div><dt>Disk</dt><dd>${escapeHtml(`${health.disk_status || "unknown"} · ${formatDiskFree(health.disk_free_kb)}`)}</dd></div>
+                    <div><dt>APT</dt><dd>${escapeHtml(health.apt_status || "unknown")}</dd></div>
+                    <div><dt>Facts</dt><dd>${escapeHtml(factsAge)}</dd></div>
+                    <div><dt>Tags</dt><dd><div class="chip-list">${renderServerTags(server)}</div></dd></div>
+                </dl>
+                <div class="inspector-actions">
+                    <button type="button" class="inline-btn primary-action" data-action="update-server" data-name="${safeDataName}">Update</button>
+                    <button type="button" class="inline-btn" data-action="run-autoremove" data-name="${safeDataName}">Autoremove</button>
+                    <button type="button" class="inline-btn" data-action="refresh-facts" data-name="${safeDataName}">Refresh facts</button>
+                    <button type="button" class="inline-btn btn-ghost" data-action="open-drawer" data-name="${safeDataName}" data-tab="logs">Logs</button>
+                    ${hasPendingUpdates(server) ? `<button type="button" class="inline-btn btn-security" data-action="open-drawer" data-name="${safeDataName}" data-tab="pending">Pending</button>` : ""}
+                </div>
+                <div class="log-tail">
+                    <div class="mini-label">Latest log tail</div>
+                    ${latestLogs.length ? latestLogs.map(line => `<div>${escapeHtml(line)}</div>`).join("") : `<p class="empty-state">No logs yet.</p>`}
+                </div>
+            `;
+        }
+
+        function renderDashboardPanels() {
+            const pendingServers = allServers.filter(server => server.status === "pending_approval");
+            const activeServers = allServers.filter(server => activeStatuses.has(server.status));
+            const failedServers = allServers.filter(isFailedServer);
+            setText("approval-queue-count", String(pendingServers.length));
+            setText("active-operations-count", String(activeServers.length));
+            setText("failed-hosts-count", String(failedServers.length));
+            renderMiniServerList("approval-queue", pendingServers, "No approvals.", { action: "open-drawer", actionLabel: "Review", actionTab: "pending" });
+            renderMiniServerList("active-operations", activeServers, "No active runs.");
+            renderMiniServerList("failed-hosts-panel", failedServers, "No failures.");
+            renderTagSummary();
+            renderRecentActivity();
+            renderIntelligenceLists();
+            renderSummaryBadges();
+            renderSelectedHostPanel();
+            renderSyncState();
+        }
+
+        async function fetchRecentActivity() {
+            try {
+                const response = await fetch('/api/audit-events?page=1&page_size=8');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                recentActivity = Array.isArray(data?.items) ? data.items : [];
+            } catch (_) {
+                recentActivity = [];
+            }
+            renderRecentActivity();
+        }
+
+        async function fetchObservabilitySummary() {
+            try {
+                const response = await fetch('/api/observability/summary?window=7d');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                observabilitySummary = await response.json();
+            } catch (_) {
+                observabilitySummary = null;
+            }
+            renderSummaryBadges();
+        }
+
+        async function fetchPolicySummary() {
+            try {
+                const response = await fetch('/api/update-policies');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                policySummary = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : []);
+            } catch (_) {
+                policySummary = null;
+            }
+            renderSummaryBadges();
+        }
+
+        async function fetchDashboardSummary() {
+            try {
+                const response = await fetch('/api/dashboard/summary?window=7d');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                dashboardSummary = await response.json();
+                const items = Array.isArray(dashboardSummary?.servers) ? dashboardSummary.servers : [];
+                dashboardByServer = new Map(items.map(item => [item.name, item]));
+            } catch (_) {
+                dashboardSummary = null;
+                dashboardByServer = new Map();
+            }
+            renderDashboardMetrics();
+            renderDashboardPanels();
+        }
+
+        async function fetchGlobalKeyStatus() {
+            try {
+                const response = await fetch('/api/keys/global');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                const nextGlobalKeyAvailable = !!data?.has_key;
+                if (nextGlobalKeyAvailable !== globalKeyAvailable) {
+                    globalKeyAvailable = nextGlobalKeyAvailable;
+                    renderDashboardMetrics();
+                    if (allServers.length > 0) {
+                        renderTable();
+                        renderDrawer();
+                    }
+                } else {
+                    globalKeyAvailable = nextGlobalKeyAvailable;
+                }
+            } catch (_) {
+                if (globalKeyAvailable) {
+                    globalKeyAvailable = false;
+                    renderDashboardMetrics();
+                    if (allServers.length > 0) {
+                        renderTable();
+                        renderDrawer();
+                    }
+                }
+            }
+        }
+
+        function fetchDashboardExtras() {
+            fetchGlobalKeyStatus();
+            fetchRecentActivity();
+            fetchObservabilitySummary();
+            fetchPolicySummary();
+            fetchDashboardSummary();
+        }
+
         function saveWindowScroll() {
             return { x: window.scrollX, y: window.scrollY };
         }
@@ -190,6 +712,52 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         function getTableColByKey(key) {
             return document.querySelector(`#servers-table col[data-col-key="${key}"]`);
+        }
+
+        function getTableColumnIndexByKey(key) {
+            const table = document.getElementById('servers-table');
+            if (!table) return -1;
+            return Array.from(table.querySelectorAll('col')).findIndex(col => col.dataset.colKey === key);
+        }
+
+        function getRenderedTableColumnWidths(table) {
+            const headerCells = Array.from(table?.tHead?.rows?.[0]?.cells || []);
+            const cols = Array.from(table?.querySelectorAll('col') || []);
+            return cols.map((col, index) => {
+                const headerWidth = headerCells[index]?.getBoundingClientRect().width || 0;
+                const colWidth = col.getBoundingClientRect().width || 0;
+                return Math.max(1, Math.round(headerWidth || colWidth));
+            });
+        }
+
+        function freezeRenderedTableWidths(table, widths) {
+            const cols = Array.from(table?.querySelectorAll('col') || []);
+            const totalWidth = widths.reduce((sum, width) => sum + width, 0);
+            cols.forEach((col, index) => {
+                if (widths[index]) {
+                    col.style.width = `${widths[index]}px`;
+                }
+            });
+            if (totalWidth > 0) {
+                table.style.width = `${totalWidth}px`;
+                table.style.minWidth = `${totalWidth}px`;
+            }
+        }
+
+        function updateSortIndicators() {
+            document.querySelectorAll('#servers-table th.sortable').forEach((th) => {
+                if (th.dataset.sortKey === sortKey) {
+                    th.dataset.sortDir = sortDir;
+                    th.setAttribute('aria-sort', sortDir === "asc" ? "ascending" : "descending");
+                    const indicator = th.querySelector('.sort-indicator');
+                    if (indicator) indicator.textContent = sortDir === "asc" ? "▲" : "▼";
+                } else {
+                    delete th.dataset.sortDir;
+                    th.setAttribute('aria-sort', 'none');
+                    const indicator = th.querySelector('.sort-indicator');
+                    if (indicator) indicator.textContent = "";
+                }
+            });
         }
 
         function loadColumnWidths() {
@@ -242,17 +810,27 @@ const LOG_BOTTOM_THRESHOLD = 20;
                     const colKey = handle.dataset.colKey || "";
                     const col = getTableColByKey(colKey);
                     const th = handle.closest('th');
-                    if (!col || !th) return;
+                    const table = document.getElementById('servers-table');
+                    const colIndex = getTableColumnIndexByKey(colKey);
+                    if (!col || !th || !table || colIndex < 0) return;
 
                     const minWidth = minColumnWidths[colKey] || 100;
                     const maxWidth = maxColumnWidths[colKey] || 9999;
                     const startX = event.clientX;
-                    const startWidth = Math.max(minWidth, Math.round(col.getBoundingClientRect().width));
+                    const startWidths = getRenderedTableColumnWidths(table);
+                    const startTableWidth = startWidths.reduce((sum, width) => sum + width, 0);
+                    const startWidth = Math.max(minWidth, Math.round(startWidths[colIndex] || col.getBoundingClientRect().width));
+                    const nextWidths = startWidths.slice();
+                    freezeRenderedTableWidths(table, startWidths);
 
                     const onPointerMove = (moveEvent) => {
                         const delta = moveEvent.clientX - startX;
                         const nextWidth = Math.min(maxWidth, Math.max(minWidth, startWidth + delta));
+                        nextWidths[colIndex] = Math.round(nextWidth);
                         col.style.width = `${Math.round(nextWidth)}px`;
+                        const nextTableWidth = startTableWidth - startWidth + nextWidth;
+                        table.style.width = `${Math.round(nextTableWidth)}px`;
+                        table.style.minWidth = `${Math.round(nextTableWidth)}px`;
                     };
 
                     const finishResize = (endEvent, canceled) => {
@@ -263,12 +841,12 @@ const LOG_BOTTOM_THRESHOLD = 20;
                         th.classList.remove('resizing');
 
                         if (canceled) {
-                            col.style.width = `${Math.round(startWidth)}px`;
+                            freezeRenderedTableWidths(table, startWidths);
                         } else {
-                            const finalWidth = Math.min(maxWidth, Math.max(minWidth, Math.round(col.getBoundingClientRect().width)));
-                            const nextWidths = loadColumnWidths();
-                            nextWidths[colKey] = finalWidth;
-                            saveColumnWidths(nextWidths);
+                            const finalWidth = Math.min(maxWidth, Math.max(minWidth, Math.round(nextWidths[colIndex] || col.getBoundingClientRect().width)));
+                            const savedWidths = loadColumnWidths();
+                            savedWidths[colKey] = finalWidth;
+                            saveColumnWidths(savedWidths);
                             suppressSortClickUntil = Date.now() + 250;
                         }
 
@@ -322,9 +900,14 @@ const LOG_BOTTOM_THRESHOLD = 20;
                     }
                 } catch (err) {
                     console.error('Unable to refresh servers list:', err);
+                    lastFetchError = err;
+                    renderSyncState();
                     return;
                 }
                 allServers = parsedServers;
+                lastFetchError = null;
+                lastSuccessfulSyncAt = new Date();
+                renderDashboardMetrics();
                 renderTable();
                 renderDrawer();
                 requestAnimationFrame(() => restoreWindowScroll(pageScroll));
@@ -357,7 +940,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             return servers.filter(server => {
                 if (statusFilter && server.status !== statusFilter) return false;
                 if (authFilter === "password" && !server.has_password) return false;
-                if (authFilter === "key" && !server.has_key) return false;
+                if (authFilter === "key" && !hasEffectiveKey(server)) return false;
                 if (!search) return true;
                 const haystack = [
                     server.name,
@@ -376,7 +959,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             page = Math.min(page, totalPages);
             const start = (page - 1) * size;
             const end = start + size;
-            document.getElementById('page-info').textContent = `Page ${page} of ${totalPages} (${servers.length} hosts)`;
+            document.getElementById('page-info').textContent = `Page ${page} of ${totalPages} (${pluralize(servers.length, "host")})`;
             return servers.slice(start, end);
         }
 
@@ -400,6 +983,45 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 });
             }
             return Array.from(groups.entries()).map(([key, items]) => ({ key, items }));
+        }
+
+        function loadDashboardFilters() {
+            try {
+                const raw = localStorage.getItem(dashboardFilterStorageKey);
+                if (!raw) return;
+                const saved = JSON.parse(raw);
+                if (!saved || typeof saved !== "object") return;
+                const mappings = [
+                    ["search", "search"],
+                    ["statusFilter", "status-filter"],
+                    ["authFilter", "auth-filter"],
+                    ["groupBy", "group-by"],
+                    ["pageSize", "page-size"]
+                ];
+                mappings.forEach(([key, id]) => {
+                    const el = document.getElementById(id);
+                    if (!el || saved[key] === undefined || saved[key] === null) return;
+                    el.value = String(saved[key]);
+                });
+                selectedServerName = typeof saved.selectedServerName === "string" ? saved.selectedServerName : "";
+            } catch (_) {
+                // Ignore invalid saved dashboard state.
+            }
+        }
+
+        function saveDashboardFilters() {
+            try {
+                localStorage.setItem(dashboardFilterStorageKey, JSON.stringify({
+                    search: document.getElementById('search')?.value || "",
+                    statusFilter: document.getElementById('status-filter')?.value || "",
+                    authFilter: document.getElementById('auth-filter')?.value || "",
+                    groupBy: document.getElementById('group-by')?.value || "",
+                    pageSize: document.getElementById('page-size')?.value || "25",
+                    selectedServerName
+                }));
+            } catch (_) {
+                // Ignore storage failures.
+            }
         }
 
         function openDrawer(name, tab = "logs") {
@@ -508,26 +1130,50 @@ const LOG_BOTTOM_THRESHOLD = 20;
             tbody.innerHTML = '';
             let servers = applyFilters(allServers);
             servers = sortServers(servers);
+            const totalFiltered = servers.length;
+            if (servers.length > 0 && !servers.some(server => server.name === selectedServerName)) {
+                selectedServerName = servers[0].name;
+            } else if (servers.length === 0) {
+                selectedServerName = "";
+            }
             const paged = paginate(servers);
+            setText(
+                "table-summary",
+                allServers.length === 0
+                    ? "Waiting for status data"
+                    : `${pluralize(totalFiltered, "host")} visible · ${pluralize(allServers.length, "host")} loaded`
+            );
             const groups = groupServers(paged);
             groups.forEach(group => {
                 if (group.key) {
                     const groupRow = document.createElement('tr');
                     groupRow.className = 'group-row';
-                    groupRow.innerHTML = `<td colspan="4">${escapeHtml(group.key)}</td>`;
+                    groupRow.innerHTML = `<td colspan="7">${escapeHtml(group.key)}</td>`;
                     tbody.appendChild(groupRow);
                 }
                 group.items.forEach(server => {
                     const row = document.createElement('tr');
                     row.dataset.name = server.name;
+                    if (selectedServerName === server.name) {
+                        row.classList.add('row-selected');
+                    }
                     if (hoveredName === server.name) {
                         row.classList.add('row-hover');
                     }
                     const isBusy = server.status === 'updating' || server.status === 'upgrading' || server.status === 'autoremove' || server.status === 'sudoers';
                     const safeNameHtml = escapeHtml(server.name);
-                    const safeStatusText = escapeHtml(server.status || "unknown");
+                    const safeStatusText = escapeHtml(statusLabel(server.status));
                     const safeStatus = safeStatusClass(server.status);
                     const safeDataName = escapeHtml(server.name);
+                    const intelligence = getServerIntelligence(server.name);
+                    const riskLevel = getRiskLevel(server);
+                    const riskLabel = getRiskLabel(server);
+                    const lastUpdate = intelligence?.last_update;
+                    const nextRun = intelligence?.next_run;
+                    const lastUpdateLabel = lastUpdate ? `${formatRelativeTimestamp(lastUpdate.finished_at)} · ${formatDuration(lastUpdate.duration_ms)}` : "No history";
+                    const nextRunLabel = nextRun?.state === "scheduled"
+                        ? (nextRun.scheduled_for_display || nextRun.scheduled_for_utc || "Scheduled")
+                        : "None";
                     const approvalCounts = getPendingApprovalCounts(server);
                     const securityApprovalLabel = approvalCounts.security === null
                         ? "Approve security only (unknown)"
@@ -555,6 +1201,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
                         <td class="select-col"><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
                         <td class="name-cell" title="${safeNameHtml}">${safeNameHtml}</td>
                         <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
+                        <td class="risk-col"><span class="risk-chip risk-${escapeHtml(riskLevel)}">${escapeHtml(riskLabel)}</span></td>
+                        <td class="last-update-col">${escapeHtml(lastUpdateLabel)}</td>
+                        <td class="next-run-col">${escapeHtml(nextRunLabel)}</td>
                         <td class="actions-col">${actionButtons}</td>
                     `;
                     tbody.appendChild(row);
@@ -572,6 +1221,8 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 });
             });
             document.getElementById('select-all').checked = paged.length > 0 && paged.every(s => selectedServers.has(s.name));
+            updateSortIndicators();
+            renderDashboardPanels();
         }
 
         function getServerByName(name) {
@@ -620,15 +1271,10 @@ const LOG_BOTTOM_THRESHOLD = 20;
             }
         }
 
-        const tbodyHover = document.querySelector('#servers-table tbody');
-        tbodyHover.addEventListener('click', (e) => {
-            const button = e.target.closest('button[data-action]');
-            if (!button) return;
-            const action = button.dataset.action || "";
-            const name = button.dataset.name || "";
+        function handleServerAction(action, name, tab = "logs") {
             if (!name) return;
             if (action === "open-drawer") {
-                openDrawer(name, button.dataset.tab || "logs");
+                openDrawer(name, tab || "logs");
                 return;
             }
             if (action === "approve-all") {
@@ -657,6 +1303,26 @@ const LOG_BOTTOM_THRESHOLD = 20;
             }
             if (action === "disable-apt") {
                 disablePasswordlessApt(name);
+                return;
+            }
+            if (action === "refresh-facts") {
+                refreshHostFacts(name);
+            }
+        }
+
+        const tbodyHover = document.querySelector('#servers-table tbody');
+        tbodyHover.addEventListener('click', (e) => {
+            const button = e.target.closest('button[data-action]');
+            if (button) {
+                handleServerAction(button.dataset.action || "", button.dataset.name || "", button.dataset.tab || "logs");
+                return;
+            }
+            if (e.target.closest('input, select, textarea, a, label')) return;
+            const row = e.target.closest('tr[data-name]');
+            if (row) {
+                selectedServerName = row.dataset.name || "";
+                saveDashboardFilters();
+                renderTable();
             }
         });
         tbodyHover.addEventListener('mouseover', (e) => {
@@ -682,15 +1348,16 @@ const LOG_BOTTOM_THRESHOLD = 20;
                     sortKey = key;
                     sortDir = "asc";
                 }
+                updateSortIndicators();
                 renderTable();
             });
         });
 
-        document.getElementById('search').addEventListener('input', () => { page = 1; renderTable(); });
-        document.getElementById('status-filter').addEventListener('change', () => { page = 1; renderTable(); });
-        document.getElementById('auth-filter').addEventListener('change', () => { page = 1; renderTable(); });
-        document.getElementById('group-by').addEventListener('change', () => { page = 1; renderTable(); });
-        document.getElementById('page-size').addEventListener('change', () => { page = 1; renderTable(); });
+        document.getElementById('search').addEventListener('input', () => { page = 1; saveDashboardFilters(); renderTable(); });
+        document.getElementById('status-filter').addEventListener('change', () => { page = 1; saveDashboardFilters(); renderTable(); });
+        document.getElementById('auth-filter').addEventListener('change', () => { page = 1; saveDashboardFilters(); renderTable(); });
+        document.getElementById('group-by').addEventListener('change', () => { page = 1; saveDashboardFilters(); renderTable(); });
+        document.getElementById('page-size').addEventListener('change', () => { page = 1; saveDashboardFilters(); renderTable(); });
 
         document.getElementById('prev-page').addEventListener('click', () => {
             page = Math.max(1, page - 1);
@@ -918,7 +1585,42 @@ const LOG_BOTTOM_THRESHOLD = 20;
             fetchServers();
         }
 
+        async function refreshHostFacts(name) {
+            const response = await fetch(`/api/servers/${encodeURIComponent(name)}/facts/refresh`, { method: 'POST' });
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                alert(payload.error || "Failed to refresh host facts");
+                return;
+            }
+            await fetchDashboardSummary();
+        }
+
+        document.getElementById('selected-host-panel').addEventListener('click', (e) => {
+            const button = e.target.closest('button[data-action]');
+            if (button) {
+                handleServerAction(button.dataset.action || "", button.dataset.name || "", button.dataset.tab || "logs");
+            }
+        });
+
+        document.querySelector('.operations-grid').addEventListener('click', (e) => {
+            const actionButton = e.target.closest('button[data-action]');
+            if (actionButton) {
+                handleServerAction(actionButton.dataset.action || "", actionButton.dataset.name || "", actionButton.dataset.tab || "logs");
+                return;
+            }
+            const selectButton = e.target.closest('button[data-select-server]');
+            if (selectButton) {
+                selectedServerName = selectButton.dataset.selectServer || "";
+                saveDashboardFilters();
+                renderTable();
+            }
+        });
+
         document.getElementById('logout-btn').addEventListener('click', () => window.logout());
+        loadDashboardFilters();
         initColumnResizing();
         setInterval(fetchServers, 2000);
+        setInterval(renderSyncState, 5000);
+        setInterval(fetchDashboardExtras, 30000);
+        fetchDashboardExtras();
         fetchServers();

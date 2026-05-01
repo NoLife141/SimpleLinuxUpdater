@@ -26,8 +26,8 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 		{
 			path: "templates/setup.html",
 			requiredContains: []string{
-				`href="/static/css/base.css"`,
-				`href="/static/css/setup.css"`,
+				`href="/static/css/base.css`,
+				`href="/static/css/setup.css`,
 				`src="/static/js/common.js"`,
 				`src="/static/js/setup.js"`,
 			},
@@ -35,8 +35,8 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 		{
 			path: "templates/login.html",
 			requiredContains: []string{
-				`href="/static/css/base.css"`,
-				`href="/static/css/login.css"`,
+				`href="/static/css/base.css`,
+				`href="/static/css/login.css`,
 				`src="/static/js/common.js"`,
 				`src="/static/js/login.js"`,
 			},
@@ -44,18 +44,18 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 		{
 			path: "templates/index.html",
 			requiredContains: []string{
-				`href="/static/css/base.css"`,
-				`href="/static/css/index.css"`,
+				`href="/static/css/base.css`,
+				`href="/static/css/index.css`,
 				`src="/static/auth.js"`,
 				`src="/static/js/common.js"`,
-				`src="/static/js/index.js"`,
+				`src="/static/js/index.js`,
 			},
 		},
 		{
 			path: "templates/manage.html",
 			requiredContains: []string{
-				`href="/static/css/base.css"`,
-				`href="/static/css/manage.css"`,
+				`href="/static/css/base.css`,
+				`href="/static/css/manage.css`,
 				`src="/static/auth.js"`,
 				`src="/static/js/common.js"`,
 				`src="/static/js/manage.js"`,
@@ -64,8 +64,8 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 		{
 			path: "templates/observability.html",
 			requiredContains: []string{
-				`href="/static/css/base.css"`,
-				`href="/static/css/observability.css"`,
+				`href="/static/css/base.css`,
+				`href="/static/css/observability.css`,
 				`src="/static/auth.js"`,
 				`src="/static/js/common.js"`,
 				`src="/static/js/observability.js"`,

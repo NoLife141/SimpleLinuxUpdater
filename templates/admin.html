@@ -5,39 +5,47 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Admin</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/css/base.css">
-    <link rel="stylesheet" href="/static/css/admin.css">
+    <link rel="stylesheet" href="/static/css/base.css?v=dense-all-pages-20260430b">
+    <link rel="stylesheet" href="/static/css/admin.css?v=dense-all-pages-20260430b">
 </head>
 <body>
-    <div class="page">
-        <header class="hero fade-in">
-            <div class="hero-grid">
-                <div class="hero-copy">
-                    <div class="hero-kicker">Operations Control</div>
-                    <h1>Admin</h1>
-                    <p class="subtle hero-summary">Handle metrics access and disaster-recovery controls with the same restrained operations styling as the main dashboard.</p>
-                </div>
-                <div class="hero-side">
-                    <div class="hero-panel">
-                        <div class="hero-panel-label">Access Tier</div>
-                        <div class="hero-panel-value">Sensitive Controls</div>
-                        <p class="subtle">Token management and encrypted backup workflows live here for deliberate, auditable changes.</p>
-                    </div>
-                    <div class="nav">
-                        <a class="btn-link" href="/">View Status</a>
-                        <a class="btn-link" href="/manage">Manage Servers</a>
-                        <a class="btn-link" href="/observability">Observability</a>
-                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
-                    </div>
-                </div>
-            </div>
+    <div class="dashboard-shell">
+        <header class="app-header fade-in">
+            <a class="brand-lockup" href="/" aria-label="SimpleLinuxUpdater dashboard">
+                <img class="brand-logo" src="/static/logo.png" alt="Linux updates logo">
+                <span>
+                    <strong>SimpleLinuxUpdater</strong>
+                    <small>Fleet update dashboard</small>
+                </span>
+            </a>
+            <nav class="app-nav" aria-label="Main navigation">
+                <a href="/">Status</a>
+                <a href="/manage">Manage Servers</a>
+                <a href="/observability">Observability</a>
+                <a class="active" href="/admin">Admin</a>
+                <button type="button" id="logout-btn">Logout</button>
+            </nav>
         </header>
 
-        <section class="card fade-in app-time-card">
+        <main class="dashboard-main admin-main">
+        <section class="dashboard-head fade-in" aria-label="Admin summary">
+            <div>
+                <div class="eyebrow">Operations control</div>
+                <h1>Admin</h1>
+                <p class="muted">Handle scheduling, backup, metrics access, and app-wide settings from one deliberate control page.</p>
+            </div>
+            <div class="head-meta" aria-label="Admin metadata">
+                <span class="meta-pill warning">Sensitive controls</span>
+                <span class="meta-pill">Scheduled policy</span>
+                <span class="meta-pill">Disaster recovery</span>
+            </div>
+        </section>
+
+        <section class="workspace fade-in app-time-card">
             <div class="app-time-grid">
                 <div>
                     <h2>App Time</h2>
-                    <p class="subtle">One global timezone drives scheduled-update evaluation and the structured timestamp display across Admin, Manage, Observability, and maintenance mode.</p>
+                    <p class="muted">One global timezone drives scheduled-update evaluation and structured timestamp display across the app.</p>
                 </div>
                 <div class="admin-block">
                     <label for="app-timezone-input" class="form-label">Global app timezone</label>
@@ -52,15 +60,20 @@
             </div>
         </section>
 
-        <section class="card fade-in">
-            <h2>Scheduled Updates</h2>
-            <p class="subtle">Define recurring update policies by tag, choose how they execute, and use guided no-run windows to keep scheduling out of noisy maintenance periods.</p>
+        <section class="workspace fade-in section-spaced">
+            <div class="workspace-head">
+                <div>
+                    <div class="eyebrow">Scheduled updates</div>
+                    <h2>Policy control</h2>
+                </div>
+                <p class="muted workspace-note">Define recurring policies, execution modes, and guided no-run windows.</p>
+            </div>
             <div class="admin-grid">
                 <div class="admin-block">
                     <div class="block-head">
                         <div>
                             <h3>Policy Editor</h3>
-                            <p class="subtle block-summary">Build one policy at a time with guided schedule controls and a live summary before saving.</p>
+                            <p class="muted block-summary">Build one policy at a time with guided schedule controls and a live summary before saving.</p>
                         </div>
                         <span class="pill pill-muted" id="policy-editor-mode">Create new policy</span>
                     </div>
@@ -69,7 +82,7 @@
                         <div class="field-span form-section">
                             <div class="form-section-head">
                                 <h4>Identity</h4>
-                                <p class="subtle">Name the rule and decide which tagged servers it targets.</p>
+                                <p class="muted">Name the rule and decide which tagged servers it targets.</p>
                             </div>
                             <div class="section-grid">
                                 <div>
@@ -89,7 +102,7 @@
                         <div class="field-span form-section">
                             <div class="form-section-head">
                                 <h4>Schedule</h4>
-                                <p class="subtle">All scheduling uses the app timezone shown in settings.</p>
+                                <p class="muted">All scheduling uses the app timezone shown in settings.</p>
                             </div>
                             <div class="section-grid">
                                 <div>
@@ -124,7 +137,7 @@
                         <div class="field-span form-section">
                             <div class="form-section-head">
                                 <h4>Execution</h4>
-                                <p class="subtle">Choose whether the policy only scans, waits for approval, or auto-applies updates.</p>
+                                <p class="muted">Choose whether the policy only scans, waits for approval, or auto-applies updates.</p>
                             </div>
                             <div class="section-grid">
                                 <div>
@@ -151,7 +164,7 @@
                         <div class="field-span form-section">
                             <div class="form-section-head">
                                 <h4>Policy No-Run Windows</h4>
-                                <p class="subtle">Use no-run windows to skip scheduled executions during recurring quiet hours. This is separate from maintenance mode.</p>
+                                <p class="muted">Use no-run windows to skip scheduled executions during recurring quiet hours. This is separate from maintenance mode.</p>
                             </div>
                             <div id="policy-blackout-rows" class="blackout-editor" aria-live="polite"></div>
                             <div class="policy-actions">
@@ -159,12 +172,12 @@
                             </div>
                             <details class="json-fallback">
                                 <summary>Advanced JSON fallback</summary>
-                                <p class="subtle">Paste existing JSON here if you need it, then apply it to the guided editor before saving.</p>
+                                <p class="muted">Paste existing JSON here if you need it, then apply it to the guided editor before saving.</p>
                                 <textarea id="policy-blackouts-json" rows="6" placeholder='[{"weekdays":["sat"],"start_time":"00:00","end_time":"06:00"}]'></textarea>
                                 <div class="policy-actions">
                                     <button class="btn-ghost" type="button" id="policy-blackouts-json-apply">Apply JSON to Editor</button>
                                 </div>
-                                <div id="policy-blackouts-json-status" class="subtle"></div>
+                                <div id="policy-blackouts-json-status" class="muted"></div>
                             </details>
                         </div>
                         <div class="field-span policy-actions">
@@ -179,18 +192,18 @@
                     <div class="block-head">
                         <div>
                             <h3>Global Schedule Settings</h3>
-                            <p class="subtle block-summary">Set fleet-wide no-run windows that apply to every scheduled update policy.</p>
+                            <p class="muted block-summary">Set fleet-wide no-run windows that apply to every scheduled update policy.</p>
                         </div>
                     </div>
                     <div class="timezone-card">
                         <div class="hero-panel-label">App Timezone</div>
                         <div class="hero-panel-value small-value" id="scheduled-timezone">Loading...</div>
-                        <p class="subtle">No-run windows are local recurring schedule guards, not maintenance-mode locks.</p>
+                        <p class="muted">No-run windows are local recurring schedule guards, not maintenance-mode locks.</p>
                     </div>
                     <div class="form-section compact-section">
                         <div class="form-section-head">
                             <h4>Global No-Run Windows</h4>
-                            <p class="subtle">Any matching window skips scheduled runs before they queue a job.</p>
+                            <p class="muted">Any matching window skips scheduled runs before they queue a job.</p>
                         </div>
                         <div id="global-blackout-rows" class="blackout-editor" aria-live="polite"></div>
                         <div class="policy-actions">
@@ -198,12 +211,12 @@
                         </div>
                         <details class="json-fallback">
                             <summary>Advanced JSON fallback</summary>
-                            <p class="subtle">Paste existing JSON here if you need it, then apply it back into the guided rows.</p>
+                            <p class="muted">Paste existing JSON here if you need it, then apply it back into the guided rows.</p>
                             <textarea id="scheduled-global-blackouts-json" rows="8" placeholder='[{"weekdays":["sun"],"start_time":"01:00","end_time":"04:00"}]'></textarea>
                             <div class="policy-actions">
                                 <button class="btn-ghost" type="button" id="scheduled-global-blackouts-json-apply">Apply JSON to Editor</button>
                             </div>
-                            <div id="scheduled-global-blackouts-json-status" class="subtle"></div>
+                            <div id="scheduled-global-blackouts-json-status" class="muted"></div>
                         </details>
                     </div>
                     <div class="policy-actions">
@@ -213,25 +226,37 @@
                     <div id="scheduled-settings-status" class="form-feedback form-feedback-success" role="status" aria-live="polite"></div>
                 </div>
             </div>
-            <div class="table-wrap section-spaced">
-                <table id="scheduled-policy-table">
-                    <thead>
-                        <tr>
-                            <th>Policy</th>
-                            <th>Schedule</th>
-                            <th>Execution</th>
-                            <th>Matched Servers</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
+            <div class="table-shell section-spaced">
+                <div class="table-shell-head">
+                    <div class="table-shell-title">
+                        <span class="table-shell-label">Policy table</span>
+                        <span class="table-shell-subtle">Saved recurring update policies.</span>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table id="scheduled-policy-table">
+                        <thead>
+                            <tr>
+                                <th>Policy</th>
+                                <th>Schedule</th>
+                                <th>Execution</th>
+                                <th>Matched Servers</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
             </div>
         </section>
 
-        <section class="card fade-in section-spaced">
-            <h2>Recent Scheduled Runs</h2>
-            <p class="subtle">Latest policy executions, skips, and linked jobs.</p>
+        <section class="table-shell fade-in section-spaced">
+            <div class="table-shell-head">
+                <div class="table-shell-title">
+                    <span class="table-shell-label">Scheduled runs</span>
+                    <span class="table-shell-subtle">Latest policy executions, skips, and linked jobs.</span>
+                </div>
+            </div>
             <div class="table-wrap">
                 <table id="scheduled-runs-table">
                     <thead>
@@ -249,9 +274,14 @@
             </div>
         </section>
 
-        <section class="card fade-in section-spaced">
-            <h2>Backup &amp; Restore</h2>
-            <p class="subtle">Export encrypted disaster-recovery backups (DB + config + known_hosts) and restore on another host/container.</p>
+        <section class="workspace fade-in section-spaced">
+            <div class="workspace-head">
+                <div>
+                    <div class="eyebrow">Disaster recovery</div>
+                    <h2>Backup &amp; Restore</h2>
+                </div>
+                <p class="muted workspace-note">Export encrypted backups and restore on another host or container.</p>
+            </div>
             <div class="backup-grid">
                 <div class="backup-block">
                     <h3>Export Backup</h3>
@@ -268,24 +298,30 @@
                     <button class="btn-danger" type="button" id="backup-restore-btn">Restore Backup (Full Replace)</button>
                 </div>
             </div>
-            <div id="backup-status" class="subtle"></div>
+            <div id="backup-status" class="muted"></div>
         </section>
 
-        <section class="card fade-in section-spaced">
-            <h2>Metrics API Token</h2>
-            <p class="subtle"><code>/metrics</code> stays disabled until you generate a token. The token is shown once on creation or rotation.</p>
+        <section class="workspace fade-in section-spaced">
+            <div class="workspace-head">
+                <div>
+                    <div class="eyebrow">Metrics access</div>
+                    <h2>Metrics API Token</h2>
+                </div>
+                <p class="muted workspace-note"><code>/metrics</code> stays disabled until you generate a token. The token is shown once.</p>
+            </div>
             <div class="nav key-actions">
                 <button class="btn-success" type="button" id="metrics-token-generate">Generate Token</button>
                 <button class="btn-ghost" type="button" id="metrics-token-rotate">Rotate Token</button>
                 <button class="btn-danger" type="button" id="metrics-token-disable">Disable Token</button>
             </div>
-            <div id="metrics-token-status" class="subtle"></div>
+            <div id="metrics-token-status" class="muted"></div>
             <div id="metrics-token-once" class="secret-box">
-                <div class="subtle">Copy this token now. It will not be shown again.</div>
+                <div class="muted">Copy this token now. It will not be shown again.</div>
                 <code id="metrics-token-value"></code>
                 <button class="btn-ghost inline-btn" type="button" id="metrics-token-copy">Copy Token</button>
             </div>
         </section>
+        </main>
     </div>
 
     <script src="/static/auth.js"></script>
