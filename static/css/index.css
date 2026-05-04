@@ -633,6 +633,7 @@ tbody tr:last-child td {
 .status-updating,
 .status-upgrading,
 .status-autoremove,
+.status-facts_refresh,
 .status-waiting_approval,
 .status-skipped,
 .status-pending_approval,

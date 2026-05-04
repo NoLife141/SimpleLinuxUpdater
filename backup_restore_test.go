@@ -80,6 +80,77 @@ func TestGetEncryptionKeyConcurrentInitializationUsesPersistedKey(t *testing.T) 
 	}
 }
 
+func TestRuntimeDataFilesAreOwnerOnly(t *testing.T) {
+	preserveDBState(t)
+	preserveEncryptionState(t)
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(runtimeDir, "servers.db"))
+
+	_ = getEncryptionKey()
+	_ = getDB()
+
+	for _, tc := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{path: runtimeDir, mode: 0700},
+		{path: configPath(), mode: 0600},
+		{path: dbPath(), mode: 0600},
+	} {
+		info, err := os.Stat(tc.path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", tc.path, err)
+		}
+		if got := info.Mode().Perm(); got != tc.mode {
+			t.Fatalf("%s mode = %o, want %o", tc.path, got, tc.mode)
+		}
+	}
+}
+
+func TestLoadServersLeavesEmptyInventoryEmpty(t *testing.T) {
+	preserveDBState(t)
+	preserveEncryptionState(t)
+	preserveServerState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "empty-inventory.db"))
+
+	loadServers()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(servers) != 0 {
+		t.Fatalf("loadServers seeded default servers: %+v", servers)
+	}
+}
+
+func TestPersistActiveMaintenanceStateForRestoreWritesCurrentDatabase(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "restore-maintenance-marker.db"))
+
+	state := MaintenanceState{
+		Active:    true,
+		Kind:      jobKindBackupRestore,
+		JobID:     "restore-job",
+		StartedAt: "2026-05-04T12:00:00Z",
+		Actor:     "admin",
+		Message:   "Restore in progress",
+	}
+	setCurrentMaintenanceState(state)
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(MaintenanceState{})
+	})
+
+	if err := persistActiveMaintenanceStateForRestore(); err != nil {
+		t.Fatalf("persistActiveMaintenanceStateForRestore() unexpected error: %v", err)
+	}
+	got, err := loadPersistedMaintenanceState()
+	if err != nil {
+		t.Fatalf("loadPersistedMaintenanceState() unexpected error: %v", err)
+	}
+	if !got.Active || got.JobID != state.JobID || got.Kind != state.Kind {
+		t.Fatalf("persisted maintenance state = %+v, want active job=%q kind=%q", got, state.JobID, state.Kind)
+	}
+}
+
 func TestBackupPayloadRoundTrip(t *testing.T) {
 	files := map[string][]byte{
 		"servers.db":  []byte("sqlite-snapshot"),

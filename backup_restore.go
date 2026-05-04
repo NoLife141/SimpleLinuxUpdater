@@ -441,7 +441,7 @@ func extractBackupTarGzWithLimits(payload []byte, maxFileBytes, maxTotalBytes in
 }
 
 func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := ensurePrivateDirForFile(path); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".restore-*")
@@ -466,6 +466,17 @@ func writeAtomicFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		_ = os.Remove(tmpName)
 		return err
+	}
+	return nil
+}
+
+func persistActiveMaintenanceStateForRestore() error {
+	state := currentMaintenanceState()
+	if !state.Active {
+		return nil
+	}
+	if err := persistMaintenanceState(state); err != nil {
+		return fmt.Errorf("persist active maintenance marker in restored database: %w", err)
 	}
 	return nil
 }
@@ -727,6 +738,9 @@ func applyBackupFiles(ctx context.Context, files map[string][]byte) error {
 		if err := writeAtomicFile(knownHostsTarget, khData, 0600); err != nil {
 			return rollback(err)
 		}
+	}
+	if err := persistActiveMaintenanceStateForRestore(); err != nil {
+		return rollback(err)
 	}
 	if err := reloadRuntimeState(); err != nil {
 		return rollback(err)

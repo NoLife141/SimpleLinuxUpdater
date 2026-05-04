@@ -122,7 +122,7 @@ This project can run apt commands via `sudo` on remote hosts and stores SSH cred
 
 Frontend CSP policy:
 
-- UI pages run with strict CSP (`script-src 'self'`, `style-src 'self'`).
+- UI pages run with strict CSP (`script-src 'self'`, `style-src 'self' https://fonts.googleapis.com`, `font-src 'self' https://fonts.gstatic.com`).
 - Inline `<script>`, inline `<style>`, inline `on*=` handlers, and inline `style=` attributes are prohibited.
 - CI tests fail if these inline patterns are reintroduced in the main UI templates.
 

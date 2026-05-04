@@ -461,6 +461,39 @@ func configPath() string {
 	return filepath.Join(filepath.Dir(dbPath()), configFileName)
 }
 
+func ensurePrivateDirForFile(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
+	}
+	return nil
+}
+
+func chmodIfExists(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func hardenRuntimeDataFilePermissions(path string) error {
+	if err := chmodIfExists(path, 0600); err != nil {
+		return err
+	}
+	for _, sidecar := range sqliteSidecarPaths(path) {
+		if err := chmodIfExists(sidecar, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func getDB() *sql.DB {
 	runtimeStateMu.RLock()
 	if db != nil {
@@ -474,7 +507,7 @@ func getDB() *sql.DB {
 	defer runtimeStateMu.Unlock()
 	dbOnce.Do(func() {
 		path := dbPath()
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := ensurePrivateDirForFile(path); err != nil {
 			log.Fatalf("Failed to create db directory: %v", err)
 		}
 		var err error
@@ -513,6 +546,9 @@ func getDB() *sql.DB {
 		if err := ensureSchema(db); err != nil {
 			log.Fatalf("Failed to migrate db schema: %v", err)
 		}
+		if err := hardenRuntimeDataFilePermissions(path); err != nil {
+			log.Fatalf("Failed to harden db file permissions: %v", err)
+		}
 	})
 	return db
 }
@@ -535,10 +571,16 @@ func decodeEncryptionKeyValue(keyStr string) ([]byte, error) {
 func getEncryptionKey() []byte {
 	keyOnce.Do(func() {
 		path := configPath()
+		if err := ensurePrivateDirForFile(path); err != nil {
+			log.Fatalf("Failed to create config dir: %v", err)
+		}
 		var cfg map[string]string
 		if data, err := os.ReadFile(path); err == nil {
 			if err := json.Unmarshal(data, &cfg); err != nil {
 				log.Fatalf("Failed to parse %s: %v", path, err)
+			}
+			if err := chmodIfExists(path, 0600); err != nil {
+				log.Fatalf("Failed to harden %s permissions: %v", path, err)
 			}
 		} else if !os.IsNotExist(err) {
 			log.Fatalf("Failed to read %s: %v", path, err)
@@ -556,15 +598,15 @@ func getEncryptionKey() []byte {
 			}
 			keyStr = base64.StdEncoding.EncodeToString(keyBytes)
 			cfg = map[string]string{"encryption_key": keyStr}
-			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-				log.Fatalf("Failed to create config dir: %v", err)
-			}
 			data, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
 				log.Fatalf("Failed to serialize config: %v", err)
 			}
 			if err := os.WriteFile(path, data, 0600); err != nil {
 				log.Fatalf("Failed to write %s: %v", path, err)
+			}
+			if err := chmodIfExists(path, 0600); err != nil {
+				log.Fatalf("Failed to harden %s permissions: %v", path, err)
 			}
 		}
 
@@ -2368,20 +2410,25 @@ func refreshServerFacts(server Server) (serverFactsRecord, error) {
 
 func handleServerFactsRefresh(c *gin.Context) {
 	name := strings.TrimSpace(c.Param("name"))
-	mu.Lock()
-	server, ok := findServerByNameLocked(name)
-	blocked, status := serverActionStatusInProgressLocked(name)
-	mu.Unlock()
-	if !ok {
+	server, preRefreshStatus, err := beginServerTransientAction(name, "facts_refresh")
+	if errors.Is(err, sql.ErrNoRows) {
 		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 		return
 	}
-	if blocked {
+	if errors.Is(err, errActionInProgress) {
+		_, status := serverActionStatusInProgress(name)
 		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
 		c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before refreshing host facts"})
 		return
 	}
+	if err != nil {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Facts refresh unavailable", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start host facts refresh"})
+		return
+	}
+	defer restoreStatusSnapshot(name, preRefreshStatus)
+
 	record, err := refreshServerFacts(server)
 	if err != nil {
 		audit(c, serverFactsRefreshAction, "server", name, "failure", "Facts refresh failed", map[string]any{"error": err.Error()})
@@ -3241,18 +3288,7 @@ func loadServers() {
 	}
 
 	if len(servers) == 0 {
-		if !loadLegacyServers() {
-			servers = []Server{
-				{Name: "server1", Host: "server1.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server2", Host: "server2.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server3", Host: "server3.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server4", Host: "server4.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server5", Host: "server5.example.com", Port: 22, User: "user", Pass: "pass"},
-			}
-			if err := saveServersFunc(); err != nil {
-				log.Fatalf("Failed to save default servers: %v", err)
-			}
-		}
+		loadLegacyServers()
 	}
 }
 
@@ -3346,15 +3382,7 @@ func cloneServers(src []Server) []Server {
 func cloneStatusMap(src map[string]*ServerStatus) map[string]*ServerStatus {
 	dst := make(map[string]*ServerStatus, len(src))
 	for name, status := range src {
-		if status == nil {
-			dst[name] = nil
-			continue
-		}
-		copyStatus := *status
-		copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
-		copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
-		copyStatus.Tags = append([]string(nil), status.Tags...)
-		dst[name] = &copyStatus
+		dst[name] = cloneServerStatus(status)
 	}
 	return dst
 }
@@ -3375,10 +3403,7 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func currentStatusSnapshot(name string) *ServerStatus {
-	mu.Lock()
-	defer mu.Unlock()
-	status := statusMap[name]
+func cloneServerStatus(status *ServerStatus) *ServerStatus {
 	if status == nil {
 		return nil
 	}
@@ -3387,6 +3412,12 @@ func currentStatusSnapshot(name string) *ServerStatus {
 	copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
 	copyStatus.Tags = append([]string(nil), status.Tags...)
 	return &copyStatus
+}
+
+func currentStatusSnapshot(name string) *ServerStatus {
+	mu.Lock()
+	defer mu.Unlock()
+	return cloneServerStatus(statusMap[name])
 }
 
 func restoreStatusSnapshot(name string, snapshot *ServerStatus) {
@@ -3426,6 +3457,21 @@ func activeServerActionNames() []string {
 	return names
 }
 
+func rejectGlobalKeyMutationIfServerActionsActive(c *gin.Context, action string) bool {
+	activeNames := activeServerActionNames()
+	if len(activeNames) == 0 {
+		return false
+	}
+	audit(c, action, "global_key", "global", "failure", "Server action already in progress", map[string]any{
+		"active_servers": activeNames,
+	})
+	c.JSON(http.StatusConflict, gin.H{
+		"error":          "wait for active server actions to finish before changing the global SSH key",
+		"active_servers": activeNames,
+	})
+	return true
+}
+
 func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
 	jm := currentJobManager()
 	if jm == nil {
@@ -3454,7 +3500,8 @@ func statusInProgress(status string) bool {
 		status == "approved" ||
 		status == "upgrading" ||
 		status == "autoremove" ||
-		status == "sudoers"
+		status == "sudoers" ||
+		status == "facts_refresh"
 }
 
 func findServerByNameLocked(name string) (Server, bool) {
@@ -3472,6 +3519,12 @@ func serverActionStatusInProgressLocked(name string) (bool, string) {
 		return false, ""
 	}
 	return statusInProgress(status.Status), status.Status
+}
+
+func serverActionStatusInProgress(name string) (bool, string) {
+	mu.Lock()
+	defer mu.Unlock()
+	return serverActionStatusInProgressLocked(name)
 }
 
 func beginServerAction(name, newStatus string) (Server, error) {
@@ -3493,6 +3546,25 @@ func beginServerAction(name, newStatus string) (Server, error) {
 		status.Logs = "Starting Linux Updater..."
 	}
 	return server, nil
+}
+
+func beginServerTransientAction(name, newStatus string) (Server, *ServerStatus, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return Server{}, nil, sql.ErrNoRows
+	}
+	if statusInProgress(status.Status) {
+		return Server{}, nil, errActionInProgress
+	}
+	server, found := findServerByNameLocked(name)
+	if !found {
+		return Server{}, nil, sql.ErrNoRows
+	}
+	snapshot := cloneServerStatus(status)
+	status.Status = newStatus
+	return server, snapshot, nil
 }
 
 func approvePendingUpdate(name, scope string) (exists bool, approved bool) {
@@ -5964,6 +6036,9 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.POST("/api/keys/global", func(c *gin.Context) {
+		if rejectGlobalKeyMutationIfServerActionsActive(c, "global_key.upload") {
+			return
+		}
 		limitUploadedKeyRequest(c)
 		file, err := c.FormFile("key")
 		if err != nil {
@@ -6001,6 +6076,9 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.DELETE("/api/keys/global", func(c *gin.Context) {
+		if rejectGlobalKeyMutationIfServerActionsActive(c, "global_key.clear") {
+			return
+		}
 		if err := clearGlobalKey(); err != nil {
 			audit(c, "global_key.clear", "global_key", "global", "failure", "Failed to clear global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

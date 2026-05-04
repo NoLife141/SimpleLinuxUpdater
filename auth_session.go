@@ -29,6 +29,7 @@ const (
 	authUserID                    = 1
 	authMinPasswordLen            = 10
 	authMaxPasswordLen            = 64
+	authMaxRequestBytes           = 8 * 1024
 	authLoginRateLimitMaxAttempts = 10
 	authSetupRateLimitMaxAttempts = 5
 	metricsRateLimitMaxAttempts   = 120
@@ -48,6 +49,18 @@ var (
 type AuthRateBucket struct {
 	attempts  int
 	windowEnd time.Time
+}
+
+func limitAuthRequestBody(c *gin.Context) {
+	if c == nil || c.Request == nil || c.Request.Body == nil {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, authMaxRequestBytes)
+}
+
+func authRequestBodyTooLarge(err error) bool {
+	var maxBytesErr *http.MaxBytesError
+	return errors.As(err, &maxBytesErr)
 }
 
 type AuthRateLimiter struct {
@@ -628,7 +641,12 @@ func handleAuthSetup(c *gin.Context) {
 	}
 
 	var req AuthCredentialsRequest
+	limitAuthRequestBody(c)
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if authRequestBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request payload too large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 		return
 	}
@@ -689,7 +707,12 @@ func handleAuthLogin(c *gin.Context) {
 	}
 
 	var req AuthCredentialsRequest
+	limitAuthRequestBody(c)
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if authRequestBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request payload too large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
 		return
 	}

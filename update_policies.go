@@ -1517,7 +1517,8 @@ func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server S
 
 func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Server) {
 	preStartStatus := currentStatusSnapshot(server.Name)
-	if _, err := beginServerAction(server.Name, "updating"); err != nil {
+	serverForRun, err := beginServerAction(server.Name, "updating")
+	if err != nil {
 		status := updatePolicyRunFailed
 		reason := updatePolicyRunReasonMissing
 		summary := "Server unavailable for scheduled scan"
@@ -1622,8 +1623,9 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 
 	startJobRunner(job.ID, func() {
 		defer restoreStatusSnapshot(server.Name, preStartStatus)
-		runScheduledScanJob(job.ID, run.ID, run.ScheduledForUTC, server, policy, retryPolicy)
+		runScheduledScanJob(job.ID, run.ID, run.ScheduledForUTC, serverForRun, policy, retryPolicy)
 	})
+	watchUpdatePolicyRunForJob(run.ID, job.ID)
 }
 
 func runScheduledScanJob(jobID string, runID int64, scheduledForUTC string, server Server, policy UpdatePolicy, retryPolicy RetryPolicy) {

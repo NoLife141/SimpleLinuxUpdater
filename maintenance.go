@@ -119,15 +119,21 @@ func deactivateMaintenance() error {
 	return nil
 }
 
-func maintenanceResponsePayload() gin.H {
+func publicMaintenanceStatePayload() gin.H {
 	state := currentMaintenanceState()
 	return gin.H{
-		"error":       "maintenance mode active",
-		"maintenance": true,
-		"kind":        state.Kind,
-		"started_at":  state.StartedAt,
-		"job_id":      state.JobID,
+		"active":     state.Active,
+		"kind":       state.Kind,
+		"started_at": state.StartedAt,
+		"message":    state.Message,
 	}
+}
+
+func maintenanceResponsePayload() gin.H {
+	payload := publicMaintenanceStatePayload()
+	payload["error"] = "maintenance mode active"
+	payload["maintenance"] = true
+	return payload
 }
 
 func maintenancePageHTML() string {
@@ -216,5 +222,5 @@ func maintenanceExclusivePath(path string) bool {
 }
 
 func handleMaintenanceStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, currentMaintenanceState())
+	c.JSON(http.StatusOK, publicMaintenanceStatePayload())
 }

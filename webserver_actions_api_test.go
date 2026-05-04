@@ -229,6 +229,24 @@ func TestServerMutationRoutesRejectActiveServerActions(t *testing.T) {
 		t.Fatalf("active server facts refresh status = %d, want %d (body=%s)", factsRec.Code, http.StatusConflict, factsRec.Body.String())
 	}
 
+	globalKeyUploadRec := httptest.NewRecorder()
+	globalKeyUploadReq := httptest.NewRequest(http.MethodPost, "/api/keys/global", nil)
+	globalKeyUploadReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(globalKeyUploadReq)
+	handler.ServeHTTP(globalKeyUploadRec, globalKeyUploadReq)
+	if globalKeyUploadRec.Code != http.StatusConflict {
+		t.Fatalf("active server global key upload status = %d, want %d (body=%s)", globalKeyUploadRec.Code, http.StatusConflict, globalKeyUploadRec.Body.String())
+	}
+
+	globalKeyClearRec := httptest.NewRecorder()
+	globalKeyClearReq := httptest.NewRequest(http.MethodDelete, "/api/keys/global", nil)
+	globalKeyClearReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(globalKeyClearReq)
+	handler.ServeHTTP(globalKeyClearRec, globalKeyClearReq)
+	if globalKeyClearRec.Code != http.StatusConflict {
+		t.Fatalf("active server global key clear status = %d, want %d (body=%s)", globalKeyClearRec.Code, http.StatusConflict, globalKeyClearRec.Body.String())
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	if len(servers) != 1 || servers[0].Name != server.Name {
@@ -236,6 +254,87 @@ func TestServerMutationRoutesRejectActiveServerActions(t *testing.T) {
 	}
 	if status := statusMap[server.Name]; status == nil || status.Status != "updating" {
 		t.Fatalf("active server status changed: %+v", status)
+	}
+}
+
+func TestFactsRefreshBlocksConcurrentServerActions(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "facts-refresh-busy.db")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-facts-busy", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+		}
+	}()
+
+	enteredDial := make(chan struct{})
+	releaseDial := make(chan struct{})
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		close(enteredDial)
+		<-releaseDial
+		return &scriptedSSHConnection{
+			responses: map[string]scriptedResponse{
+				serverFactsOSCmd:           {stdout: "Ubuntu 24.04 LTS\n"},
+				serverFactsUptimeCmd:       {stdout: "12345.67 100.00\n"},
+				precheckDiskSpaceCmd:       {stdout: "2097152\n3145728\n"},
+				precheckDpkgAuditCmd:       {},
+				precheckAptCheckCmd:        {},
+				postcheckRebootRequiredCmd: {},
+			},
+		}, nil
+	})
+	t.Cleanup(func() {
+		setDialSSHConnection(origDial)
+	})
+
+	factsDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/servers/"+server.Name+"/facts/refresh", nil)
+		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
+		handler.ServeHTTP(rec, req)
+		factsDone <- rec.Code
+	}()
+
+	select {
+	case <-enteredDial:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("facts refresh did not enter SSH dial")
+	}
+
+	updateRec := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
+	updateReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(updateReq)
+	handler.ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusConflict {
+		t.Fatalf("update during facts refresh status = %d, want %d (body=%s)", updateRec.Code, http.StatusConflict, updateRec.Body.String())
+	}
+
+	close(releaseDial)
+	select {
+	case code := <-factsDone:
+		if code != http.StatusOK {
+			t.Fatalf("facts refresh status = %d, want %d", code, http.StatusOK)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("facts refresh did not finish")
 	}
 }
 

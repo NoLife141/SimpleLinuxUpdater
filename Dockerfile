@@ -8,7 +8,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o webserver .
 
 # Runtime stage
 FROM alpine:latest
-RUN apk --no-cache add ca-certificates openssh-client
+RUN apk --no-cache add ca-certificates
 WORKDIR /root/
 RUN mkdir -p /data
 COPY --from=builder /app/webserver .

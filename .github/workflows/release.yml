@@ -111,7 +111,11 @@ jobs:
 
             mkdir -p "$PKG_ROOT"
             cp "dist/${BIN}" "${PKG_ROOT}/webserver${EXT}"
-            cp -r templates static "$PKG_ROOT/"
+            cp -r templates static docs "$PKG_ROOT/"
+            if [ -d .github/assets ]; then
+              mkdir -p "$PKG_ROOT/.github"
+              cp -r .github/assets "$PKG_ROOT/.github/"
+            fi
             cp README.md LICENSE .env-template "$PKG_ROOT/"
 
             if [ "$GOOS" = "windows" ]; then

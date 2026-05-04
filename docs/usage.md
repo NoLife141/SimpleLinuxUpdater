@@ -45,8 +45,8 @@ Example (programmatic login):
 ```bash
 curl -X POST http://localhost:8080/api/auth/login \
   -H "Content-Type: application/json" \
-  -H "Origin: http://localhost" \
-  -H "Referer: http://localhost/" \
+  -H "Origin: http://localhost:8080" \
+  -H "Referer: http://localhost:8080/" \
   -H "Sec-Fetch-Site: same-origin" \
   -d '{"username":"admin","password":"<password>"}'
 ```

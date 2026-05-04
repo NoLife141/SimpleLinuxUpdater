@@ -46,10 +46,11 @@ const LOG_BOTTOM_THRESHOLD = 20;
         const allowedStatuses = new Set([
             "idle", "updating", "pending_approval", "approved", "cancelled",
             "upgrading", "autoremove", "sudoers", "done", "error", "success",
-            "failure", "failed", "started", "ignored", "running", "queued", "skipped"
+            "failure", "failed", "started", "ignored", "running", "queued", "skipped",
+            "facts_refresh"
         ]);
-        const activeStatuses = new Set(["updating", "upgrading", "autoremove", "sudoers"]);
-        const nonFailedStatuses = new Set(["idle", "updating", "pending_approval", "approved", "upgrading", "autoremove", "sudoers", "done"]);
+        const activeStatuses = new Set(["updating", "upgrading", "autoremove", "sudoers", "facts_refresh"]);
+        const nonFailedStatuses = new Set(["idle", "updating", "pending_approval", "approved", "upgrading", "autoremove", "sudoers", "facts_refresh", "done"]);
 
         function setText(id, value) {
             const el = document.getElementById(id);
@@ -1195,7 +1196,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                     if (hoveredName === server.name) {
                         row.classList.add('row-hover');
                     }
-                    const isBusy = server.status === 'updating' || server.status === 'upgrading' || server.status === 'autoremove' || server.status === 'sudoers';
+                    const isBusy = activeStatuses.has(server.status);
                     const safeNameHtml = escapeHtml(server.name);
                     const safeStatusText = escapeHtml(statusLabel(server.status));
                     const safeStatus = safeStatusClass(server.status);

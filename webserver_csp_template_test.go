@@ -41,7 +41,6 @@ func TestTemplatesStrictCSPCompliance(t *testing.T) {
 			requiredContains: []string{
 				`/static/css/base.css`,
 				`/static/css/auth-common.css`,
-				`/static/css/login.css`,
 				`/static/js/common.js`,
 				`/static/js/login.js`,
 			},

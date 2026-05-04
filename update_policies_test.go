@@ -1657,16 +1657,24 @@ func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) 
 		},
 	}
 	origDial := getDialSSHConnection()
-	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	setDialSSHConnection(func(got Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if got.Host != server.Host || got.User != server.User || got.Pass != server.Pass {
+			t.Fatalf("scheduled scan used stale server data: got host/user/pass %q/%q/%q, want %q/%q/%q", got.Host, got.User, got.Pass, server.Host, server.User, server.Pass)
+		}
 		return conn, nil
 	})
 	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
-	runScheduledScanPolicy(run, policy, server)
+	staleServer := server
+	staleServer.Host = "old.example.org"
+	staleServer.User = "old-root"
+	staleServer.Pass = "old-pw"
+	runScheduledScanPolicy(run, policy, staleServer)
 	waitForCondition(t, 10*time.Second, func() bool {
 		current, err := getUpdatePolicyRun(run.ID)
 		return err == nil && current.Status == updatePolicyRunSucceeded
 	}, "scan-only policy run to complete")
+	waitForUpdateRunners()
 
 	currentRun, err := getUpdatePolicyRun(run.ID)
 	if err != nil {
@@ -1692,6 +1700,76 @@ func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) 
 	runtimeStatus := currentStatusSnapshot(server.Name)
 	if runtimeStatus == nil || runtimeStatus.Status != "idle" {
 		t.Fatalf("runtime status after scan-only = %+v, want idle", runtimeStatus)
+	}
+}
+
+func TestScheduledScanPolicyPanicMarksRunFailed(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-scan-panic.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+
+	server := Server{Name: "srv-scan-panic", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"scan"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"scan"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Scan panic",
+		Enabled:       true,
+		TargetTag:     "scan",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     time.Now().In(time.Local).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("create scan panic policy: %v", err)
+	}
+	run, inserted, err := createUpdatePolicyRun(UpdatePolicyRun{
+		PolicyID:        policy.ID,
+		PolicyName:      policy.Name,
+		ServerName:      server.Name,
+		ScheduledForUTC: time.Now().UTC().Format(jobTimestampLayout),
+		ExecutionMode:   policy.ExecutionMode,
+		PackageScope:    policy.PackageScope,
+		Status:          updatePolicyRunQueued,
+		Summary:         "Queued",
+		ResultJSON:      "{}",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("createUpdatePolicyRun(scan panic) = (%+v, %t, %v), want inserted", run, inserted, err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		panic("scheduled scan dial panic")
+	})
+	t.Cleanup(func() {
+		waitForUpdateRunners()
+		setDialSSHConnection(origDial)
+	})
+
+	runScheduledScanPolicy(run, policy, server)
+	waitForCondition(t, 5*time.Second, func() bool {
+		current, err := getUpdatePolicyRun(run.ID)
+		return err == nil && current.Status == updatePolicyRunFailed
+	}, "panicked scan-only policy run to fail")
+
+	currentRun, err := getUpdatePolicyRun(run.ID)
+	if err != nil {
+		t.Fatalf("getUpdatePolicyRun(scan panic) unexpected error: %v", err)
+	}
+	if currentRun.Reason != updatePolicyRunFailed {
+		t.Fatalf("panicked scan reason = %q, want %q", currentRun.Reason, updatePolicyRunFailed)
 	}
 }
 

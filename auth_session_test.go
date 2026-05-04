@@ -247,12 +247,18 @@ func TestMaintenanceModeBlocksRoutesAndAllowsStatusEndpoint(t *testing.T) {
 	if maintenanceRec.Code != http.StatusOK {
 		t.Fatalf("/api/maintenance status = %d, want %d", maintenanceRec.Code, http.StatusOK)
 	}
-	var gotState MaintenanceState
+	var gotState map[string]any
 	if err := json.Unmarshal(maintenanceRec.Body.Bytes(), &gotState); err != nil {
 		t.Fatalf("unmarshal maintenance state: %v", err)
 	}
-	if !gotState.Active || gotState.JobID != state.JobID || gotState.Kind != state.Kind {
-		t.Fatalf("maintenance state = %+v, want active job=%q kind=%q", gotState, state.JobID, state.Kind)
+	if gotState["active"] != true || gotState["kind"] != state.Kind {
+		t.Fatalf("maintenance state = %+v, want active kind=%q", gotState, state.Kind)
+	}
+	if _, ok := gotState["job_id"]; ok {
+		t.Fatalf("maintenance state exposed job_id: %+v", gotState)
+	}
+	if _, ok := gotState["actor"]; ok {
+		t.Fatalf("maintenance state exposed actor: %+v", gotState)
 	}
 
 	apiRec := httptest.NewRecorder()
@@ -273,6 +279,48 @@ func TestMaintenanceModeBlocksRoutesAndAllowsStatusEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(htmlRec.Body.String(), "Maintenance Mode") {
 		t.Fatalf("maintenance HTML page missing title: %s", htmlRec.Body.String())
+	}
+}
+
+func TestAuthSetupAndLoginRejectOversizedBodies(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "auth-body-cap.db"))
+
+	r, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+	handler := sessionHandler(r)
+
+	hugePassword := strings.Repeat("a", int(authMaxRequestBytes)+1024)
+	setupRec := httptest.NewRecorder()
+	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"admin","password":"`+hugePassword+`"}`))
+	setupReq.Header.Set("Content-Type", "application/json")
+	markSameOriginAuthRequest(setupReq)
+	handler.ServeHTTP(setupRec, setupReq)
+	if setupRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized setup status = %d, want %d (body=%s)", setupRec.Code, http.StatusRequestEntityTooLarge, setupRec.Body.String())
+	}
+
+	normalSetupRec := httptest.NewRecorder()
+	normalSetupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"admin","password":"`+testPasswordStrong+`"}`))
+	normalSetupReq.Header.Set("Content-Type", "application/json")
+	markSameOriginAuthRequest(normalSetupReq)
+	handler.ServeHTTP(normalSetupRec, normalSetupReq)
+	if normalSetupRec.Code != http.StatusOK {
+		t.Fatalf("normal setup status = %d, want %d (body=%s)", normalSetupRec.Code, http.StatusOK, normalSetupRec.Body.String())
+	}
+
+	loginRec := httptest.NewRecorder()
+	loginReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(`{"username":"admin","password":"`+hugePassword+`"}`))
+	loginReq.Header.Set("Content-Type", "application/json")
+	markSameOriginAuthRequest(loginReq)
+	handler.ServeHTTP(loginRec, loginReq)
+	if loginRec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized login status = %d, want %d (body=%s)", loginRec.Code, http.StatusRequestEntityTooLarge, loginRec.Body.String())
 	}
 }
 
