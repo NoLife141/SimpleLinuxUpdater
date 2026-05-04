@@ -584,6 +584,23 @@ tbody tr:last-child td {
     overflow-wrap: anywhere;
 }
 
+#servers-table td.name-cell .select-host {
+    display: inline;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+#servers-table td.name-cell .select-host:focus-visible {
+    outline: 2px solid rgba(92, 200, 255, 0.72);
+    outline-offset: 3px;
+}
+
 .status-pill {
     max-width: 100%;
     min-width: 0;

@@ -2370,10 +2370,16 @@ func handleServerFactsRefresh(c *gin.Context) {
 	name := strings.TrimSpace(c.Param("name"))
 	mu.Lock()
 	server, ok := findServerByNameLocked(name)
+	blocked, status := serverActionStatusInProgressLocked(name)
 	mu.Unlock()
 	if !ok {
 		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server not found", nil)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		return
+	}
+	if blocked {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+		c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before refreshing host facts"})
 		return
 	}
 	record, err := refreshServerFacts(server)
@@ -2395,6 +2401,9 @@ func handleServerFactsRefresh(c *gin.Context) {
 
 func updateHealthFromResults(health *dashboardHealthInfo, results []updatePrecheckResult, source, collectedAt string) {
 	if health == nil {
+		return
+	}
+	if !healthUpdateIsNewer(health.CollectedAt, collectedAt) {
 		return
 	}
 	for _, result := range results {
@@ -2422,6 +2431,26 @@ func updateHealthFromResults(health *dashboardHealthInfo, results []updatePreche
 			health.CollectedAt = collectedAt
 		}
 	}
+}
+
+func healthUpdateIsNewer(currentAt, candidateAt string) bool {
+	candidateAt = strings.TrimSpace(candidateAt)
+	if candidateAt == "" {
+		return false
+	}
+	currentAt = strings.TrimSpace(currentAt)
+	if currentAt == "" {
+		return true
+	}
+	candidate, err := parseAppTimestamp(candidateAt)
+	if err != nil {
+		return false
+	}
+	current, err := parseAppTimestamp(currentAt)
+	if err != nil {
+		return true
+	}
+	return candidate.After(current)
 }
 
 func precheckResultsFromMeta(meta map[string]any, key string) []updatePrecheckResult {
@@ -2817,8 +2846,9 @@ func buildDashboardSummary(rawWindow string, now time.Time) (dashboardSummaryRes
 		}
 		agg := updateByServer[server.Name]
 		if agg != nil && agg.meta != nil {
-			updateHealthFromResults(&health, precheckResultsFromMeta(agg.meta, "precheck_results"), "audit", agg.metaAt)
-			updateHealthFromResults(&health, precheckResultsFromMeta(agg.meta, "postcheck_results"), "audit", agg.metaAt)
+			auditResults := precheckResultsFromMeta(agg.meta, "precheck_results")
+			auditResults = append(auditResults, precheckResultsFromMeta(agg.meta, "postcheck_results")...)
+			updateHealthFromResults(&health, auditResults, "audit", agg.metaAt)
 		}
 		if health.RebootRequired != nil && *health.RebootRequired {
 			fleetReboot++

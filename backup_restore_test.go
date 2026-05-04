@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -277,7 +278,7 @@ func TestApplyBackupFilesRemovesSQLiteSidecars(t *testing.T) {
 		}
 	}
 
-	if err := applyBackupFiles(map[string][]byte{
+	if err := applyBackupFiles(context.Background(), map[string][]byte{
 		"servers.db":  dbSnapshot,
 		"config.json": configData,
 	}); err != nil {

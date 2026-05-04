@@ -225,6 +225,47 @@ func TestUpdateHealthFromResultsLeavesRebootUnknownOnCommandError(t *testing.T) 
 	}
 }
 
+func TestUpdateHealthFromResultsSkipsStaleAuditMetadata(t *testing.T) {
+	currentAt := time.Date(2026, 5, 4, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	staleAt := time.Date(2026, 5, 4, 11, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	newerAt := time.Date(2026, 5, 4, 13, 0, 0, 0, time.UTC).Format(time.RFC3339)
+	health := dashboardHealthInfo{
+		DiskStatus:  "ok",
+		DiskFreeKB:  2048,
+		DiskDetails: "fresh disk facts",
+		AptStatus:   "ok",
+		AptDetails:  "fresh apt facts",
+		CollectedAt: currentAt,
+		Source:      "facts",
+	}
+
+	updateHealthFromResults(&health, []updatePrecheckResult{
+		{Name: "disk_space", Passed: false, Details: "stale disk audit", Output: "available_kb=1"},
+		{Name: "apt_health", Passed: false, Details: "stale apt audit"},
+	}, "audit", staleAt)
+
+	if health.Source != "facts" || health.CollectedAt != currentAt {
+		t.Fatalf("Health source/time = %s/%s, want facts/%s", health.Source, health.CollectedAt, currentAt)
+	}
+	if health.DiskStatus != "ok" || health.DiskFreeKB != 2048 || health.DiskDetails != "fresh disk facts" {
+		t.Fatalf("Disk health = %s/%d/%q, want fresh facts", health.DiskStatus, health.DiskFreeKB, health.DiskDetails)
+	}
+	if health.AptStatus != "ok" || health.AptDetails != "fresh apt facts" {
+		t.Fatalf("APT health = %s/%q, want fresh facts", health.AptStatus, health.AptDetails)
+	}
+
+	updateHealthFromResults(&health, []updatePrecheckResult{
+		{Name: "apt_health", Passed: false, Details: "newer apt audit"},
+	}, "audit", newerAt)
+
+	if health.AptStatus != "critical" || health.AptDetails != "newer apt audit" {
+		t.Fatalf("APT health after newer audit = %s/%q, want newer critical audit", health.AptStatus, health.AptDetails)
+	}
+	if health.Source != "audit" || health.CollectedAt != newerAt {
+		t.Fatalf("Health source/time after newer audit = %s/%s, want audit/%s", health.Source, health.CollectedAt, newerAt)
+	}
+}
+
 func TestBuildDashboardSummaryProjectsFuturePolicyRun(t *testing.T) {
 	preserveServerState(t)
 	preserveDBState(t)

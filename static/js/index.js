@@ -1008,22 +1008,38 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 if (!raw) return;
                 const saved = JSON.parse(raw);
                 if (!saved || typeof saved !== "object") return;
-                const mappings = [
-                    ["search", "search"],
-                    ["statusFilter", "status-filter"],
-                    ["authFilter", "auth-filter"],
-                    ["groupBy", "group-by"],
-                    ["pageSize", "page-size"]
-                ];
-                mappings.forEach(([key, id]) => {
-                    const el = document.getElementById(id);
-                    if (!el || saved[key] === undefined || saved[key] === null) return;
-                    el.value = String(saved[key]);
-                });
+                restoreTextInputValue("search", saved.search, "");
+                restoreSelectValue("status-filter", saved.statusFilter, "");
+                restoreSelectValue("auth-filter", saved.authFilter, "");
+                restoreSelectValue("group-by", saved.groupBy, "");
+                restorePageSizeValue(saved.pageSize);
                 selectedServerName = typeof saved.selectedServerName === "string" ? saved.selectedServerName : "";
             } catch (_) {
                 // Ignore invalid saved dashboard state.
             }
+        }
+
+        function restoreTextInputValue(id, value, fallback) {
+            const el = document.getElementById(id);
+            if (!el || el.tagName !== "INPUT") return;
+            el.value = typeof value === "string" && value.length <= 200 ? value : fallback;
+        }
+
+        function restoreSelectValue(id, value, fallback) {
+            const el = document.getElementById(id);
+            if (!el || el.tagName !== "SELECT") return;
+            const optionValues = Array.from(el.options).map(option => option.value);
+            const normalized = value === undefined || value === null ? fallback : String(value);
+            el.value = optionValues.includes(normalized) ? normalized : fallback;
+        }
+
+        function restorePageSizeValue(value) {
+            const el = document.getElementById("page-size");
+            if (!el || el.tagName !== "SELECT") return;
+            const fallback = Array.from(el.options).some(option => option.value === "25") ? "25" : (el.options[0]?.value || "");
+            const parsed = parseInt(value, 10);
+            const normalized = Number.isFinite(parsed) && parsed > 0 ? String(parsed) : fallback;
+            restoreSelectValue("page-size", normalized, fallback);
         }
 
         function saveDashboardFilters() {
@@ -1171,7 +1187,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 group.items.forEach(server => {
                     const row = document.createElement('tr');
                     row.dataset.name = server.name;
-                    if (selectedServerName === server.name) {
+                    const rowSelected = selectedServerName === server.name;
+                    row.setAttribute("aria-selected", rowSelected ? "true" : "false");
+                    if (rowSelected) {
                         row.classList.add('row-selected');
                     }
                     if (hoveredName === server.name) {
@@ -1216,7 +1234,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                           `;
                     row.innerHTML = `
                         <td class="select-col"><input type="checkbox" class="row-select" data-name="${safeDataName}" ${selectedServers.has(server.name) ? "checked" : ""}></td>
-                        <td class="name-cell" title="${safeNameHtml}">${safeNameHtml}</td>
+                        <td class="name-cell" title="${safeNameHtml}"><button type="button" class="select-host" data-select-host="${safeDataName}" aria-pressed="${rowSelected ? 'true' : 'false'}">${safeNameHtml}</button></td>
                         <td class="status-col"><span class="status-pill status-${safeStatus}">${safeStatusText}</span></td>
                         <td class="risk-col"><span class="risk-chip risk-${escapeHtml(riskLevel)}">${escapeHtml(riskLabel)}</span></td>
                         <td class="last-update-col">${escapeHtml(lastUpdateLabel)}</td>
@@ -1244,6 +1262,12 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         function getServerByName(name) {
             return allServers.find(server => server.name === name);
+        }
+
+        function selectServer(name) {
+            selectedServerName = name || "";
+            saveDashboardFilters();
+            renderTable();
         }
 
         async function copyLogs(name = drawerServerName) {
@@ -1334,12 +1358,15 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 handleServerAction(button.dataset.action || "", button.dataset.name || "", button.dataset.tab || "logs");
                 return;
             }
-            if (e.target.closest('input, select, textarea, a, label')) return;
+            const selectHostButton = e.target.closest('button[data-select-host]');
+            if (selectHostButton) {
+                selectServer(selectHostButton.dataset.selectHost || "");
+                return;
+            }
+            if (e.target.closest('button, input, select, textarea, a, label')) return;
             const row = e.target.closest('tr[data-name]');
             if (row) {
-                selectedServerName = row.dataset.name || "";
-                saveDashboardFilters();
-                renderTable();
+                selectServer(row.dataset.name || "");
             }
         });
         tbodyHover.addEventListener('mouseover', (e) => {
@@ -1663,9 +1690,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             }
             const selectButton = e.target.closest('button[data-select-server]');
             if (selectButton) {
-                selectedServerName = selectButton.dataset.selectServer || "";
-                saveDashboardFilters();
-                renderTable();
+                selectServer(selectButton.dataset.selectServer || "");
             }
         });
 

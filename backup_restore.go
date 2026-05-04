@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -525,7 +526,7 @@ func validateBackupConfigData(data []byte) ([]byte, error) {
 	return key, nil
 }
 
-func validateBackupDatabaseData(data []byte, encryptionKey []byte) error {
+func validateBackupDatabaseData(ctx context.Context, data []byte, encryptionKey []byte) error {
 	tmp, err := os.CreateTemp("", "slu-restore-validate-*.sqlite")
 	if err != nil {
 		return err
@@ -547,14 +548,14 @@ func validateBackupDatabaseData(data []byte, encryptionKey []byte) error {
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	if _, err := db.Exec(fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout=%d", sqliteBusyTimeoutMS)); err != nil {
 		return fmt.Errorf("set restored database busy_timeout: %w", err)
 	}
 	if err := ensureSchema(db); err != nil {
 		return fmt.Errorf("validate restored database schema: %w", err)
 	}
 
-	rows, err := db.Query("SELECT name, pass_enc, key_enc FROM servers ORDER BY name")
+	rows, err := db.QueryContext(ctx, "SELECT name, pass_enc, key_enc FROM servers ORDER BY name")
 	if err != nil {
 		return fmt.Errorf("validate restored servers: %w", err)
 	}
@@ -576,7 +577,7 @@ func validateBackupDatabaseData(data []byte, encryptionKey []byte) error {
 	}
 
 	var globalKeyEnc string
-	err = db.QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&globalKeyEnc)
+	err = db.QueryRowContext(ctx, "SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&globalKeyEnc)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read restored global SSH key: %w", err)
 	}
@@ -588,12 +589,12 @@ func validateBackupDatabaseData(data []byte, encryptionKey []byte) error {
 	return nil
 }
 
-func validateBackupRuntimeFiles(files map[string][]byte) error {
+func validateBackupRuntimeFiles(ctx context.Context, files map[string][]byte) error {
 	key, err := validateBackupConfigData(files["config.json"])
 	if err != nil {
 		return err
 	}
-	if err := validateBackupDatabaseData(files["servers.db"], key); err != nil {
+	if err := validateBackupDatabaseData(ctx, files["servers.db"], key); err != nil {
 		return err
 	}
 	return nil
@@ -674,14 +675,14 @@ func clearPersistedSessions() error {
 	return nil
 }
 
-func applyBackupFiles(files map[string][]byte) error {
+func applyBackupFiles(ctx context.Context, files map[string][]byte) error {
 	dbTarget := dbPath()
 	configTarget := configPath()
 	knownHostsTarget := filepath.Join(filepath.Dir(dbPath()), "known_hosts")
 	if p, err := knownHostsWritePath(); err == nil && strings.TrimSpace(p) != "" {
 		knownHostsTarget = p
 	}
-	if err := validateBackupRuntimeFiles(files); err != nil {
+	if err := validateBackupRuntimeFiles(ctx, files); err != nil {
 		return err
 	}
 
@@ -1065,7 +1066,11 @@ func handleBackupRestore(c *gin.Context) {
 	phase := jobPhaseApply
 	summary := "Applying restored backup files"
 	_ = jm.UpdateJob(job.ID, JobUpdate{Phase: &phase, Summary: &summary})
-	if err := applyBackupFiles(files); err != nil {
+	restoreCtx := context.Background()
+	if c.Request != nil {
+		restoreCtx = c.Request.Context()
+	}
+	if err := applyBackupFiles(restoreCtx, files); err != nil {
 		jm = currentJobManager()
 		if persistErr := persistMaintenanceState(currentMaintenanceState()); persistErr != nil {
 			log.Printf("handleBackupRestore: failed to re-persist active maintenance state after restore error: %v", persistErr)

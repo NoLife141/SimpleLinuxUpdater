@@ -222,7 +222,7 @@ func TestNormalizePort(t *testing.T) {
 
 The project uses GitHub Actions (see `.github/workflows/ci.yml`):
 - Runs unit tests, race detector tests, and coverage tests on pushes/PRs to main
-- Go version: 1.25.x
+- Go version: Go 1.26+ via `go.mod`
 - No separate lint step (Go's built-in tooling is used)
 
 ## Release Process

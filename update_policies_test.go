@@ -1305,6 +1305,12 @@ func TestProcessDueUpdatePoliciesRechecksMaintenanceAfterLockWait(t *testing.T) 
 	}
 
 	backupRestoreMu.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			backupRestoreMu.Unlock()
+		}
+	})
 	setCurrentMaintenanceState(MaintenanceState{
 		Active:    true,
 		Kind:      "backup_restore",
@@ -1323,6 +1329,7 @@ func TestProcessDueUpdatePoliciesRechecksMaintenanceAfterLockWait(t *testing.T) 
 
 	setCurrentMaintenanceState(MaintenanceState{})
 	backupRestoreMu.Unlock()
+	locked = false
 
 	select {
 	case err := <-done:

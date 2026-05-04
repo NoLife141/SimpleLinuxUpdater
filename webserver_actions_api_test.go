@@ -220,6 +220,15 @@ func TestServerMutationRoutesRejectActiveServerActions(t *testing.T) {
 		t.Fatalf("active server key clear status = %d, want %d (body=%s)", keyClearRec.Code, http.StatusConflict, keyClearRec.Body.String())
 	}
 
+	factsRec := httptest.NewRecorder()
+	factsReq := httptest.NewRequest(http.MethodPost, "/api/servers/"+server.Name+"/facts/refresh", nil)
+	factsReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(factsReq)
+	handler.ServeHTTP(factsRec, factsReq)
+	if factsRec.Code != http.StatusConflict {
+		t.Fatalf("active server facts refresh status = %d, want %d (body=%s)", factsRec.Code, http.StatusConflict, factsRec.Body.String())
+	}
+
 	mu.Lock()
 	defer mu.Unlock()
 	if len(servers) != 1 || servers[0].Name != server.Name {
