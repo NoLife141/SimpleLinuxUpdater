@@ -1,6 +1,6 @@
 module debian-updater
 
-go 1.26.0
+go 1.26.2
 
 require (
 	github.com/alexedwards/argon2id v1.0.0

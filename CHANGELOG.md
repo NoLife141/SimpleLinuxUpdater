@@ -12,6 +12,7 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Modernize the operations UI with a denser SOC console layout across the dashboard, Manage, Observability, Admin, Login, and Setup pages.
 - Refresh frontend styling, navigation, empty states, and runtime metadata presentation for a more consistent Docker-first release experience.
+- Pin the release toolchain to Go 1.26.2 so release `govulncheck` uses the patched standard library baseline.
 - Upgrade `modernc.org/sqlite` to the current Go 1.26-compatible baseline.
 
 ### Fixed
