@@ -6,6 +6,16 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.2] - 2026-05-05
+
+### Added
+
+- Add a production manual QA checklist for broad browser validation before and after hotfix releases.
+
+### Fixed
+
+- Keep the status drawer bounded to the viewport and make pending updates scroll inside the drawer, preventing the dashboard behind it from scrolling while reviewing long pending package lists.
+
 ## [v0.2.1] - 2026-05-05
 
 ### Changed

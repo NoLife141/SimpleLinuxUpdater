@@ -1069,6 +1069,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             drawerOpen = true;
             drawerServerName = name;
             drawerTab = nextTab;
+            document.body.classList.add('drawer-open');
             renderDrawer();
         }
 
@@ -1079,6 +1080,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             drawer.classList.remove('open');
             backdrop.classList.remove('open');
             drawer.setAttribute('aria-hidden', 'true');
+            document.body.classList.remove('drawer-open');
         }
 
         function setDrawerTab(tab) {
