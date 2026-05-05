@@ -161,7 +161,7 @@ jobs:
 
           (
             cd dist
-            sha256sum *.tar.gz *.zip > checksums.txt
+            sha256sum ./*.tar.gz ./*.zip > checksums.txt
           )
 
       - name: Build release notes from CHANGELOG

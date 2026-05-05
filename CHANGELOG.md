@@ -19,6 +19,7 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 - Return an empty JSON array from `GET /api/servers` on fresh installs so Dashboard and Manage pages no longer show invalid payload errors before the first server is added.
 - Run the Docker image with `GIN_MODE=release` to avoid production containers starting with Gin debug logging and route dumps.
+- Generate release checksums with option-safe archive globs so the release workflow passes ShellCheck in CI.
 
 ## [v0.2.0] - 2026-04-18
 
