@@ -5720,7 +5720,7 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
-		var statuses []ServerStatus
+		statuses := make([]ServerStatus, 0, len(servers))
 		for _, s := range servers {
 			status := statusMap[s.Name]
 			if status == nil {

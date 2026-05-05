@@ -40,6 +40,34 @@ func setupAuthenticatedHandler(t *testing.T, dbFile string) (http.Handler, *http
 	return handler, testSessionCookieFromRecorder(t, setupRec)
 }
 
+func TestAPIServersReturnsEmptyArrayOnFreshInstall(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "empty-servers.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = nil
+		statusMap = map[string]*ServerStatus{}
+	}()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/servers status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Fatalf("GET /api/servers body = %s, want []", got)
+	}
+}
+
 func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 	t.Run("starts from idle", func(t *testing.T) {
 		preserveDBState(t)
