@@ -6,6 +6,19 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-05-05
+
+### Changed
+
+- Modernize the operations UI with a denser SOC console layout across the dashboard, Manage, Observability, Admin, Login, and Setup pages.
+- Refresh frontend styling, navigation, empty states, and runtime metadata presentation for a more consistent Docker-first release experience.
+- Upgrade `modernc.org/sqlite` to the current Go 1.26-compatible baseline.
+
+### Fixed
+
+- Return an empty JSON array from `GET /api/servers` on fresh installs so Dashboard and Manage pages no longer show invalid payload errors before the first server is added.
+- Run the Docker image with `GIN_MODE=release` to avoid production containers starting with Gin debug logging and route dumps.
+
 ## [v0.2.0] - 2026-04-18
 
 ### Added
