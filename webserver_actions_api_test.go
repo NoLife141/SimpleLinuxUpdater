@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,6 +38,34 @@ func setupAuthenticatedHandler(t *testing.T, dbFile string) (http.Handler, *http
 		t.Fatalf("setup status = %d, want %d (body=%s)", setupRec.Code, http.StatusOK, setupRec.Body.String())
 	}
 	return handler, testSessionCookieFromRecorder(t, setupRec)
+}
+
+func TestAPIServersReturnsEmptyArrayOnFreshInstall(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "empty-servers.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = nil
+		statusMap = map[string]*ServerStatus{}
+	}()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/servers", nil)
+	req.AddCookie(sessionCookie)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/servers status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != "[]" {
+		t.Fatalf("GET /api/servers body = %s, want []", got)
+	}
 }
 
 func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
@@ -135,6 +164,233 @@ func TestUpdateRouteStartsFromIdleAndConflictsWhenBusy(t *testing.T) {
 			t.Fatalf("update start conflict status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
 		}
 	})
+}
+
+func TestServerMutationRoutesRejectActiveServerActions(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "server-mutation-active.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-active-mutation", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {Name: server.Name, Status: "updating", Upgradable: []string{}},
+		}
+	}()
+	if err := saveServers(); err != nil {
+		t.Fatalf("saveServers() unexpected error: %v", err)
+	}
+
+	updateBody := bytes.NewBufferString(`{"name":"srv-active-renamed","host":"example.net","port":22,"user":"root"}`)
+	updateRec := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPut, "/api/servers/"+server.Name, updateBody)
+	updateReq.AddCookie(sessionCookie)
+	updateReq.Header.Set("Content-Type", "application/json")
+	markSameOriginAuthRequest(updateReq)
+	handler.ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusConflict {
+		t.Fatalf("active server update status = %d, want %d (body=%s)", updateRec.Code, http.StatusConflict, updateRec.Body.String())
+	}
+
+	deleteRec := httptest.NewRecorder()
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/servers/"+server.Name, nil)
+	deleteReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(deleteReq)
+	handler.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusConflict {
+		t.Fatalf("active server delete status = %d, want %d (body=%s)", deleteRec.Code, http.StatusConflict, deleteRec.Body.String())
+	}
+
+	passwordRec := httptest.NewRecorder()
+	passwordReq := httptest.NewRequest(http.MethodDelete, "/api/servers/"+server.Name+"/password", nil)
+	passwordReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(passwordReq)
+	handler.ServeHTTP(passwordRec, passwordReq)
+	if passwordRec.Code != http.StatusConflict {
+		t.Fatalf("active server password clear status = %d, want %d (body=%s)", passwordRec.Code, http.StatusConflict, passwordRec.Body.String())
+	}
+
+	var keyBody bytes.Buffer
+	keyWriter := multipart.NewWriter(&keyBody)
+	keyPart, err := keyWriter.CreateFormFile("key", "id_ed25519")
+	if err != nil {
+		t.Fatalf("CreateFormFile() unexpected error: %v", err)
+	}
+	if _, err := keyPart.Write([]byte("private-key")); err != nil {
+		t.Fatalf("Write() unexpected error: %v", err)
+	}
+	if err := keyWriter.Close(); err != nil {
+		t.Fatalf("multipart close unexpected error: %v", err)
+	}
+	keyUploadRec := httptest.NewRecorder()
+	keyUploadReq := httptest.NewRequest(http.MethodPost, "/api/servers/"+server.Name+"/key", &keyBody)
+	keyUploadReq.AddCookie(sessionCookie)
+	keyUploadReq.Header.Set("Content-Type", keyWriter.FormDataContentType())
+	markSameOriginAuthRequest(keyUploadReq)
+	handler.ServeHTTP(keyUploadRec, keyUploadReq)
+	if keyUploadRec.Code != http.StatusConflict {
+		t.Fatalf("active server key upload status = %d, want %d (body=%s)", keyUploadRec.Code, http.StatusConflict, keyUploadRec.Body.String())
+	}
+
+	keyClearRec := httptest.NewRecorder()
+	keyClearReq := httptest.NewRequest(http.MethodDelete, "/api/servers/"+server.Name+"/key", nil)
+	keyClearReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(keyClearReq)
+	handler.ServeHTTP(keyClearRec, keyClearReq)
+	if keyClearRec.Code != http.StatusConflict {
+		t.Fatalf("active server key clear status = %d, want %d (body=%s)", keyClearRec.Code, http.StatusConflict, keyClearRec.Body.String())
+	}
+
+	factsRec := httptest.NewRecorder()
+	factsReq := httptest.NewRequest(http.MethodPost, "/api/servers/"+server.Name+"/facts/refresh", nil)
+	factsReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(factsReq)
+	handler.ServeHTTP(factsRec, factsReq)
+	if factsRec.Code != http.StatusConflict {
+		t.Fatalf("active server facts refresh status = %d, want %d (body=%s)", factsRec.Code, http.StatusConflict, factsRec.Body.String())
+	}
+
+	globalKeyUploadRec := httptest.NewRecorder()
+	globalKeyUploadReq := httptest.NewRequest(http.MethodPost, "/api/keys/global", nil)
+	globalKeyUploadReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(globalKeyUploadReq)
+	handler.ServeHTTP(globalKeyUploadRec, globalKeyUploadReq)
+	if globalKeyUploadRec.Code != http.StatusConflict {
+		t.Fatalf("active server global key upload status = %d, want %d (body=%s)", globalKeyUploadRec.Code, http.StatusConflict, globalKeyUploadRec.Body.String())
+	}
+
+	globalKeyClearRec := httptest.NewRecorder()
+	globalKeyClearReq := httptest.NewRequest(http.MethodDelete, "/api/keys/global", nil)
+	globalKeyClearReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(globalKeyClearReq)
+	handler.ServeHTTP(globalKeyClearRec, globalKeyClearReq)
+	if globalKeyClearRec.Code != http.StatusConflict {
+		t.Fatalf("active server global key clear status = %d, want %d (body=%s)", globalKeyClearRec.Code, http.StatusConflict, globalKeyClearRec.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(servers) != 1 || servers[0].Name != server.Name {
+		t.Fatalf("active server was mutated: %+v", servers)
+	}
+	if status := statusMap[server.Name]; status == nil || status.Status != "updating" {
+		t.Fatalf("active server status changed: %+v", status)
+	}
+}
+
+func TestFactsRefreshBlocksConcurrentServerActions(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "facts-refresh-busy.db")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	server := Server{Name: "srv-facts-busy", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	func() {
+		mu.Lock()
+		defer mu.Unlock()
+		servers = []Server{server}
+		statusMap = map[string]*ServerStatus{
+			server.Name: {Name: server.Name, Status: "idle", Upgradable: []string{}},
+		}
+	}()
+
+	enteredDial := make(chan struct{})
+	releaseDial := make(chan struct{})
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		close(enteredDial)
+		<-releaseDial
+		return &scriptedSSHConnection{
+			responses: map[string]scriptedResponse{
+				serverFactsOSCmd:           {stdout: "Ubuntu 24.04 LTS\n"},
+				serverFactsUptimeCmd:       {stdout: "12345.67 100.00\n"},
+				precheckDiskSpaceCmd:       {stdout: "2097152\n3145728\n"},
+				precheckDpkgAuditCmd:       {},
+				precheckAptCheckCmd:        {},
+				postcheckRebootRequiredCmd: {},
+			},
+		}, nil
+	})
+	t.Cleanup(func() {
+		setDialSSHConnection(origDial)
+	})
+
+	factsDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/servers/"+server.Name+"/facts/refresh", nil)
+		req.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(req)
+		handler.ServeHTTP(rec, req)
+		factsDone <- rec.Code
+	}()
+
+	select {
+	case <-enteredDial:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("facts refresh did not enter SSH dial")
+	}
+
+	updateRec := httptest.NewRecorder()
+	updateReq := httptest.NewRequest(http.MethodPost, "/api/update/"+server.Name, nil)
+	updateReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(updateReq)
+	handler.ServeHTTP(updateRec, updateReq)
+	if updateRec.Code != http.StatusConflict {
+		t.Fatalf("update during facts refresh status = %d, want %d (body=%s)", updateRec.Code, http.StatusConflict, updateRec.Body.String())
+	}
+
+	close(releaseDial)
+	select {
+	case code := <-factsDone:
+		if code != http.StatusOK {
+			t.Fatalf("facts refresh status = %d, want %d", code, http.StatusOK)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("facts refresh did not finish")
+	}
+}
+
+func TestStartJobRunnerMarksPanicFailedWithoutCrashing(t *testing.T) {
+	preserveDBState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "job-panic.db"))
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: "srv-panic",
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusQueued,
+	})
+	if err != nil {
+		t.Fatalf("CreateJob() unexpected error: %v", err)
+	}
+
+	startJobRunner(job.ID, func() {
+		panic("boom")
+	})
+
+	waitForCondition(t, 2*time.Second, func() bool {
+		record, err := currentJobManager().GetJob(job.ID)
+		return err == nil && record.Status == jobStatusFailed && record.Phase == jobPhaseComplete && record.ErrorClass == "panic"
+	}, "panicked job is marked failed without crashing")
 }
 
 func TestApproveCancelRoutesRespectPendingState(t *testing.T) {
@@ -746,6 +1002,70 @@ func TestCancelRoutePreservesExplicitCancelSummaryOnUpdateJob(t *testing.T) {
 	}
 	if jobSummary != "Update cancelled" {
 		t.Fatalf("cancelled job summary = %q, want %q", jobSummary, "Update cancelled")
+	}
+}
+
+func TestRunnerJobSyncDoesNotOverwriteCancelledUpdateJob(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "actions-stale-sync-cancel.db"))
+	server := Server{Name: "srv-stale-sync-cancel", Host: "example.org", Port: 22, User: "root", Pass: "pw"}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "cancelled", Logs: ""},
+	}
+	mu.Unlock()
+	if err := initializeJobManager(); err != nil {
+		t.Fatalf("initializeJobManager() unexpected error: %v", err)
+	}
+	job, err := currentJobManager().CreateJob(JobCreateParams{
+		Kind:       jobKindUpdate,
+		ServerName: server.Name,
+		Actor:      "tester",
+		ClientIP:   "127.0.0.1",
+		Status:     jobStatusWaitingApproval,
+		Phase:      jobPhaseApprovalWait,
+		Summary:    "Waiting for approval",
+		LogsText:   "pending",
+	})
+	if err != nil {
+		t.Fatalf("CreateJob(update waiting approval) unexpected error: %v", err)
+	}
+	cancelledStatus := jobStatusCancelled
+	cancelledPhase := jobPhaseComplete
+	cancelledSummary := "Update cancelled"
+	finishedAt := jobTimestampNow()
+	if err := currentJobManager().UpdateJobWithoutRuntimeSync(job.ID, JobUpdate{
+		Status:     &cancelledStatus,
+		Phase:      &cancelledPhase,
+		Summary:    &cancelledSummary,
+		LogsText:   stringPtr("cancelled logs"),
+		FinishedAt: &finishedAt,
+	}); err != nil {
+		t.Fatalf("UpdateJobWithoutRuntimeSync(cancelled) unexpected error: %v", err)
+	}
+
+	runner := &withActorRunner{server: server, jobID: job.ID}
+	runner.syncJobFromStatus(&ServerStatus{
+		Name:           server.Name,
+		Status:         "pending_approval",
+		Logs:           "stale pending logs",
+		Upgradable:     []string{"openssl"},
+		PendingUpdates: []PendingUpdate{{Package: "openssl"}},
+	})
+
+	var jobStatus, jobPhase, jobSummary, jobLogs string
+	if err := getDB().QueryRow("SELECT status, phase, summary, logs_text FROM jobs WHERE id = ?", job.ID).Scan(&jobStatus, &jobPhase, &jobSummary, &jobLogs); err != nil {
+		t.Fatalf("query job after stale sync: %v", err)
+	}
+	if jobStatus != jobStatusCancelled || jobPhase != jobPhaseComplete || jobSummary != "Update cancelled" || jobLogs != "cancelled logs" {
+		t.Fatalf("job after stale sync = status=%q phase=%q summary=%q logs=%q, want cancelled/complete/update cancelled/cancelled logs", jobStatus, jobPhase, jobSummary, jobLogs)
+	}
+	runtimeStatus := currentStatusSnapshot(server.Name)
+	if runtimeStatus == nil || runtimeStatus.Status != "cancelled" || runtimeStatus.Logs != "" {
+		t.Fatalf("runtime status after stale sync = %+v, want cancelled with cleared logs", runtimeStatus)
 	}
 }
 

@@ -62,6 +62,7 @@ jobs:
           cache: 'npm'
 
       - name: Cache Playwright browser
+        id: playwright-cache
         uses: actions/cache@v5
         with:
           path: ~/.cache/ms-playwright
@@ -70,8 +71,13 @@ jobs:
       - name: Install E2E dependencies
         run: npm ci
 
-      - name: Install Playwright browser
-        run: npx playwright install chromium
+      - name: Install Playwright browser and OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
 
       - name: Run Playwright auth E2E
         run: npm run test:e2e

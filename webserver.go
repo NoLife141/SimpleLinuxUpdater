@@ -47,6 +47,23 @@ type Server struct {
 	Tags []string `json:"tags"`
 }
 
+func (s Server) MarshalJSON() ([]byte, error) {
+	type serverResponse struct {
+		Name string   `json:"name"`
+		Host string   `json:"host"`
+		Port int      `json:"port"`
+		User string   `json:"user"`
+		Tags []string `json:"tags"`
+	}
+	return json.Marshal(serverResponse{
+		Name: s.Name,
+		Host: s.Host,
+		Port: s.Port,
+		User: s.User,
+		Tags: append([]string(nil), s.Tags...),
+	})
+}
+
 type ServerStatus struct {
 	Name           string          `json:"name"`
 	Host           string          `json:"host"`
@@ -94,6 +111,8 @@ var saveServersFunc = saveServers
 var auditPruneTickerOnce sync.Once
 var observabilityCacheMu sync.RWMutex
 var observabilityCache = make(map[string]observabilityCacheEntry)
+var rebootCheckErrorRe = regexp.MustCompile(`\b(error|failed|failure|unable|cannot|can't)\b`)
+var rebootRequiredPhraseRe = regexp.MustCompile(`\b(reboot required|requires reboot|restart required|system restart required|needs reboot|need reboot)\b`)
 
 const configFileName = "config.json"
 const legacyServersFileName = "servers.json"
@@ -101,6 +120,7 @@ const globalKeySetting = "global_ssh_key"
 const metricsBearerTokenHashSetting = "metrics_bearer_token_hash"
 const metricsBearerTokenEntropyBytes = 32
 const maxUploadedKeyBytes = 64 * 1024
+const maxUploadedKeyRequestBytes = maxUploadedKeyBytes + 1024*1024
 const sshConnectTimeout = 15 * time.Second
 const auditRetentionDays = 90
 const auditPruneInterval = 12 * time.Hour
@@ -112,6 +132,7 @@ const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
 const retryMaxDelayMSEnv = "DEBIAN_UPDATER_RETRY_MAX_DELAY_MS"
 const retryJitterPctEnv = "DEBIAN_UPDATER_RETRY_JITTER_PCT"
 const sshCommandTimeoutSecondsEnv = "DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS"
+const trustedProxiesEnv = "DEBIAN_UPDATER_TRUSTED_PROXIES"
 const postchecksEnabledEnv = "DEBIAN_UPDATER_POSTCHECKS_ENABLED"
 const postcheckBlockOnAptHealthEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_APT_HEALTH"
 const postcheckBlockOnFailedUnitsEnv = "DEBIAN_UPDATER_POSTCHECK_BLOCK_ON_FAILED_UNITS"
@@ -135,6 +156,7 @@ const maxSSHCommandTimeout = 30 * time.Minute
 const cveLookupMaxPackages = 25
 const cveLookupMaxPerPackage = 12
 const cveLookupCommandTimeout = 20 * time.Second
+const updateApprovalPollInterval = 200 * time.Millisecond
 const postcheckFailedUnitsCmd = "systemctl --failed --no-legend --plain"
 const postcheckRebootRequiredCmd = "sh -c \"if [ -f /var/run/reboot-required ]; then echo required; fi\""
 const postcheckNameAptHealth = "post_apt_health"
@@ -143,7 +165,10 @@ const postcheckNameFailedUnits = "failed_units"
 const postcheckNameRebootRequired = "reboot_required"
 const postcheckNameCustomCmd = "custom_command"
 const updateCompleteAction = "update.complete"
-const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'"
+const serverFactsRefreshAction = "server.facts.refresh"
+const serverFactsOSCmd = "sh -c '. /etc/os-release 2>/dev/null; printf \"%s\\n\" \"${PRETTY_NAME:-unknown}\"'"
+const serverFactsUptimeCmd = "cat /proc/uptime"
+const defaultContentSecurityPolicy = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'"
 
 var errUploadedKeyTooLarge = errors.New("key file too large (max 64KB)")
 var errUploadedKeyEmpty = errors.New("empty key")
@@ -204,6 +229,98 @@ type observabilityCacheEntry struct {
 	cachedAt time.Time
 }
 
+type serverFactsRecord struct {
+	ServerName     string `json:"server_name"`
+	CollectedAt    string `json:"collected_at"`
+	OSPrettyName   string `json:"os_pretty_name"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	DiskStatus     string `json:"disk_status"`
+	DiskFreeKB     int64  `json:"disk_free_kb"`
+	DiskDetails    string `json:"disk_details"`
+	AptStatus      string `json:"apt_status"`
+	AptDetails     string `json:"apt_details"`
+	RebootRequired *bool  `json:"reboot_required"`
+	RawJSON        string `json:"raw_json,omitempty"`
+}
+
+type dashboardUpdateHistory struct {
+	Status            string  `json:"status"`
+	FinishedAt        string  `json:"finished_at"`
+	FinishedAtDisplay string  `json:"finished_at_display,omitempty"`
+	DurationMS        float64 `json:"duration_ms"`
+	Message           string  `json:"message"`
+	FailureCause      string  `json:"failure_cause,omitempty"`
+}
+
+type dashboardCommandHistoryItem struct {
+	CreatedAt        string `json:"created_at"`
+	CreatedAtDisplay string `json:"created_at_display,omitempty"`
+	Action           string `json:"action"`
+	Status           string `json:"status"`
+	Message          string `json:"message"`
+	Actor            string `json:"actor"`
+}
+
+type dashboardScheduleInfo struct {
+	State               string `json:"state"`
+	PolicyName          string `json:"policy_name,omitempty"`
+	ScheduledForUTC     string `json:"scheduled_for_utc,omitempty"`
+	ScheduledForDisplay string `json:"scheduled_for_display,omitempty"`
+	Status              string `json:"status,omitempty"`
+	Reason              string `json:"reason,omitempty"`
+	Summary             string `json:"summary,omitempty"`
+}
+
+type dashboardNoRunInfo struct {
+	Active   bool   `json:"active"`
+	Scope    string `json:"scope,omitempty"`
+	Summary  string `json:"summary"`
+	Timezone string `json:"timezone"`
+}
+
+type dashboardHealthInfo struct {
+	RebootRequired *bool  `json:"reboot_required"`
+	DiskStatus     string `json:"disk_status"`
+	DiskFreeKB     int64  `json:"disk_free_kb"`
+	DiskDetails    string `json:"disk_details"`
+	AptStatus      string `json:"apt_status"`
+	AptDetails     string `json:"apt_details"`
+	OSPrettyName   string `json:"os_pretty_name"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	CollectedAt    string `json:"collected_at"`
+	Source         string `json:"source"`
+}
+
+type dashboardRiskInfo struct {
+	Level           string   `json:"level"`
+	Summary         string   `json:"summary"`
+	PendingPackages int      `json:"pending_packages"`
+	SecurityUpdates int      `json:"security_updates"`
+	CVEs            []string `json:"cves"`
+}
+
+type dashboardServerSummary struct {
+	Name             string                        `json:"name"`
+	LastUpdate       *dashboardUpdateHistory       `json:"last_update,omitempty"`
+	LastFailedUpdate *dashboardUpdateHistory       `json:"last_failed_update,omitempty"`
+	AvgDurationMS    float64                       `json:"avg_duration_ms"`
+	DurationSamples  int                           `json:"duration_samples"`
+	NextRun          dashboardScheduleInfo         `json:"next_run"`
+	NoRun            dashboardNoRunInfo            `json:"no_run"`
+	Health           dashboardHealthInfo           `json:"health"`
+	Risk             dashboardRiskInfo             `json:"risk"`
+	CommandHistory   []dashboardCommandHistoryItem `json:"command_history"`
+}
+
+type dashboardSummaryResponse struct {
+	Window      string                   `json:"window"`
+	From        string                   `json:"from"`
+	To          string                   `json:"to"`
+	GeneratedAt string                   `json:"generated_at"`
+	Fleet       map[string]any           `json:"fleet"`
+	Servers     []dashboardServerSummary `json:"servers"`
+}
+
 type RetryPolicy struct {
 	MaxAttempts int
 	BaseDelay   time.Duration
@@ -224,6 +341,7 @@ type updatePrecheckResult struct {
 	Passed  bool   `json:"passed"`
 	Details string `json:"details"`
 	Output  string `json:"output,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 type updatePrecheckSummary struct {
@@ -344,6 +462,39 @@ func configPath() string {
 	return filepath.Join(filepath.Dir(dbPath()), configFileName)
 }
 
+func ensurePrivateDirForFile(path string) error {
+	dir := filepath.Dir(path)
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return err
+	}
+	return nil
+}
+
+func chmodIfExists(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func hardenRuntimeDataFilePermissions(path string) error {
+	if err := chmodIfExists(path, 0600); err != nil {
+		return err
+	}
+	for _, sidecar := range sqliteSidecarPaths(path) {
+		if err := chmodIfExists(sidecar, 0600); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func getDB() *sql.DB {
 	runtimeStateMu.RLock()
 	if db != nil {
@@ -357,7 +508,7 @@ func getDB() *sql.DB {
 	defer runtimeStateMu.Unlock()
 	dbOnce.Do(func() {
 		path := dbPath()
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		if err := ensurePrivateDirForFile(path); err != nil {
 			log.Fatalf("Failed to create db directory: %v", err)
 		}
 		var err error
@@ -396,62 +547,87 @@ func getDB() *sql.DB {
 		if err := ensureSchema(db); err != nil {
 			log.Fatalf("Failed to migrate db schema: %v", err)
 		}
+		if err := hardenRuntimeDataFilePermissions(path); err != nil {
+			log.Fatalf("Failed to harden db file permissions: %v", err)
+		}
 	})
 	return db
 }
 
-func getEncryptionKey() []byte {
-	runtimeStateMu.RLock()
-	if encryptionKey != nil {
-		key := encryptionKey
-		runtimeStateMu.RUnlock()
-		return key
-	}
-	runtimeStateMu.RUnlock()
-
-	path := configPath()
-	var cfg map[string]string
-	if data, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			log.Fatalf("Failed to parse %s: %v", path, err)
-		}
-	} else if !os.IsNotExist(err) {
-		log.Fatalf("Failed to read %s: %v", path, err)
-	}
-
-	keyStr := ""
-	if cfg != nil {
-		keyStr = strings.TrimSpace(cfg["encryption_key"])
-	}
-
+func decodeEncryptionKeyValue(keyStr string) ([]byte, error) {
+	keyStr = strings.TrimSpace(keyStr)
 	if keyStr == "" {
-		keyBytes := make([]byte, 32)
-		if _, err := rand.Read(keyBytes); err != nil {
-			log.Fatalf("Failed to generate encryption key: %v", err)
-		}
-		keyStr = base64.StdEncoding.EncodeToString(keyBytes)
-		cfg = map[string]string{"encryption_key": keyStr}
-		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, errors.New("missing encryption_key")
+	}
+	keyBytes, err := base64.StdEncoding.DecodeString(keyStr)
+	if err != nil {
+		return nil, err
+	}
+	if len(keyBytes) != 32 {
+		return nil, errors.New("encryption_key must be base64 32 bytes")
+	}
+	return keyBytes, nil
+}
+
+func getEncryptionKey() []byte {
+	keyOnce.Do(func() {
+		path := configPath()
+		if err := ensurePrivateDirForFile(path); err != nil {
 			log.Fatalf("Failed to create config dir: %v", err)
 		}
-		data, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			log.Fatalf("Failed to serialize config: %v", err)
+		var cfg map[string]string
+		if data, err := os.ReadFile(path); err == nil {
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				log.Fatalf("Failed to parse %s: %v", path, err)
+			}
+			if err := chmodIfExists(path, 0600); err != nil {
+				log.Fatalf("Failed to harden %s permissions: %v", path, err)
+			}
+		} else if !os.IsNotExist(err) {
+			log.Fatalf("Failed to read %s: %v", path, err)
 		}
-		if err := os.WriteFile(path, data, 0600); err != nil {
-			log.Fatalf("Failed to write %s: %v", path, err)
+
+		keyStr := ""
+		if cfg != nil {
+			keyStr = strings.TrimSpace(cfg["encryption_key"])
 		}
-	}
 
-	keyBytes, err := base64.StdEncoding.DecodeString(keyStr)
-	if err != nil || len(keyBytes) != 32 {
-		log.Fatalf("Invalid encryption_key in %s (must be base64 32 bytes)", path)
-	}
+		if keyStr == "" {
+			keyBytes := make([]byte, 32)
+			if _, err := rand.Read(keyBytes); err != nil {
+				log.Fatalf("Failed to generate encryption key: %v", err)
+			}
+			keyStr = base64.StdEncoding.EncodeToString(keyBytes)
+			cfg = map[string]string{"encryption_key": keyStr}
+			data, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				log.Fatalf("Failed to serialize config: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				log.Fatalf("Failed to write %s: %v", path, err)
+			}
+			if err := chmodIfExists(path, 0600); err != nil {
+				log.Fatalf("Failed to harden %s permissions: %v", path, err)
+			}
+		}
 
-	runtimeStateMu.Lock()
-	defer runtimeStateMu.Unlock()
-	encryptionKey = keyBytes
-	return keyBytes
+		keyBytes, err := decodeEncryptionKeyValue(keyStr)
+		if err != nil || len(keyBytes) != 32 {
+			log.Fatalf("Invalid encryption_key in %s (must be base64 32 bytes)", path)
+		}
+
+		runtimeStateMu.Lock()
+		encryptionKey = keyBytes
+		runtimeStateMu.Unlock()
+	})
+
+	runtimeStateMu.RLock()
+	key := encryptionKey
+	runtimeStateMu.RUnlock()
+	if key == nil {
+		log.Fatalf("Encryption key initialization failed")
+	}
+	return key
 }
 
 func ensureSchema(db *sql.DB) error {
@@ -614,6 +790,26 @@ func ensureSchema(db *sql.DB) error {
 		return err
 	}
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS server_facts (
+			server_name TEXT PRIMARY KEY,
+			collected_at TEXT NOT NULL,
+			os_pretty_name TEXT NOT NULL DEFAULT '',
+			uptime_seconds INTEGER NOT NULL DEFAULT 0,
+			disk_status TEXT NOT NULL DEFAULT 'unknown',
+			disk_free_kb INTEGER NOT NULL DEFAULT 0,
+			disk_details TEXT NOT NULL DEFAULT '',
+			apt_status TEXT NOT NULL DEFAULT 'unknown',
+			apt_details TEXT NOT NULL DEFAULT '',
+			reboot_required INTEGER,
+			raw_json TEXT NOT NULL DEFAULT '{}'
+		)
+	`); err != nil {
+		return err
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_server_facts_collected_at ON server_facts (collected_at DESC)"); err != nil {
 		return err
 	}
 	if err := ensureJobSchema(db); err != nil {
@@ -1356,9 +1552,7 @@ func checkAptHealth(client sshConnection) updatePrecheckResult {
 
 func checkPostAptHealth(client sshConnection) updatePrecheckResult {
 	result := runAptHealthCheck(client, postcheckNameAptHealth)
-	if strings.Contains(result.Details, "pre-check") {
-		result.Details = strings.Replace(result.Details, "pre-check", "post-check", 1)
-	}
+	result.Details = strings.Replace(result.Details, "pre-check", "post-check", 1)
 	return result
 }
 
@@ -1465,6 +1659,7 @@ func checkRebootRequired(client sshConnection) updatePrecheckResult {
 			Passed:  false,
 			Details: fmt.Sprintf("failed to evaluate reboot-required state: %v", err),
 			Output:  output,
+			Error:   err.Error(),
 		}
 	}
 	if strings.Contains(strings.ToLower(strings.TrimSpace(stdout)), "required") {
@@ -1986,6 +2181,787 @@ func handleObservabilitySummary(c *gin.Context) {
 	c.JSON(http.StatusOK, summary)
 }
 
+func saveServerFacts(record serverFactsRecord) error {
+	record.ServerName = strings.TrimSpace(record.ServerName)
+	if record.ServerName == "" {
+		return errors.New("server name is required")
+	}
+	if strings.TrimSpace(record.CollectedAt) == "" {
+		record.CollectedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if strings.TrimSpace(record.DiskStatus) == "" {
+		record.DiskStatus = "unknown"
+	}
+	if strings.TrimSpace(record.AptStatus) == "" {
+		record.AptStatus = "unknown"
+	}
+	if strings.TrimSpace(record.RawJSON) == "" {
+		record.RawJSON = "{}"
+	}
+	var rebootValue any
+	if record.RebootRequired != nil {
+		rebootValue = boolToInt(*record.RebootRequired)
+	}
+	_, err := getDB().Exec(`
+		INSERT INTO server_facts (
+			server_name, collected_at, os_pretty_name, uptime_seconds,
+			disk_status, disk_free_kb, disk_details, apt_status, apt_details,
+			reboot_required, raw_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(server_name) DO UPDATE SET
+			collected_at = excluded.collected_at,
+			os_pretty_name = excluded.os_pretty_name,
+			uptime_seconds = excluded.uptime_seconds,
+			disk_status = excluded.disk_status,
+			disk_free_kb = excluded.disk_free_kb,
+			disk_details = excluded.disk_details,
+			apt_status = excluded.apt_status,
+			apt_details = excluded.apt_details,
+			reboot_required = excluded.reboot_required,
+			raw_json = excluded.raw_json
+	`,
+		record.ServerName,
+		record.CollectedAt,
+		record.OSPrettyName,
+		record.UptimeSeconds,
+		record.DiskStatus,
+		record.DiskFreeKB,
+		record.DiskDetails,
+		record.AptStatus,
+		record.AptDetails,
+		rebootValue,
+		record.RawJSON,
+	)
+	return err
+}
+
+func loadServerFacts() (map[string]serverFactsRecord, error) {
+	rows, err := getDB().Query(`
+		SELECT server_name, collected_at, os_pretty_name, uptime_seconds,
+		       disk_status, disk_free_kb, disk_details, apt_status, apt_details,
+		       reboot_required, raw_json
+		  FROM server_facts
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := map[string]serverFactsRecord{}
+	for rows.Next() {
+		var record serverFactsRecord
+		var reboot sql.NullInt64
+		if err := rows.Scan(
+			&record.ServerName,
+			&record.CollectedAt,
+			&record.OSPrettyName,
+			&record.UptimeSeconds,
+			&record.DiskStatus,
+			&record.DiskFreeKB,
+			&record.DiskDetails,
+			&record.AptStatus,
+			&record.AptDetails,
+			&reboot,
+			&record.RawJSON,
+		); err != nil {
+			return nil, err
+		}
+		if reboot.Valid {
+			required := reboot.Int64 != 0
+			record.RebootRequired = &required
+		}
+		records[record.ServerName] = record
+	}
+	return records, rows.Err()
+}
+
+func renameServerFactsTx(tx *sql.Tx, oldName, newName string) error {
+	if strings.TrimSpace(oldName) == "" || strings.TrimSpace(newName) == "" || oldName == newName {
+		return nil
+	}
+	_, err := tx.Exec("UPDATE server_facts SET server_name = ? WHERE server_name = ?", newName, oldName)
+	return err
+}
+
+func diskFreeKBFromOutput(output string) (int64, bool) {
+	var minFree int64
+	found := false
+	for _, field := range strings.Fields(output) {
+		value, err := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
+		if err != nil {
+			continue
+		}
+		if !found || value < minFree {
+			minFree = value
+			found = true
+		}
+	}
+	return minFree, found
+}
+
+func healthStatusFromResult(result updatePrecheckResult) string {
+	if result.Passed {
+		return "ok"
+	}
+	return "critical"
+}
+
+func parseUptimeSeconds(output string) int64 {
+	fields := strings.Fields(output)
+	if len(fields) == 0 {
+		return 0
+	}
+	seconds, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || seconds < 0 || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return 0
+	}
+	return int64(seconds)
+}
+
+func rebootResultRequiresRestart(result updatePrecheckResult) (bool, bool) {
+	if strings.TrimSpace(result.Error) != "" {
+		return false, false
+	}
+	if result.Passed {
+		return false, true
+	}
+	text := strings.ToLower(result.Details + " " + result.Output)
+	if rebootCheckErrorRe.MatchString(text) {
+		return false, false
+	}
+	if rebootRequiredPhraseRe.MatchString(text) {
+		return true, true
+	}
+	return false, true
+}
+
+func collectServerFactsWithConnection(server Server, client sshConnection, timeout time.Duration) serverFactsRecord {
+	record := serverFactsRecord{
+		ServerName:  server.Name,
+		CollectedAt: time.Now().UTC().Format(time.RFC3339),
+		DiskStatus:  "unknown",
+		AptStatus:   "unknown",
+		RawJSON:     "{}",
+	}
+	osOut, osErrOut, osErr := runSSHCommandWithTimeout(client, serverFactsOSCmd, nil, timeout)
+	if osErr == nil {
+		record.OSPrettyName = truncateString(osOut, 160)
+	} else {
+		record.OSPrettyName = "Unknown"
+	}
+	uptimeOut, _, uptimeErr := runSSHCommandWithTimeout(client, serverFactsUptimeCmd, nil, timeout)
+	if uptimeErr == nil {
+		record.UptimeSeconds = parseUptimeSeconds(uptimeOut)
+	}
+	diskOut, _, _ := runSSHCommandWithTimeout(client, precheckDiskSpaceCmd, nil, timeout)
+	disk := checkDiskSpace(client)
+	record.DiskStatus = healthStatusFromResult(disk)
+	if diskFreeKB, ok := diskFreeKBFromOutput(diskOut); ok {
+		record.DiskFreeKB = diskFreeKB
+	}
+	record.DiskDetails = disk.Details
+	apt := checkAptHealth(client)
+	record.AptStatus = healthStatusFromResult(apt)
+	record.AptDetails = apt.Details
+	reboot := checkRebootRequired(client)
+	if required, known := rebootResultRequiresRestart(reboot); known {
+		record.RebootRequired = &required
+	}
+	raw, err := json.Marshal(map[string]any{
+		"os_stderr":     truncateString(osErrOut, 160),
+		"os_error":      errorString(osErr),
+		"uptime_error":  errorString(uptimeErr),
+		"disk_result":   disk,
+		"apt_result":    apt,
+		"reboot_result": reboot,
+	})
+	if err != nil {
+		log.Printf("collectServerFactsWithConnection: failed to marshal raw facts for %q: %v", server.Name, err)
+		record.RawJSON = "{}"
+	} else {
+		record.RawJSON = string(raw)
+	}
+	return record
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func refreshServerFacts(server Server) (serverFactsRecord, error) {
+	authMethods, err := buildAuthMethods(server)
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	hostKeyCallback, err := getHostKeyCallback()
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	config := &ssh.ClientConfig{
+		User:            server.User,
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
+		Timeout:         sshConnectTimeout,
+	}
+	conn, err := getDialSSHConnection()(server, config)
+	if err != nil {
+		return serverFactsRecord{}, err
+	}
+	defer conn.Close()
+	record := collectServerFactsWithConnection(server, conn, loadSSHCommandTimeoutFromEnv())
+	if err := saveServerFacts(record); err != nil {
+		return serverFactsRecord{}, err
+	}
+	return record, nil
+}
+
+func handleServerFactsRefresh(c *gin.Context) {
+	name := strings.TrimSpace(c.Param("name"))
+	server, preRefreshStatus, err := beginServerTransientAction(name, "facts_refresh")
+	if errors.Is(err, sql.ErrNoRows) {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server not found", nil)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		return
+	}
+	if errors.Is(err, errActionInProgress) {
+		_, status := serverActionStatusInProgress(name)
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+		c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before refreshing host facts"})
+		return
+	}
+	if err != nil {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Facts refresh unavailable", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start host facts refresh"})
+		return
+	}
+	defer restoreStatusSnapshot(name, preRefreshStatus)
+
+	record, err := refreshServerFacts(server)
+	if err != nil {
+		audit(c, serverFactsRefreshAction, "server", name, "failure", "Facts refresh failed", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to refresh host facts: %v", err)})
+		return
+	}
+	audit(c, serverFactsRefreshAction, "server", name, "success", "Host facts refreshed", map[string]any{
+		"collected_at":    record.CollectedAt,
+		"disk_status":     record.DiskStatus,
+		"apt_status":      record.AptStatus,
+		"reboot_required": record.RebootRequired,
+		"uptime_seconds":  record.UptimeSeconds,
+		"os_pretty_name":  record.OSPrettyName,
+	})
+	c.JSON(http.StatusOK, record)
+}
+
+func updateHealthFromResults(health *dashboardHealthInfo, results []updatePrecheckResult, source, collectedAt string) {
+	if health == nil {
+		return
+	}
+	if !healthUpdateIsNewer(health.CollectedAt, collectedAt) {
+		return
+	}
+	for _, result := range results {
+		switch result.Name {
+		case "disk_space":
+			health.DiskStatus = healthStatusFromResult(result)
+			if parsedFreeKB, ok := diskFreeKBFromOutput(result.Output); ok {
+				health.DiskFreeKB = parsedFreeKB
+			}
+			health.DiskDetails = result.Details
+			health.Source = source
+			health.CollectedAt = collectedAt
+		case "apt_health", postcheckNameAptHealth:
+			health.AptStatus = healthStatusFromResult(result)
+			health.AptDetails = result.Details
+			health.Source = source
+			health.CollectedAt = collectedAt
+		case postcheckNameRebootRequired:
+			if strings.TrimSpace(result.Error) != "" {
+				continue
+			}
+			required, known := rebootResultRequiresRestart(result)
+			if !known {
+				continue
+			}
+			health.RebootRequired = &required
+			health.Source = source
+			health.CollectedAt = collectedAt
+		}
+	}
+}
+
+func healthUpdateIsNewer(currentAt, candidateAt string) bool {
+	candidateAt = strings.TrimSpace(candidateAt)
+	if candidateAt == "" {
+		return false
+	}
+	currentAt = strings.TrimSpace(currentAt)
+	if currentAt == "" {
+		return true
+	}
+	candidate, err := parseAppTimestamp(candidateAt)
+	if err != nil {
+		return false
+	}
+	current, err := parseAppTimestamp(currentAt)
+	if err != nil {
+		return true
+	}
+	return candidate.After(current)
+}
+
+func precheckResultsFromMeta(meta map[string]any, key string) []updatePrecheckResult {
+	raw, ok := meta[key]
+	if !ok || raw == nil {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var results []updatePrecheckResult
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil
+	}
+	return results
+}
+
+func dashboardRiskFromStatus(status *ServerStatus) dashboardRiskInfo {
+	risk := dashboardRiskInfo{Level: "unknown", Summary: "No package data", CVEs: []string{}}
+	if status == nil {
+		return risk
+	}
+	updates := status.PendingUpdates
+	risk.PendingPackages = len(updates)
+	if risk.PendingPackages == 0 && len(status.Upgradable) > 0 {
+		risk.PendingPackages = len(status.Upgradable)
+	}
+	seenCVEs := map[string]struct{}{}
+	for _, update := range updates {
+		if update.Security {
+			risk.SecurityUpdates++
+		}
+		for _, cve := range update.CVEs {
+			cve = strings.TrimSpace(cve)
+			if cve == "" {
+				continue
+			}
+			if _, ok := seenCVEs[cve]; ok {
+				continue
+			}
+			seenCVEs[cve] = struct{}{}
+			risk.CVEs = append(risk.CVEs, cve)
+		}
+	}
+	sort.Strings(risk.CVEs)
+	switch {
+	case len(risk.CVEs) > 0:
+		risk.Level = "critical"
+		risk.Summary = fmt.Sprintf("%d CVE", len(risk.CVEs))
+	case risk.SecurityUpdates > 0:
+		risk.Level = "elevated"
+		risk.Summary = fmt.Sprintf("%d security", risk.SecurityUpdates)
+	case risk.PendingPackages > 0:
+		risk.Level = "normal"
+		risk.Summary = fmt.Sprintf("%d package", risk.PendingPackages)
+	default:
+		risk.Level = "normal"
+		risk.Summary = "No CVE exposure"
+	}
+	return risk
+}
+
+func buildNoRunInfo(server Server, policies []UpdatePolicy, overrides map[int64]map[string]bool, globalBlackouts []UpdatePolicyBlackoutWindow, now time.Time) dashboardNoRunInfo {
+	loc, timezoneName := currentAppTimezone()
+	localNow := now.In(loc)
+	if blackoutApplies(localNow, globalBlackouts) {
+		return dashboardNoRunInfo{Active: true, Scope: "global", Summary: "Global no-run window active", Timezone: timezoneName}
+	}
+	for _, policy := range policies {
+		if !policyMatchesServer(policy, server, overrides) {
+			continue
+		}
+		if blackoutApplies(localNow, policy.PolicyBlackouts) {
+			return dashboardNoRunInfo{Active: true, Scope: "policy", Summary: fmt.Sprintf("%s no-run window active", policy.Name), Timezone: timezoneName}
+		}
+	}
+	return dashboardNoRunInfo{Active: false, Summary: "No no-run window active", Timezone: timezoneName}
+}
+
+type dashboardProjectedPolicyRun struct {
+	policy         UpdatePolicy
+	scheduledLocal time.Time
+	scheduledUTC   string
+}
+
+func nextPolicyOccurrenceLocal(policy UpdatePolicy, fromLocal time.Time, globalBlackouts []UpdatePolicyBlackoutWindow) (time.Time, bool) {
+	minutes, err := parseTimeLocalMinutes(policy.TimeLocal)
+	if err != nil {
+		return time.Time{}, false
+	}
+	hour := minutes / 60
+	minute := minutes % 60
+	loc := fromLocal.Location()
+	if loc == nil {
+		loc = currentAppLocation()
+	}
+	startDay := time.Date(fromLocal.Year(), fromLocal.Month(), fromLocal.Day(), 0, 0, 0, 0, loc)
+	for offset := 0; offset <= 14; offset++ {
+		day := startDay.AddDate(0, 0, offset)
+		slot := time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, loc)
+		if slot.Before(fromLocal) {
+			continue
+		}
+		if !policyDueAt(policy, slot) {
+			continue
+		}
+		if blackoutApplies(slot, globalBlackouts) || blackoutApplies(slot, policy.PolicyBlackouts) {
+			continue
+		}
+		return slot, true
+	}
+	return time.Time{}, false
+}
+
+func projectedPolicyRunBefore(candidate, current dashboardProjectedPolicyRun) bool {
+	if current.scheduledUTC == "" {
+		return true
+	}
+	candidateUTC := candidate.scheduledLocal.UTC()
+	currentUTC := current.scheduledLocal.UTC()
+	if !candidateUTC.Equal(currentUTC) {
+		return candidateUTC.Before(currentUTC)
+	}
+	return comparePolicyCandidates(
+		scheduledPolicyCandidate{policy: candidate.policy, scheduledForUTC: candidate.scheduledUTC},
+		scheduledPolicyCandidate{policy: current.policy, scheduledForUTC: current.scheduledUTC},
+	)
+}
+
+func parseDashboardScheduledUTC(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if parsed, err := time.Parse(jobTimestampLayout, raw); err == nil {
+		return parsed, nil
+	}
+	return time.Parse(time.RFC3339, raw)
+}
+
+func mergeProjectedNextRun(result map[string]dashboardScheduleInfo, serverName string, projected dashboardProjectedPolicyRun, loc *time.Location, timezoneName string) {
+	if projected.scheduledUTC == "" {
+		return
+	}
+	if current, exists := result[serverName]; exists {
+		currentTime, err := parseDashboardScheduledUTC(current.ScheduledForUTC)
+		if err == nil && !currentTime.After(projected.scheduledLocal.UTC()) {
+			return
+		}
+	}
+	display, _ := formatTimestampForAppDisplayWithTimezone(projected.scheduledUTC, loc, timezoneName)
+	result[serverName] = dashboardScheduleInfo{
+		State:               "scheduled",
+		PolicyName:          projected.policy.Name,
+		ScheduledForUTC:     projected.scheduledUTC,
+		ScheduledForDisplay: display,
+		Status:              "scheduled",
+		Summary:             "Scheduled run pending",
+	}
+}
+
+func buildNextRunMap(now time.Time, serversSnapshot []Server, policies []UpdatePolicy, overrides map[int64]map[string]bool, globalBlackouts []UpdatePolicyBlackoutWindow) (map[string]dashboardScheduleInfo, error) {
+	runs, err := listUpdatePolicyRuns(500)
+	if err != nil {
+		return nil, err
+	}
+	loc, timezoneName := currentAppTimezone()
+	result := map[string]dashboardScheduleInfo{}
+	cutoff := now.UTC().Truncate(time.Minute)
+	for _, run := range runs {
+		scheduled, err := parseDashboardScheduledUTC(run.ScheduledForUTC)
+		if err != nil || scheduled.Before(cutoff) {
+			continue
+		}
+		current, exists := result[run.ServerName]
+		if exists {
+			currentTime, currentErr := parseDashboardScheduledUTC(current.ScheduledForUTC)
+			if currentErr == nil && !scheduled.Before(currentTime) {
+				continue
+			}
+		}
+		display, _ := formatTimestampForAppDisplayWithTimezone(run.ScheduledForUTC, loc, timezoneName)
+		result[run.ServerName] = dashboardScheduleInfo{
+			State:               "scheduled",
+			PolicyName:          run.PolicyName,
+			ScheduledForUTC:     run.ScheduledForUTC,
+			ScheduledForDisplay: display,
+			Status:              run.Status,
+			Reason:              run.Reason,
+			Summary:             run.Summary,
+		}
+	}
+	localNow := now.In(loc).Truncate(time.Minute)
+	projectedByServer := map[string]dashboardProjectedPolicyRun{}
+	for _, server := range serversSnapshot {
+		for _, policy := range policies {
+			if !policyMatchesServer(policy, server, overrides) {
+				continue
+			}
+			slotLocal, ok := nextPolicyOccurrenceLocal(policy, localNow, globalBlackouts)
+			if !ok {
+				continue
+			}
+			projected := dashboardProjectedPolicyRun{
+				policy:         policy,
+				scheduledLocal: slotLocal,
+				scheduledUTC:   canonicalScheduledForUTC(slotLocal),
+			}
+			if projectedPolicyRunBefore(projected, projectedByServer[server.Name]) {
+				projectedByServer[server.Name] = projected
+			}
+		}
+	}
+	for serverName, projected := range projectedByServer {
+		mergeProjectedNextRun(result, serverName, projected, loc, timezoneName)
+	}
+	return result, nil
+}
+
+func defaultScheduleInfo() dashboardScheduleInfo {
+	return dashboardScheduleInfo{State: "none", Summary: "No scheduled run"}
+}
+
+func buildDashboardSummary(rawWindow string, now time.Time) (dashboardSummaryResponse, error) {
+	window, span, err := parseObservabilityWindow(rawWindow)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	to := now.UTC()
+	from := to.Add(-span)
+	response := dashboardSummaryResponse{
+		Window:      window,
+		From:        from.Format(time.RFC3339),
+		To:          to.Format(time.RFC3339),
+		GeneratedAt: to.Format(time.RFC3339),
+		Fleet:       map[string]any{},
+		Servers:     []dashboardServerSummary{},
+	}
+
+	statusByName := map[string]*ServerStatus{}
+	mu.Lock()
+	serversSnapshot := cloneServers(servers)
+	for _, server := range serversSnapshot {
+		if status := statusMap[server.Name]; status != nil {
+			copyStatus := *status
+			copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
+			copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
+			copyStatus.Tags = append([]string(nil), status.Tags...)
+			statusByName[server.Name] = &copyStatus
+		}
+	}
+	mu.Unlock()
+
+	facts, err := loadServerFacts()
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	policies, err := listUpdatePolicies()
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	overrides, err := loadAllUpdatePolicyOverrides()
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	globalBlackouts, err := loadGlobalUpdatePolicyBlackouts()
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	nextRuns, err := buildNextRunMap(now, serversSnapshot, policies, overrides, globalBlackouts)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	loc, timezoneName := currentAppTimezone()
+
+	type updateAgg struct {
+		lastSuccess *dashboardUpdateHistory
+		lastFailure *dashboardUpdateHistory
+		meta        map[string]any
+		metaAt      string
+		durationSum float64
+		samples     int
+	}
+	updateByServer := map[string]*updateAgg{}
+	rows, err := getDB().Query(
+		`SELECT created_at, target_name, status, message, meta_json
+		   FROM audit_events
+		  WHERE action = ? AND target_type = 'server' AND created_at >= ? AND created_at <= ?
+		  ORDER BY created_at DESC, id DESC`,
+		updateCompleteAction,
+		from.Format(time.RFC3339),
+		to.Format(time.RFC3339),
+	)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	for rows.Next() {
+		var createdAt, targetName, status, message, metaJSON string
+		if err := rows.Scan(&createdAt, &targetName, &status, &message, &metaJSON); err != nil {
+			rows.Close()
+			return dashboardSummaryResponse{}, err
+		}
+		agg := updateByServer[targetName]
+		if agg == nil {
+			agg = &updateAgg{}
+			updateByServer[targetName] = agg
+		}
+		meta := map[string]any{}
+		metaValid := false
+		if strings.TrimSpace(metaJSON) != "" {
+			if err := json.Unmarshal([]byte(metaJSON), &meta); err == nil {
+				metaValid = true
+			}
+		}
+		duration, hasDuration := metaDurationMS(meta)
+		if hasDuration {
+			agg.durationSum += duration
+			agg.samples++
+		}
+		display, _ := formatTimestampForAppDisplayWithTimezone(createdAt, loc, timezoneName)
+		item := &dashboardUpdateHistory{
+			Status:            strings.ToLower(strings.TrimSpace(status)),
+			FinishedAt:        createdAt,
+			FinishedAtDisplay: display,
+			DurationMS:        duration,
+			Message:           message,
+		}
+		if item.Status == "failure" {
+			item.FailureCause = failureCauseFromMeta(meta, metaValid)
+			if agg.lastFailure == nil {
+				agg.lastFailure = item
+			}
+		}
+		if item.Status == "success" && agg.lastSuccess == nil {
+			agg.lastSuccess = item
+		}
+		if agg.meta == nil && metaValid {
+			agg.meta = meta
+			agg.metaAt = createdAt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return dashboardSummaryResponse{}, err
+	}
+	rows.Close()
+
+	commandHistory := map[string][]dashboardCommandHistoryItem{}
+	commandRows, err := getDB().Query(
+		`SELECT created_at, target_name, action, status, message, actor
+		   FROM audit_events
+		  WHERE target_type = 'server' AND created_at >= ? AND created_at <= ?
+		  ORDER BY created_at DESC, id DESC
+		  LIMIT 400`,
+		from.Format(time.RFC3339),
+		to.Format(time.RFC3339),
+	)
+	if err != nil {
+		return dashboardSummaryResponse{}, err
+	}
+	for commandRows.Next() {
+		var item dashboardCommandHistoryItem
+		var targetName string
+		if err := commandRows.Scan(&item.CreatedAt, &targetName, &item.Action, &item.Status, &item.Message, &item.Actor); err != nil {
+			commandRows.Close()
+			return dashboardSummaryResponse{}, err
+		}
+		if len(commandHistory[targetName]) >= 8 {
+			continue
+		}
+		item.CreatedAtDisplay, _ = formatTimestampForAppDisplayWithTimezone(item.CreatedAt, loc, timezoneName)
+		commandHistory[targetName] = append(commandHistory[targetName], item)
+	}
+	if err := commandRows.Err(); err != nil {
+		commandRows.Close()
+		return dashboardSummaryResponse{}, err
+	}
+	commandRows.Close()
+
+	fleetReboot := 0
+	fleetStaleFacts := 0
+	for _, server := range serversSnapshot {
+		status := statusByName[server.Name]
+		fact := facts[server.Name]
+		health := dashboardHealthInfo{
+			DiskStatus:    "unknown",
+			AptStatus:     "unknown",
+			OSPrettyName:  fact.OSPrettyName,
+			UptimeSeconds: fact.UptimeSeconds,
+			CollectedAt:   fact.CollectedAt,
+			Source:        "facts",
+		}
+		if fact.ServerName != "" {
+			health.RebootRequired = fact.RebootRequired
+			health.DiskStatus = fact.DiskStatus
+			health.DiskFreeKB = fact.DiskFreeKB
+			health.DiskDetails = fact.DiskDetails
+			health.AptStatus = fact.AptStatus
+			health.AptDetails = fact.AptDetails
+		} else {
+			health.Source = "unknown"
+			fleetStaleFacts++
+		}
+		agg := updateByServer[server.Name]
+		if agg != nil && agg.meta != nil {
+			auditResults := precheckResultsFromMeta(agg.meta, "precheck_results")
+			auditResults = append(auditResults, precheckResultsFromMeta(agg.meta, "postcheck_results")...)
+			updateHealthFromResults(&health, auditResults, "audit", agg.metaAt)
+		}
+		if health.RebootRequired != nil && *health.RebootRequired {
+			fleetReboot++
+		}
+		nextRun := nextRuns[server.Name]
+		if nextRun.State == "" {
+			nextRun = defaultScheduleInfo()
+		}
+		serverSummary := dashboardServerSummary{
+			Name:           server.Name,
+			NextRun:        nextRun,
+			NoRun:          buildNoRunInfo(server, policies, overrides, globalBlackouts, now),
+			Health:         health,
+			Risk:           dashboardRiskFromStatus(status),
+			CommandHistory: commandHistory[server.Name],
+		}
+		if agg != nil {
+			serverSummary.LastUpdate = agg.lastSuccess
+			serverSummary.LastFailedUpdate = agg.lastFailure
+			serverSummary.DurationSamples = agg.samples
+			if agg.samples > 0 {
+				serverSummary.AvgDurationMS = agg.durationSum / float64(agg.samples)
+			}
+		}
+		response.Servers = append(response.Servers, serverSummary)
+	}
+	sort.Slice(response.Servers, func(i, j int) bool { return response.Servers[i].Name < response.Servers[j].Name })
+	response.Fleet["hosts_needing_reboot"] = fleetReboot
+	response.Fleet["stale_facts"] = fleetStaleFacts
+	return response, nil
+}
+
+func handleDashboardSummary(c *gin.Context) {
+	summary, err := buildDashboardSummary(c.Query("window"), time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, errInvalidWindow) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
+			return
+		}
+		log.Printf("handleDashboardSummary: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build dashboard summary"})
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
 func prometheusEscapeLabel(v string) string {
 	value := strings.ReplaceAll(v, `\`, `\\`)
 	value = strings.ReplaceAll(value, `"`, `\"`)
@@ -2210,10 +3186,14 @@ func startAuditPruner(ctx context.Context) {
 }
 
 func encryptSecret(secret string) (string, error) {
+	return encryptSecretWithKey(secret, getEncryptionKey())
+}
+
+func encryptSecretWithKey(secret string, key []byte) (string, error) {
 	if secret == "" {
 		return "", nil
 	}
-	block, err := aes.NewCipher(getEncryptionKey())
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
@@ -2230,6 +3210,10 @@ func encryptSecret(secret string) (string, error) {
 }
 
 func decryptSecret(encoded string) (string, error) {
+	return decryptSecretWithKey(encoded, getEncryptionKey())
+}
+
+func decryptSecretWithKey(encoded string, key []byte) (string, error) {
 	if encoded == "" {
 		return "", nil
 	}
@@ -2245,7 +3229,7 @@ func decryptSecret(encoded string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	block, err := aes.NewCipher(getEncryptionKey())
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return "", err
 	}
@@ -2328,18 +3312,7 @@ func loadServers() {
 	}
 
 	if len(servers) == 0 {
-		if !loadLegacyServers() {
-			servers = []Server{
-				{Name: "server1", Host: "server1.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server2", Host: "server2.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server3", Host: "server3.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server4", Host: "server4.example.com", Port: 22, User: "user", Pass: "pass"},
-				{Name: "server5", Host: "server5.example.com", Port: 22, User: "user", Pass: "pass"},
-			}
-			if err := saveServersFunc(); err != nil {
-				log.Fatalf("Failed to save default servers: %v", err)
-			}
-		}
+		loadLegacyServers()
 	}
 }
 
@@ -2433,15 +3406,7 @@ func cloneServers(src []Server) []Server {
 func cloneStatusMap(src map[string]*ServerStatus) map[string]*ServerStatus {
 	dst := make(map[string]*ServerStatus, len(src))
 	for name, status := range src {
-		if status == nil {
-			dst[name] = nil
-			continue
-		}
-		copyStatus := *status
-		copyStatus.Upgradable = append([]string(nil), status.Upgradable...)
-		copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
-		copyStatus.Tags = append([]string(nil), status.Tags...)
-		dst[name] = &copyStatus
+		dst[name] = cloneServerStatus(status)
 	}
 	return dst
 }
@@ -2462,10 +3427,7 @@ func stringPtr(s string) *string {
 	return &s
 }
 
-func currentStatusSnapshot(name string) *ServerStatus {
-	mu.Lock()
-	defer mu.Unlock()
-	status := statusMap[name]
+func cloneServerStatus(status *ServerStatus) *ServerStatus {
 	if status == nil {
 		return nil
 	}
@@ -2474,6 +3436,12 @@ func currentStatusSnapshot(name string) *ServerStatus {
 	copyStatus.PendingUpdates = clonePendingUpdates(status.PendingUpdates)
 	copyStatus.Tags = append([]string(nil), status.Tags...)
 	return &copyStatus
+}
+
+func currentStatusSnapshot(name string) *ServerStatus {
+	mu.Lock()
+	defer mu.Unlock()
+	return cloneServerStatus(statusMap[name])
 }
 
 func restoreStatusSnapshot(name string, snapshot *ServerStatus) {
@@ -2513,6 +3481,21 @@ func activeServerActionNames() []string {
 	return names
 }
 
+func rejectGlobalKeyMutationIfServerActionsActive(c *gin.Context, action string) bool {
+	activeNames := activeServerActionNames()
+	if len(activeNames) == 0 {
+		return false
+	}
+	audit(c, action, "global_key", "global", "failure", "Server action already in progress", map[string]any{
+		"active_servers": activeNames,
+	})
+	c.JSON(http.StatusConflict, gin.H{
+		"error":          "wait for active server actions to finish before changing the global SSH key",
+		"active_servers": activeNames,
+	})
+	return true
+}
+
 func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
 	jm := currentJobManager()
 	if jm == nil {
@@ -2541,7 +3524,8 @@ func statusInProgress(status string) bool {
 		status == "approved" ||
 		status == "upgrading" ||
 		status == "autoremove" ||
-		status == "sudoers"
+		status == "sudoers" ||
+		status == "facts_refresh"
 }
 
 func findServerByNameLocked(name string) (Server, bool) {
@@ -2551,6 +3535,20 @@ func findServerByNameLocked(name string) (Server, bool) {
 		}
 	}
 	return Server{}, false
+}
+
+func serverActionStatusInProgressLocked(name string) (bool, string) {
+	status := statusMap[name]
+	if status == nil {
+		return false, ""
+	}
+	return statusInProgress(status.Status), status.Status
+}
+
+func serverActionStatusInProgress(name string) (bool, string) {
+	mu.Lock()
+	defer mu.Unlock()
+	return serverActionStatusInProgressLocked(name)
 }
 
 func beginServerAction(name, newStatus string) (Server, error) {
@@ -2572,6 +3570,25 @@ func beginServerAction(name, newStatus string) (Server, error) {
 		status.Logs = "Starting Linux Updater..."
 	}
 	return server, nil
+}
+
+func beginServerTransientAction(name, newStatus string) (Server, *ServerStatus, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	status, exists := statusMap[name]
+	if !exists || status == nil {
+		return Server{}, nil, sql.ErrNoRows
+	}
+	if statusInProgress(status.Status) {
+		return Server{}, nil, errActionInProgress
+	}
+	server, found := findServerByNameLocked(name)
+	if !found {
+		return Server{}, nil, sql.ErrNoRows
+	}
+	snapshot := cloneServerStatus(status)
+	status.Status = newStatus
+	return server, snapshot, nil
 }
 
 func approvePendingUpdate(name, scope string) (exists bool, approved bool) {
@@ -2633,6 +3650,20 @@ func readUploadedPrivateKey(file *multipart.FileHeader) (string, error) {
 	}
 	defer src.Close()
 	return readUploadedKeyData(src)
+}
+
+func limitUploadedKeyRequest(c *gin.Context) {
+	if c != nil && c.Request != nil && c.Writer != nil {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadedKeyRequestBytes)
+	}
+}
+
+func uploadedKeyFormErrorStatus(err error) int {
+	var maxBytesErr *http.MaxBytesError
+	if errors.As(err, &maxBytesErr) || strings.Contains(strings.ToLower(err.Error()), "request body too large") {
+		return http.StatusRequestEntityTooLarge
+	}
+	return http.StatusBadRequest
 }
 
 func stringsEqualConstantTime(a, b string) bool {
@@ -2815,7 +3846,7 @@ func (r *withActorRunner) syncJobFromStatus(snapshot *ServerStatus) {
 		}
 	}
 
-	if err := jm.UpdateJob(r.jobID, update); err != nil {
+	if _, err := jm.UpdateActiveJob(r.jobID, update); err != nil {
 		log.Printf("failed to sync job %q from status %q: %v", r.jobID, snapshot.Status, err)
 	}
 }
@@ -3017,6 +4048,16 @@ func commandRunnerAuditMeta(r *withActorRunner, finalStatus string) map[string]a
 	}
 }
 
+func (r *withActorRunner) refreshFactsAfterSuccessfulUpdate() {
+	if r == nil || r.client == nil {
+		return
+	}
+	record := collectServerFactsWithConnection(r.server, r.client, r.commandTimeout)
+	if err := saveServerFacts(record); err != nil {
+		log.Printf("failed to refresh facts after update for %q: %v", r.server.Name, err)
+	}
+}
+
 func runUpdateWithActor(server Server, actor, clientIP string, policy RetryPolicy) {
 	runUpdateJobWithActor(server, actor, clientIP, policy, "")
 }
@@ -3148,6 +4189,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			}
 
 			if len(upgradable) == 0 {
+				r.refreshFactsAfterSuccessfulUpdate()
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
 					status.ApprovalScope = ""
@@ -3193,7 +4235,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			} else {
 				approvalDeadline := time.Now().Add(behavior.ApprovalTimeout)
 				for {
-					time.Sleep(1 * time.Second)
+					time.Sleep(updateApprovalPollInterval)
 					approved := false
 					cancelledByUser := false
 					approvalTimedOut := false
@@ -3252,6 +4294,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			}
 
 			if r.approvalScope == "security" && len(r.approvedPackages) == 0 {
+				r.refreshFactsAfterSuccessfulUpdate()
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
 					status.ApprovalScope = ""
@@ -3314,6 +4357,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 
 			if !postcheckCfg.Enabled {
 				r.postchecksPassed = true
+				r.refreshFactsAfterSuccessfulUpdate()
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
 					status.ApprovalScope = ""
@@ -3363,6 +4407,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 			r.postchecksPassed = true
 			finalLogs := r.currentLogs()
 			if postcheckSummary.Warnings > 0 {
+				r.refreshFactsAfterSuccessfulUpdate()
 				_ = r.withStatus(func(status *ServerStatus) {
 					status.Status = "done"
 					status.ApprovalScope = ""
@@ -3372,6 +4417,7 @@ func runUpdateJobWithActor(server Server, actor, clientIP string, policy RetryPo
 				return
 			}
 
+			r.refreshFactsAfterSuccessfulUpdate()
 			_ = r.withStatus(func(status *ServerStatus) {
 				status.Status = "done"
 				status.ApprovalScope = ""
@@ -4273,6 +5319,10 @@ func knownHostsPaths() []string {
 	return unique
 }
 
+func knownHostsDefaultWritePath() string {
+	return filepath.Join(filepath.Dir(dbPath()), "known_hosts")
+}
+
 func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 	candidates := knownHostsPaths()
 	existing := make([]string, 0, len(candidates))
@@ -4292,16 +5342,16 @@ func getHostKeyCallback() (ssh.HostKeyCallback, error) {
 }
 
 func knownHostsWritePath() (string, error) {
-	paths := knownHostsPaths()
-	if len(paths) == 0 {
+	if raw := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_KNOWN_HOSTS")); raw != "" {
+		for _, part := range strings.Split(raw, ":") {
+			path := strings.TrimSpace(part)
+			if path != "" {
+				return path, nil
+			}
+		}
 		return "", errors.New("no known_hosts path configured")
 	}
-	for _, path := range paths {
-		if _, err := os.Stat(path); err == nil {
-			return path, nil
-		}
-	}
-	return paths[0], nil
+	return knownHostsDefaultWritePath(), nil
 }
 
 func knownHostsHostToken(host string, port int) string {
@@ -4572,8 +5622,33 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 	}
 }
 
+func trustedProxiesFromEnv() []string {
+	raw := strings.TrimSpace(os.Getenv(trustedProxiesEnv))
+	if raw == "" || strings.EqualFold(raw, "none") {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{}, len(parts))
+	proxies := make([]string, 0, len(parts))
+	for _, part := range parts {
+		proxy := strings.TrimSpace(part)
+		if proxy == "" {
+			continue
+		}
+		if _, ok := seen[proxy]; ok {
+			continue
+		}
+		seen[proxy] = struct{}{}
+		proxies = append(proxies, proxy)
+	}
+	return proxies
+}
+
 func setupRouter() (*gin.Engine, error) {
 	r := gin.Default()
+	if err := r.SetTrustedProxies(trustedProxiesFromEnv()); err != nil {
+		return nil, fmt.Errorf("failed to configure trusted proxies: %w", err)
+	}
 	r.Use(securityHeadersMiddleware())
 	r.Use(backupRestoreBarrierMiddleware())
 	if err := initializeMaintenanceState(); err != nil {
@@ -4605,18 +5680,22 @@ func setupRouter() (*gin.Engine, error) {
 	r.Use(sameOriginWriteMiddleware())
 
 	r.GET("/", func(c *gin.Context) {
+		setNoStoreHeaders(c)
 		c.HTML(http.StatusOK, "index.html", nil)
 	})
 
 	r.GET("/manage", func(c *gin.Context) {
+		setNoStoreHeaders(c)
 		c.HTML(http.StatusOK, "manage.html", nil)
 	})
 
 	r.GET("/observability", func(c *gin.Context) {
+		setNoStoreHeaders(c)
 		c.HTML(http.StatusOK, "observability.html", nil)
 	})
 
 	r.GET("/admin", func(c *gin.Context) {
+		setNoStoreHeaders(c)
 		c.HTML(http.StatusOK, "admin.html", nil)
 	})
 
@@ -4641,7 +5720,7 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
-		var statuses []ServerStatus
+		statuses := make([]ServerStatus, 0, len(servers))
 		for _, s := range servers {
 			status := statusMap[s.Name]
 			if status == nil {
@@ -4751,6 +5830,12 @@ func setupRouter() (*gin.Engine, error) {
 		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
+				if status := statusMap[name]; status != nil && statusInProgress(status.Status) {
+					mu.Unlock()
+					audit(c, "server.update", "server", name, "failure", "Server action already in progress", map[string]any{"status": status.Status})
+					c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before editing this server"})
+					return
+				}
 				if strings.TrimSpace(updatedServer.Pass) == "" {
 					updatedServer.Pass = s.Pass
 				}
@@ -4815,7 +5900,10 @@ func setupRouter() (*gin.Engine, error) {
 					oldServerName := name
 					newServerName := updatedServer.Name
 					txHook = func(tx *sql.Tx) error {
-						return renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName)
+						if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
+							return err
+						}
+						return renameServerFactsTx(tx, oldServerName, newServerName)
 					}
 				}
 				if err := saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, txHook); err != nil {
@@ -4842,9 +5930,19 @@ func setupRouter() (*gin.Engine, error) {
 		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
+				if status := statusMap[name]; status != nil && statusInProgress(status.Status) {
+					mu.Unlock()
+					audit(c, "server.delete", "server", name, "failure", "Server action already in progress", map[string]any{"status": status.Status})
+					c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before deleting this server"})
+					return
+				}
 				servers = append(servers[:i], servers[i+1:]...)
 				delete(statusMap, name)
-				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
+				txHook := func(tx *sql.Tx) error {
+					_, err := tx.Exec("DELETE FROM server_facts WHERE server_name = ?", name)
+					return err
+				}
+				if err := saveServersOrRollbackLockedWithTxHook(prevServers, prevStatusMap, txHook); err != nil {
 					mu.Unlock()
 					audit(c, "server.delete", "server", name, "failure", "Failed to persist deletion", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to save servers: %v", err)})
@@ -4869,6 +5967,11 @@ func setupRouter() (*gin.Engine, error) {
 		prevStatusMap := cloneStatusMap(statusMap)
 		for i, s := range servers {
 			if s.Name == name {
+				if blocked, status := serverActionStatusInProgressLocked(name); blocked {
+					audit(c, "server.password.clear", "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+					c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before clearing this server password"})
+					return
+				}
 				servers[i].Pass = ""
 				if err := saveServersOrRollbackLocked(prevServers, prevStatusMap); err != nil {
 					audit(c, "server.password.clear", "server", name, "failure", "Failed to persist password clear", map[string]any{"error": err.Error()})
@@ -4889,10 +5992,29 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.POST("/api/servers/:name/key", func(c *gin.Context) {
 		name := c.Param("name")
+		limitUploadedKeyRequest(c)
+		mu.Lock()
+		_, found := findServerByNameLocked(name)
+		blocked, status := serverActionStatusInProgressLocked(name)
+		mu.Unlock()
+		if !found {
+			audit(c, "server.key.upload", "server", name, "failure", "Server not found", nil)
+			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+			return
+		}
+		if blocked {
+			audit(c, "server.key.upload", "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+			c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before updating this server key"})
+			return
+		}
 		file, err := c.FormFile("key")
 		if err != nil {
 			audit(c, "server.key.upload", "server", name, "failure", "Missing key file", nil)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
+			if uploadedKeyFormErrorStatus(err) == http.StatusRequestEntityTooLarge {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": errUploadedKeyTooLarge.Error()})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
+			}
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
@@ -4915,6 +6037,11 @@ func setupRouter() (*gin.Engine, error) {
 		defer mu.Unlock()
 		for i, s := range servers {
 			if s.Name == name {
+				if blocked, status := serverActionStatusInProgressLocked(name); blocked {
+					audit(c, "server.key.upload", "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+					c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before updating this server key"})
+					return
+				}
 				if err := updateServerKey(name, key); err != nil {
 					audit(c, "server.key.upload", "server", name, "failure", "Failed to save key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -4939,6 +6066,11 @@ func setupRouter() (*gin.Engine, error) {
 		defer mu.Unlock()
 		for i, s := range servers {
 			if s.Name == name {
+				if blocked, status := serverActionStatusInProgressLocked(name); blocked {
+					audit(c, "server.key.clear", "server", name, "failure", "Server action already in progress", map[string]any{"status": status})
+					c.JSON(http.StatusConflict, gin.H{"error": "wait for the active server action to finish before clearing this server key"})
+					return
+				}
 				if err := updateServerKey(name, ""); err != nil {
 					audit(c, "server.key.clear", "server", name, "failure", "Failed to clear key", map[string]any{"error": err.Error()})
 					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -4958,10 +6090,18 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.POST("/api/keys/global", func(c *gin.Context) {
+		if rejectGlobalKeyMutationIfServerActionsActive(c, "global_key.upload") {
+			return
+		}
+		limitUploadedKeyRequest(c)
 		file, err := c.FormFile("key")
 		if err != nil {
 			audit(c, "global_key.upload", "global_key", "global", "failure", "Missing key file", nil)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
+			if uploadedKeyFormErrorStatus(err) == http.StatusRequestEntityTooLarge {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": errUploadedKeyTooLarge.Error()})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "missing key file"})
+			}
 			return
 		}
 		key, err := readUploadedPrivateKey(file)
@@ -4990,6 +6130,9 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.DELETE("/api/keys/global", func(c *gin.Context) {
+		if rejectGlobalKeyMutationIfServerActionsActive(c, "global_key.clear") {
+			return
+		}
 		if err := clearGlobalKey(); err != nil {
 			audit(c, "global_key.clear", "global_key", "global", "failure", "Failed to clear global key", map[string]any{"error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -5016,6 +6159,8 @@ func setupRouter() (*gin.Engine, error) {
 
 	r.GET("/api/audit-events", handleAuditEvents)
 	r.GET("/api/observability/summary", handleObservabilitySummary)
+	r.GET("/api/dashboard/summary", handleDashboardSummary)
+	r.POST("/api/servers/:name/facts/refresh", handleServerFactsRefresh)
 
 	r.POST("/api/audit-events/prune", func(c *gin.Context) {
 		if err := pruneAuditEvents(auditRetentionDays); err != nil {
@@ -5560,20 +6705,6 @@ func setupRouter() (*gin.Engine, error) {
 		}
 		audit(c, "update.cancel", "server", name, "success", "Upgrade cancelled", nil)
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
-	})
-
-	r.GET("/api/logs/:name", func(c *gin.Context) {
-		name := c.Param("name")
-		mu.Lock()
-		status, exists := statusMap[name]
-		if !exists || status == nil {
-			mu.Unlock()
-			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
-			return
-		}
-		logs := status.Logs
-		mu.Unlock()
-		c.JSON(http.StatusOK, gin.H{"logs": logs})
 	})
 
 	return r, nil

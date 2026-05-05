@@ -1,3 +1,35 @@
 .env
 .env.*
 !.env-template
+
+# source control and local metadata
+.git/
+.github/.DS_Store
+.DS_Store
+**/.DS_Store
+
+# runtime data and generated artifacts
+data/
+dist/
+coverage.out
+*.db
+*.sqlite
+*.sqlite3
+config.json
+servers.json
+known_hosts
+telemetry-id
+webserver
+debian-updater
+
+# local dependency and test artifacts
+node_modules/
+playwright-report/
+test-results/
+.tmp-e2e/
+
+# private keys and certificates
+*.key
+*.pem
+id_rsa*
+id_ed25519*

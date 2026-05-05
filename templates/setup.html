@@ -5,30 +5,43 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SimpleLinuxUpdater - Setup</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/css/base.css">
-    <link rel="stylesheet" href="/static/css/setup.css">
+    <link rel="stylesheet" href="/static/css/base.css?v=dense-all-pages-20260430b">
+    <link rel="stylesheet" href="/static/css/auth-common.css?v=dense-all-pages-20260430b">
+    <link rel="stylesheet" href="/static/css/setup.css?v=dense-all-pages-20260430b">
 </head>
 <body>
     <main class="auth-shell">
-        <section class="auth-hero">
-            <div class="auth-kicker">First Run Setup</div>
+        <section class="auth-hero fade-in">
+            <a class="brand-lockup auth-brand" href="/" aria-label="SimpleLinuxUpdater setup">
+                <img class="brand-logo" src="/static/logo.png" alt="Linux updates logo">
+                <span>
+                    <strong>SimpleLinuxUpdater</strong>
+                    <small>Local Docker provisioning</small>
+                </span>
+            </a>
+            <div class="eyebrow">First run setup</div>
             <h1>Create admin account</h1>
-            <p class="subtle">Initialize the local operator account that secures SimpleLinuxUpdater on this host.</p>
+            <p class="muted">Initialize the local operator account that secures this updater instance.</p>
+            <div class="auth-meta">
+                <span class="meta-pill">Local Docker</span>
+                <span class="meta-pill">Single admin</span>
+                <span class="meta-pill">Private control plane</span>
+            </div>
         </section>
-        <section class="card">
+        <section class="card auth-card fade-in">
             <div class="panel-kicker">Setup</div>
             <h2>Provision local access</h2>
-            <p class="subtle">This creates the single local admin user used to sign in and operate the updater.</p>
-            <form id="setup-form" autocomplete="on">
+            <p class="muted">This creates the single local admin user used to sign in and operate the updater.</p>
+            <form id="setup-form" method="post" action="/api/auth/setup" autocomplete="on">
                 <label for="username">Username</label>
                 <input id="username" name="username" type="text" required maxlength="64" autocomplete="username">
                 <label for="password">Password</label>
                 <input id="password" name="password" type="password" required autocomplete="new-password">
                 <label for="password-confirm">Confirm password</label>
                 <input id="password-confirm" name="password-confirm" type="password" required autocomplete="new-password">
-                <button type="submit">Create account</button>
+                <button class="primary-action" type="submit">Create account</button>
             </form>
-            <div id="error-banner" class="error"></div>
+            <div id="error-banner" class="error" role="alert" aria-live="assertive"></div>
         </section>
     </main>
     <script src="/static/js/common.js"></script>

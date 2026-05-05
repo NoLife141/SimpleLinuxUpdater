@@ -3,96 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Observability</title>
+    <title>SimpleLinuxUpdater - Observability</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/css/base.css">
-    <link rel="stylesheet" href="/static/css/observability.css">
+    <link rel="stylesheet" href="/static/css/base.css?v=dense-all-pages-20260430b">
+    <link rel="stylesheet" href="/static/css/observability.css?v=dense-all-pages-20260430b">
 </head>
 <body>
-    <div class="page">
-        <header class="hero">
-            <div class="hero-grid">
-                <div class="hero-copy">
-                    <div class="hero-kicker">Telemetry Deck</div>
-                    <h1>Observability</h1>
-                    <p class="subtle hero-summary">Track success rate, duration, and failure patterns with the same dark control-room language as the rest of the app.</p>
-                </div>
-                <div class="hero-side">
-                    <div class="hero-panel">
-                        <div class="hero-panel-label">Lens</div>
-                        <div class="hero-panel-value">Update Health</div>
-                        <p class="subtle">Review operational trends and investigate failure shape over the selected time window.</p>
-                    </div>
-                    <div class="nav">
-                        <a class="btn-link" href="/">View Status</a>
-                        <a class="btn-link" href="/manage">Manage Servers</a>
-                        <a class="btn-link" href="/admin">Admin</a>
-                        <button class="btn-link" type="button" id="logout-btn">Logout</button>
-                    </div>
-                </div>
-            </div>
+    <div class="dashboard-shell">
+        <header class="app-header fade-in">
+            <a class="brand-lockup" href="/" aria-label="SimpleLinuxUpdater dashboard">
+                <img class="brand-logo" src="/static/logo.png" alt="Linux updates logo">
+                <span>
+                    <strong>SimpleLinuxUpdater</strong>
+                    <small>Fleet update dashboard</small>
+                </span>
+            </a>
+            <nav class="app-nav" aria-label="Main navigation">
+                <a href="/">Status</a>
+                <a href="/manage">Manage Servers</a>
+                <a class="active" href="/observability">Observability</a>
+                <a href="/admin">Admin</a>
+                <button type="button" id="logout-btn">Logout</button>
+            </nav>
         </header>
 
-        <section class="card">
-            <h2>Update Metrics</h2>
-            <div class="controls">
-                <label for="window-select" class="subtle">Time Window:</label>
-                <select id="window-select">
-                    <option value="24h">Last 24 hours</option>
-                    <option value="7d" selected>Last 7 days</option>
-                    <option value="30d">Last 30 days</option>
-                </select>
-                <button id="refresh-btn">Refresh</button>
-                <span id="range-label" class="subtle"></span>
-            </div>
-            <div id="error-banner" class="error-banner"></div>
-
-            <div class="kpi-grid">
-                <div class="kpi">
-                    <h3>Success Rate</h3>
-                    <div id="kpi-success-rate" class="kpi-value accent">0%</div>
+        <main class="dashboard-main observability-main">
+            <section class="dashboard-head fade-in" aria-label="Telemetry summary">
+                <div>
+                    <div class="eyebrow">Telemetry deck</div>
+                    <h1>Observability</h1>
+                    <p class="muted">Track success rate, duration, and failure patterns with the same dense operations language as the dashboard.</p>
                 </div>
-                <div class="kpi">
-                    <h3>Total Update Runs</h3>
-                    <div id="kpi-total" class="kpi-value">0</div>
+                <div class="head-meta" aria-label="Telemetry metadata">
+                    <span class="meta-pill">Update health</span>
+                    <span class="meta-pill">Audit-derived</span>
+                    <span class="meta-pill">Local Docker</span>
                 </div>
-                <div class="kpi">
-                    <h3>Average Duration</h3>
-                    <div id="kpi-duration" class="kpi-value">0 ms</div>
-                    <div id="kpi-duration-samples" class="subtle"></div>
+            </section>
+
+            <section class="workspace fade-in">
+                <div class="workspace-head">
+                    <div>
+                        <div class="eyebrow">Query controls</div>
+                        <h2>Update metrics</h2>
+                    </div>
+                    <p class="muted workspace-note">Refresh the selected window to review fleet-level run health.</p>
                 </div>
-            </div>
-        </section>
+                <div class="control-strip">
+                    <div class="controls">
+                        <label for="window-select">Time window</label>
+                        <select id="window-select">
+                            <option value="24h">Last 24 hours</option>
+                            <option value="7d" selected>Last 7 days</option>
+                            <option value="30d">Last 30 days</option>
+                        </select>
+                        <button class="primary-action" id="refresh-btn" type="button">Refresh</button>
+                        <span id="range-label" class="muted"></span>
+                    </div>
+                </div>
+                <div id="error-banner" class="error-banner" role="alert" aria-live="assertive"></div>
 
-        <section class="card">
-            <h2>Failure Causes</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Cause</th>
-                        <th>Count</th>
-                    </tr>
-                </thead>
-                <tbody id="failure-causes-body">
-                    <tr><td colspan="2" class="subtle">No failure data in selected window.</td></tr>
-                </tbody>
-            </table>
-        </section>
+                <div class="metric-strip kpi-grid" aria-label="Observability KPIs">
+                    <article class="metric-item kpi">
+                        <span>Success rate</span>
+                        <strong id="kpi-success-rate" class="kpi-value accent">0%</strong>
+                        <small>Completed without failure</small>
+                    </article>
+                    <article class="metric-item kpi">
+                        <span>Total update runs</span>
+                        <strong id="kpi-total" class="kpi-value">0</strong>
+                        <small>Runs in selected window</small>
+                    </article>
+                    <article class="metric-item kpi">
+                        <span>Average duration</span>
+                        <strong id="kpi-duration" class="kpi-value">0 ms</strong>
+                        <small id="kpi-duration-samples"></small>
+                    </article>
+                </div>
+            </section>
 
-        <section class="card">
-            <h2>Status Breakdown</h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Status</th>
-                        <th>Count</th>
-                    </tr>
-                </thead>
-                <tbody id="status-breakdown-body">
-                    <tr><td colspan="2" class="subtle">No status data in selected window.</td></tr>
-                </tbody>
-            </table>
-        </section>
+            <section class="observability-grid fade-in">
+                <article class="table-shell">
+                    <div class="table-shell-head">
+                        <div class="table-shell-title">
+                            <span class="table-shell-label">Failure causes</span>
+                            <span class="table-shell-subtle">Grouped failure signals in the selected window.</span>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Cause</th>
+                                    <th>Count</th>
+                                </tr>
+                            </thead>
+                            <tbody id="failure-causes-body">
+                                <tr><td colspan="2" class="muted">No failure data in selected window.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </article>
+
+                <article class="table-shell">
+                    <div class="table-shell-head">
+                        <div class="table-shell-title">
+                            <span class="table-shell-label">Status breakdown</span>
+                            <span class="table-shell-subtle">Run outcomes across the current window.</span>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Status</th>
+                                    <th>Count</th>
+                                </tr>
+                            </thead>
+                            <tbody id="status-breakdown-body">
+                                <tr><td colspan="2" class="muted">No status data in selected window.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </article>
+            </section>
+        </main>
     </div>
 
     <script src="/static/auth.js"></script>

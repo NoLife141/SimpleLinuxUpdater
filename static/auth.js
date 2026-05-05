@@ -30,4 +30,30 @@
         window.location.href = '/login';
         return new Promise(() => {});
     };
+
+    async function revalidateAuthenticatedPage() {
+        try {
+            const response = await window.__nativeFetch('/api/auth/status', { cache: 'no-store' });
+            if (!response.ok) {
+                window.location.replace('/login');
+                return;
+            }
+            const payload = await response.json();
+            if (payload.setup_required) {
+                window.location.replace('/setup');
+                return;
+            }
+            if (!payload.authenticated) {
+                window.location.replace('/login');
+            }
+        } catch (_) {
+            // Best effort; the next authenticated fetch will redirect on 401.
+        }
+    }
+
+    window.addEventListener('pageshow', (event) => {
+        if (event.persisted) {
+            revalidateAuthenticatedPage();
+        }
+    });
 })();

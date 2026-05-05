@@ -49,12 +49,16 @@ const (
 
 	updatePolicyGlobalBlackoutsSetting     = "update_policy_global_blackouts"
 	defaultScheduledApprovalTimeoutMinutes = 720
+	defaultUpdatePolicyRunsLimit           = 100
+	maxUpdatePolicyRunsLimit               = 200
 	updatePolicyTickInterval               = time.Minute
 )
 
 var (
 	updatePolicySchedulerOnce sync.Once
 	updatePolicyTickMu        sync.Mutex
+	updatePolicyMissedTickMu  sync.Mutex
+	updatePolicyMissedTicks   = map[string]time.Time{}
 	errUpdatePolicyValidation = errors.New("update policy validation")
 )
 
@@ -786,20 +790,6 @@ func renameUpdatePolicyOverridesServerTx(tx *sql.Tx, oldServerName, newServerNam
 	return nil
 }
 
-func renameUpdatePolicyOverridesServer(oldServerName, newServerName string) error {
-	tx, err := getDB().Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
-		return err
-	}
-
-	return tx.Commit()
-}
-
 func pruneUpdatePolicyOverridesForServersTx(tx *sql.Tx, activeServers []Server) error {
 	if tx == nil {
 		return errors.New("tx is required")
@@ -1441,12 +1431,39 @@ func updateScheduledJobDiscoveryMeta(jobID string, upgradable []string, pendingU
 }
 
 func executeScheduledPolicyRun(run UpdatePolicyRun, policy UpdatePolicy, server Server) {
+	if !backupRestoreMu.TryRLock() {
+		markScheduledPolicyRunMaintenanceSkipped(run, policy, server, "Maintenance mode active; scheduled run skipped")
+		return
+	}
+	defer backupRestoreMu.RUnlock()
+	if currentMaintenanceState().Active {
+		markScheduledPolicyRunMaintenanceSkipped(run, policy, server, "Maintenance mode active; scheduled run skipped")
+		return
+	}
+
 	switch policy.ExecutionMode {
 	case updatePolicyExecutionScanOnly:
 		runScheduledScanPolicy(run, policy, server)
 	default:
 		runScheduledUpdatePolicy(run, policy, server)
 	}
+}
+
+func markScheduledPolicyRunMaintenanceSkipped(run UpdatePolicyRun, policy UpdatePolicy, server Server, summary string) {
+	status := updatePolicyRunSkipped
+	reason := updatePolicyRunReasonMaintenance
+	finishedAt := jobTimestampNow()
+	_ = updateUpdatePolicyRun(run.ID, updatePolicyRunUpdate{
+		Status:     &status,
+		Reason:     &reason,
+		Summary:    &summary,
+		FinishedAt: &finishedAt,
+	})
+	auditWithActor("system", "", "schedule.run.skipped", "server", server.Name, "skipped", summary, map[string]any{
+		"policy_id":         policy.ID,
+		"policy_name":       policy.Name,
+		"scheduled_for_utc": run.ScheduledForUTC,
+	})
 }
 
 func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server Server) {
@@ -1529,7 +1546,8 @@ func runScheduledUpdatePolicy(run UpdatePolicyRun, policy UpdatePolicy, server S
 
 func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Server) {
 	preStartStatus := currentStatusSnapshot(server.Name)
-	if _, err := beginServerAction(server.Name, "updating"); err != nil {
+	serverForRun, err := beginServerAction(server.Name, "updating")
+	if err != nil {
 		status := updatePolicyRunFailed
 		reason := updatePolicyRunReasonMissing
 		summary := "Server unavailable for scheduled scan"
@@ -1634,8 +1652,9 @@ func runScheduledScanPolicy(run UpdatePolicyRun, policy UpdatePolicy, server Ser
 
 	startJobRunner(job.ID, func() {
 		defer restoreStatusSnapshot(server.Name, preStartStatus)
-		runScheduledScanJob(job.ID, run.ID, run.ScheduledForUTC, server, policy, retryPolicy)
+		runScheduledScanJob(job.ID, run.ID, run.ScheduledForUTC, serverForRun, policy, retryPolicy)
 	})
+	watchUpdatePolicyRunForJob(run.ID, job.ID)
 }
 
 func runScheduledScanJob(jobID string, runID int64, scheduledForUTC string, server Server, policy UpdatePolicy, retryPolicy RetryPolicy) {
@@ -1835,10 +1854,47 @@ func runScheduledScanJob(jobID string, runID int64, scheduledForUTC string, serv
 	})
 }
 
-func processDueUpdatePolicies(now time.Time) error {
-	updatePolicyTickMu.Lock()
-	defer updatePolicyTickMu.Unlock()
+func missedUpdatePolicyTickKey(t time.Time) string {
+	return t.UTC().Truncate(time.Minute).Format(jobTimestampLayout)
+}
 
+func rememberMissedUpdatePolicyTick(now time.Time) {
+	slotUTC := now.UTC().Truncate(time.Minute)
+	key := missedUpdatePolicyTickKey(slotUTC)
+	updatePolicyMissedTickMu.Lock()
+	defer updatePolicyMissedTickMu.Unlock()
+	if _, exists := updatePolicyMissedTicks[key]; exists {
+		return
+	}
+	updatePolicyMissedTicks[key] = slotUTC
+}
+
+func pendingMissedUpdatePolicyTicks() []time.Time {
+	updatePolicyMissedTickMu.Lock()
+	defer updatePolicyMissedTickMu.Unlock()
+	ticks := make([]time.Time, 0, len(updatePolicyMissedTicks))
+	for _, tick := range updatePolicyMissedTicks {
+		ticks = append(ticks, tick)
+	}
+	sort.Slice(ticks, func(i, j int) bool {
+		return ticks[i].Before(ticks[j])
+	})
+	return ticks
+}
+
+func forgetMissedUpdatePolicyTick(tick time.Time) {
+	updatePolicyMissedTickMu.Lock()
+	defer updatePolicyMissedTickMu.Unlock()
+	delete(updatePolicyMissedTicks, missedUpdatePolicyTickKey(tick))
+}
+
+func resetMissedUpdatePolicyTicksForTest() {
+	updatePolicyMissedTickMu.Lock()
+	defer updatePolicyMissedTickMu.Unlock()
+	updatePolicyMissedTicks = map[string]time.Time{}
+}
+
+func processDueUpdatePolicySlot(now time.Time, maintenanceActive bool) error {
 	policies, err := listUpdatePolicies()
 	if err != nil {
 		return err
@@ -1865,6 +1921,10 @@ func processDueUpdatePolicies(now time.Time) error {
 		}
 		for _, server := range serversSnapshot {
 			if !policyMatchesServer(policy, server, overrides) {
+				continue
+			}
+			if maintenanceActive {
+				createSkippedPolicyRun(policy, server.Name, scheduledForUTC, updatePolicyRunReasonMaintenance, "Maintenance mode active; scheduled run skipped")
 				continue
 			}
 			if blackoutApplies(slotLocal, globalBlackouts) || blackoutApplies(slotLocal, policy.PolicyBlackouts) {
@@ -1935,6 +1995,24 @@ func processDueUpdatePolicies(now time.Time) error {
 		return fmt.Errorf("scheduled policy queue encountered %d error(s): %w", len(queueErrs), errors.Join(queueErrs...))
 	}
 	return nil
+}
+
+func processDueUpdatePolicies(now time.Time) error {
+	updatePolicyTickMu.Lock()
+	defer updatePolicyTickMu.Unlock()
+	if !backupRestoreMu.TryRLock() {
+		rememberMissedUpdatePolicyTick(now)
+		return nil
+	}
+	defer backupRestoreMu.RUnlock()
+
+	for _, missedTick := range pendingMissedUpdatePolicyTicks() {
+		if err := processDueUpdatePolicySlot(missedTick, true); err != nil {
+			return err
+		}
+		forgetMissedUpdatePolicyTick(missedTick)
+	}
+	return processDueUpdatePolicySlot(now, currentMaintenanceState().Active)
 }
 
 func startUpdatePolicyScheduler(ctx context.Context) {
@@ -2054,7 +2132,15 @@ func handleUpdatePolicyDelete(c *gin.Context) {
 }
 
 func handleUpdatePolicyRuns(c *gin.Context) {
-	limit, _ := strconv.Atoi(strings.TrimSpace(c.DefaultQuery("limit", "100")))
+	rawLimit := strings.TrimSpace(c.DefaultQuery("limit", strconv.Itoa(defaultUpdatePolicyRunsLimit)))
+	limit, err := strconv.Atoi(rawLimit)
+	if err != nil || limit <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "limit must be a positive integer"})
+		return
+	}
+	if limit > maxUpdatePolicyRunsLimit {
+		limit = maxUpdatePolicyRunsLimit
+	}
 	runs, err := listUpdatePolicyRuns(limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load policy runs"})

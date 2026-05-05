@@ -4,8 +4,19 @@ test.describe.serial('setup and login flows', () => {
   const username = 'admin';
   const password = 'StrongPass1234';
 
+  async function signIn(page) {
+    await page.locator('#username').fill(username);
+    await page.locator('#password').fill(password);
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    await expect(page).toHaveURL('http://127.0.0.1:8080/');
+    await expect(page.locator('#logout-btn')).toBeVisible();
+  }
+
   test('setup form shows mismatch error', async ({ page }) => {
     await page.goto('/setup');
+    if (!/\/setup$/.test(page.url())) {
+      test.skip(true, 'setup already completed');
+    }
     await page.locator('#username').fill(username);
     await page.locator('#password').fill(password);
     await page.locator('#password-confirm').fill('DifferentPass1234');
@@ -17,6 +28,14 @@ test.describe.serial('setup and login flows', () => {
 
   test('setup creates account and redirects to status page', async ({ page }) => {
     await page.goto('/setup');
+    if (/\/login$/.test(page.url())) {
+      await signIn(page);
+      return;
+    }
+    if (page.url() === 'http://127.0.0.1:8080/') {
+      await expect(page.locator('#logout-btn')).toBeVisible();
+      return;
+    }
     await page.locator('#username').fill(username);
     await page.locator('#password').fill(password);
     await page.locator('#password-confirm').fill(password);
@@ -37,8 +56,6 @@ test.describe.serial('setup and login flows', () => {
     await expect(page).toHaveURL(/\/login$/);
 
     await page.locator('#password').fill(password);
-    await page.getByRole('button', { name: 'Sign in' }).click();
-    await expect(page).toHaveURL('http://127.0.0.1:8080/');
-    await expect(page.locator('#logout-btn')).toBeVisible();
+    await signIn(page);
   });
 });

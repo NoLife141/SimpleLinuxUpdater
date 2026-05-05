@@ -119,15 +119,21 @@ func deactivateMaintenance() error {
 	return nil
 }
 
-func maintenanceResponsePayload() gin.H {
+func publicMaintenanceStatePayload() gin.H {
 	state := currentMaintenanceState()
 	return gin.H{
-		"error":       "maintenance mode active",
-		"maintenance": true,
-		"kind":        state.Kind,
-		"started_at":  state.StartedAt,
-		"job_id":      state.JobID,
+		"active":     state.Active,
+		"kind":       state.Kind,
+		"started_at": state.StartedAt,
+		"message":    state.Message,
 	}
+}
+
+func maintenanceResponsePayload() gin.H {
+	payload := publicMaintenanceStatePayload()
+	payload["error"] = "maintenance mode active"
+	payload["maintenance"] = true
+	return payload
 }
 
 func maintenancePageHTML() string {
@@ -147,79 +153,7 @@ func maintenancePageHTML() string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Maintenance Mode</title>
-  <style>
-    :root {
-      --bg: #0b1220;
-      --card: #131c31;
-      --card-alt: #1a2540;
-      --text: #eef3ff;
-      --subtle: #a7b4d0;
-      --accent: #5ec2a8;
-      --border: rgba(167, 180, 208, 0.22);
-      --shadow: 0 24px 60px rgba(3, 8, 20, 0.45);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      font-family: "Segoe UI", Helvetica, Arial, sans-serif;
-      background:
-        radial-gradient(circle at top, rgba(94, 194, 168, 0.18), transparent 42%%),
-        linear-gradient(180deg, #0b1220 0%%, #10182b 100%%);
-      color: var(--text);
-      display: grid;
-      place-items: center;
-      padding: 24px;
-    }
-    main {
-      width: min(560px, 100%%);
-      background: linear-gradient(180deg, var(--card), var(--card-alt));
-      border: 1px solid var(--border);
-      border-radius: 24px;
-      box-shadow: var(--shadow);
-      padding: 32px;
-    }
-    h1 {
-      margin: 0 0 12px;
-      font-size: clamp(2rem, 3vw, 2.6rem);
-    }
-    p {
-      margin: 0 0 16px;
-      color: var(--subtle);
-      line-height: 1.6;
-    }
-    .meta {
-      margin-top: 24px;
-      padding: 16px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.06);
-    }
-    .label {
-      color: var(--subtle);
-      text-transform: uppercase;
-      font-size: 0.75rem;
-      letter-spacing: 0.08em;
-    }
-    .value {
-      margin-top: 6px;
-      font-size: 1rem;
-    }
-    .pulse {
-      width: 12px;
-      height: 12px;
-      border-radius: 999px;
-      background: var(--accent);
-      box-shadow: 0 0 0 rgba(94, 194, 168, 0.5);
-      animation: pulse 1.8s infinite;
-      margin-bottom: 18px;
-    }
-    @keyframes pulse {
-      0%% { box-shadow: 0 0 0 0 rgba(94, 194, 168, 0.45); }
-      70%% { box-shadow: 0 0 0 18px rgba(94, 194, 168, 0); }
-      100%% { box-shadow: 0 0 0 0 rgba(94, 194, 168, 0); }
-    }
-  </style>
+  <link rel="stylesheet" href="/static/css/maintenance.css">
 </head>
 <body>
   <main>
@@ -239,22 +173,7 @@ func maintenancePageHTML() string {
       <div class="value">%s</div>
     </div>
   </main>
-  <script>
-    (function poll() {
-      fetch('/api/maintenance', { credentials: 'same-origin', cache: 'no-store' })
-        .then(function (response) { return response.json(); })
-        .then(function (data) {
-          if (!data || !data.active) {
-            window.location.reload();
-            return;
-          }
-          window.setTimeout(poll, 1500);
-        })
-        .catch(function () {
-          window.setTimeout(poll, 2000);
-        });
-    })();
-  </script>
+  <script src="/static/js/maintenance.js"></script>
 </body>
 </html>`,
 		html.EscapeString(message),
@@ -303,5 +222,5 @@ func maintenanceExclusivePath(path string) bool {
 }
 
 func handleMaintenanceStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, currentMaintenanceState())
+	c.JSON(http.StatusOK, publicMaintenanceStatePayload())
 }

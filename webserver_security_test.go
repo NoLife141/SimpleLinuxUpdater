@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,6 +134,25 @@ func TestServerNameAndHostExistsLocked(t *testing.T) {
 	}
 }
 
+func TestServerJSONDoesNotExposeSecrets(t *testing.T) {
+	blob, err := json.Marshal(Server{
+		Name: "srv-secret",
+		Host: "example.org",
+		Port: 22,
+		User: "root",
+		Pass: "ssh-password",
+		Key:  "private-key",
+		Tags: []string{"prod"},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal(Server) unexpected error: %v", err)
+	}
+	raw := string(blob)
+	if strings.Contains(raw, "ssh-password") || strings.Contains(raw, "private-key") || strings.Contains(raw, `"pass"`) {
+		t.Fatalf("server JSON exposed secret material: %s", raw)
+	}
+}
+
 func TestReadUploadedKeyDataLimit(t *testing.T) {
 	key := bytes.Repeat([]byte("a"), maxUploadedKeyBytes)
 	got, err := readUploadedKeyData(bytes.NewReader(key))
@@ -151,6 +171,40 @@ func TestReadUploadedKeyDataLimit(t *testing.T) {
 	_, err = readUploadedKeyData(bytes.NewReader([]byte("   \n\t  ")))
 	if !errors.Is(err, errUploadedKeyEmpty) {
 		t.Fatalf("readUploadedKeyData(empty) err = %v, want %v", err, errUploadedKeyEmpty)
+	}
+}
+
+func TestGlobalKeyUploadRejectsOversizedRequestBody(t *testing.T) {
+	preserveDBState(t)
+	preserveServerState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	preserveEncryptionState(t)
+	dbFile := filepath.Join(t.TempDir(), "global-key-large-upload.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("key", "id_ed25519")
+	if err != nil {
+		t.Fatalf("CreateFormFile() unexpected error: %v", err)
+	}
+	if _, err := part.Write(bytes.Repeat([]byte("a"), maxUploadedKeyRequestBytes)); err != nil {
+		t.Fatalf("Write() unexpected error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("multipart close unexpected error: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/keys/global", &body)
+	req.AddCookie(sessionCookie)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	markSameOriginAuthRequest(req)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("global key upload status = %d, want %d (body=%s)", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
 	}
 }
 
@@ -627,6 +681,93 @@ func TestKnownHostsPathsDefaultUsesDataDir(t *testing.T) {
 	if paths[0] != wantFirst {
 		t.Fatalf("knownHostsPaths()[0] = %q, want %q", paths[0], wantFirst)
 	}
+}
+
+func TestKnownHostsWritePathUsesAppDataWhenUserKnownHostsExists(t *testing.T) {
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", "")
+	tmpDir := t.TempDir()
+	homeDir := t.TempDir()
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(tmpDir, "servers.db"))
+	t.Setenv("HOME", homeDir)
+
+	userSSHDir := filepath.Join(homeDir, ".ssh")
+	if err := os.MkdirAll(userSSHDir, 0700); err != nil {
+		t.Fatalf("MkdirAll(userSSHDir) unexpected error: %v", err)
+	}
+	userKnownHosts := filepath.Join(userSSHDir, "known_hosts")
+	if err := os.WriteFile(userKnownHosts, []byte("user.example ssh-ed25519 AAAAUSER\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(userKnownHosts) unexpected error: %v", err)
+	}
+
+	got, err := knownHostsWritePath()
+	if err != nil {
+		t.Fatalf("knownHostsWritePath() unexpected error: %v", err)
+	}
+	want := filepath.Join(tmpDir, "known_hosts")
+	if got != want {
+		t.Fatalf("knownHostsWritePath() = %q, want app data path %q", got, want)
+	}
+
+	line := "app.example ssh-ed25519 AAAAAPP"
+	if _, err := appendKnownHostLine(line); err != nil {
+		t.Fatalf("appendKnownHostLine() unexpected error: %v", err)
+	}
+	appData, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatalf("ReadFile(app known_hosts) unexpected error: %v", err)
+	}
+	if !strings.Contains(string(appData), line) {
+		t.Fatalf("app known_hosts missing appended line: %q", string(appData))
+	}
+	userData, err := os.ReadFile(userKnownHosts)
+	if err != nil {
+		t.Fatalf("ReadFile(user known_hosts) unexpected error: %v", err)
+	}
+	if strings.Contains(string(userData), line) {
+		t.Fatalf("user known_hosts was modified: %q", string(userData))
+	}
+}
+
+func TestKnownHostsWritePathUsesFirstConfiguredPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	first := filepath.Join(tmpDir, "app_known_hosts")
+	second := filepath.Join(tmpDir, "system_known_hosts")
+	if err := os.WriteFile(second, []byte("existing.example ssh-ed25519 AAAAEXISTING\n"), 0600); err != nil {
+		t.Fatalf("WriteFile(second) unexpected error: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", first+":"+second)
+
+	got, err := knownHostsWritePath()
+	if err != nil {
+		t.Fatalf("knownHostsWritePath() unexpected error: %v", err)
+	}
+	if got != first {
+		t.Fatalf("knownHostsWritePath() = %q, want first configured path %q", got, first)
+	}
+}
+
+func TestTrustedProxiesFromEnv(t *testing.T) {
+	t.Run("unset disables trusted proxies", func(t *testing.T) {
+		t.Setenv(trustedProxiesEnv, "")
+		if got := trustedProxiesFromEnv(); got != nil {
+			t.Fatalf("trustedProxiesFromEnv() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("none disables trusted proxies", func(t *testing.T) {
+		t.Setenv(trustedProxiesEnv, "none")
+		if got := trustedProxiesFromEnv(); got != nil {
+			t.Fatalf("trustedProxiesFromEnv() = %+v, want nil", got)
+		}
+	})
+
+	t.Run("dedupes configured proxies", func(t *testing.T) {
+		t.Setenv(trustedProxiesEnv, "127.0.0.1, 10.0.0.0/8,127.0.0.1")
+		want := []string{"127.0.0.1", "10.0.0.0/8"}
+		if got := trustedProxiesFromEnv(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("trustedProxiesFromEnv() = %+v, want %+v", got, want)
+		}
+	})
 }
 
 func TestSaveServersOrRollbackLockedOnFailure(t *testing.T) {

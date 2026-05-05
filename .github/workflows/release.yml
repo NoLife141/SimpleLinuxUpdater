@@ -11,6 +11,9 @@ permissions:
 jobs:
   release-gate:
     runs-on: ubuntu-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ~/.cache/ms-playwright
+      PLAYWRIGHT_WEBSERVER_COMMAND: 'mkdir -p .tmp-e2e && rm -f .tmp-e2e/servers.db && : > .tmp-e2e/known_hosts && DEBIAN_UPDATER_DB_PATH=.tmp-e2e/servers.db DEBIAN_UPDATER_KNOWN_HOSTS=.tmp-e2e/known_hosts ./webserver'
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -21,21 +24,79 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install release tooling
+        run: |
+          # Pin release-gate tooling so tagged releases are reproducible.
+          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Install UI dependencies
+        run: npm ci
+
+      - name: Install Playwright browser and OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright OS dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
       - name: Run tests
         run: |
+          go vet ./...
+          staticcheck ./...
+          govulncheck ./...
+          actionlint
           go test -count=1 ./...
           go test -race -count=1 ./...
+          go test -covermode=atomic -coverprofile=coverage.out ./...
+          go build -o webserver .
+          npm audit --audit-level=moderate
+          npm run test:e2e
 
       - name: Verify release metadata
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          ESCAPED_TAG="$(printf '%s' "$TAG" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
+          ESCAPED_VERSION="$(printf '%s' "$VERSION" | sed 's/[][\\.^$*+?{}|()]/\\&/g')"
           echo "Tag: $TAG"
           echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
-          grep -q "^Version: $TAG$" README.md
-          grep -q "Version $TAG" templates/index.html
+          grep -Eq "^Version: ${ESCAPED_TAG}$" README.md
+          grep -Eq ">[[:space:]]*${ESCAPED_TAG}[[:space:]]*<" templates/index.html
           test -f CHANGELOG.md
-          grep -q "^## \[$TAG\]" CHANGELOG.md
+          grep -Eq "^## \[${ESCAPED_TAG}\]" CHANGELOG.md
+          for doc in README.md docs/installation.md docs/deployment.md docs/configuration.md; do
+            grep -Eq "simplelinuxupdater:${ESCAPED_TAG}" "$doc"
+            stale_doc_tags="$(grep -Eo 'simplelinuxupdater:v[0-9]+\.[0-9]+\.[0-9]+' "$doc" | grep -Fvx "simplelinuxupdater:${TAG}" || true)"
+            if [ -n "$stale_doc_tags" ]; then
+              echo "Found stale SimpleLinuxUpdater image tag in $doc:" >&2
+              printf '%s\n' "$stale_doc_tags" >&2
+              exit 1
+            fi
+          done
+          stale_readme_versions="$(grep -Eo '^VERSION="[0-9]+\.[0-9]+\.[0-9]+"$' README.md | grep -Fvx "VERSION=\"${VERSION}\"" || true)"
+          if [ -n "$stale_readme_versions" ]; then
+            echo "Found stale README binary VERSION:" >&2
+            printf '%s\n' "$stale_readme_versions" >&2
+            exit 1
+          fi
+          grep -Eq "^VERSION=\"${ESCAPED_VERSION}\"$" README.md
 
   publish-release:
     needs: release-gate
@@ -78,6 +139,13 @@ jobs:
             mkdir -p "$PKG_ROOT"
             cp "dist/${BIN}" "${PKG_ROOT}/webserver${EXT}"
             cp -r templates static "$PKG_ROOT/"
+            if [ -d docs ]; then
+              cp -r docs "$PKG_ROOT/"
+            fi
+            if [ -f .github/assets/ALSU-screens.gif ]; then
+              mkdir -p "$PKG_ROOT/.github/assets"
+              cp .github/assets/ALSU-screens.gif "$PKG_ROOT/.github/assets/"
+            fi
             cp README.md LICENSE .env-template "$PKG_ROOT/"
 
             if [ "$GOOS" = "windows" ]; then
@@ -103,8 +171,8 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           NOTES_FILE="dist/release_notes.md"
           awk -v tag="$TAG" '
-            $0 ~ "^## \\[" tag "\\]" {capture=1}
-            capture && $0 ~ "^## \\[" && $0 !~ "^## \\[" tag "\\]" {exit}
+            index($0, "## [" tag "]") == 1 {capture=1}
+            capture && $0 ~ "^## \\[" && index($0, "## [" tag "]") != 1 {exit}
             capture {print}
           ' CHANGELOG.md > "$NOTES_FILE"
           if [ ! -s "$NOTES_FILE" ]; then
@@ -164,7 +232,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

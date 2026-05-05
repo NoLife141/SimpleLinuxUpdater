@@ -69,5 +69,12 @@ Evidence to capture:
 ## 5) Final Gate
 
 - `go test ./...` passes
+- `go vet ./...` passes
+- `staticcheck ./...` passes
+- `govulncheck ./...` passes
+- `actionlint` passes
+- `go test -race -count=1 ./...` passes
+- `go test -covermode=atomic -coverprofile=coverage.out ./...` passes
+- `npm audit --audit-level=moderate` passes
 - `npm run test:e2e` passes
 - CI (`unit`, `race`, `cover`, `ui-e2e`) is green on the release commit

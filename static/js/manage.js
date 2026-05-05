@@ -15,29 +15,105 @@ let editKnownHostState = { host: '', port: 0, checked: false, alreadyTrusted: fa
 let editKnownHostCheckPromise = null;
 let editUpdatePolicies = [];
 let editPolicyOverrideStates = new Map();
+let manageGlobalKeyAvailable = false;
+let modalFocusStack = [];
+let auditFetchHadError = false;
 
-        function escapeHtml(value) {
-            return String(value ?? "")
-                .replace(/&/g, "&amp;")
-                .replace(/</g, "&lt;")
+	        function escapeHtml(value) {
+	            return String(value ?? "")
+	                .replace(/&/g, "&amp;")
+	                .replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;")
                 .replace(/"/g, "&quot;")
-                .replace(/'/g, "&#39;");
-        }
+	                .replace(/'/g, "&#39;");
+	        }
 
-        function escapeJsSingleQuoted(value) {
-            return String(value ?? "")
-                .replace(/\\/g, "\\\\")
-                .replace(/'/g, "\\'")
-                .replace(/\r/g, "\\r")
-                .replace(/\n/g, "\\n")
-                .replace(/\u2028/g, "\\u2028")
-                .replace(/\u2029/g, "\\u2029");
-        }
+function modalFocusableElements(modal) {
+    if (!modal) return [];
+    return Array.from(modal.querySelectorAll([
+        'a[href]',
+        'button:not([disabled])',
+        'input:not([disabled]):not([type="hidden"])',
+        'select:not([disabled])',
+        'textarea:not([disabled])',
+        '[tabindex]:not([tabindex="-1"])'
+    ].join(','))).filter((el) => {
+        return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+    });
+}
 
-            function normalizePort(value, fallback = 22) {
-                const parsed = Number.parseInt(value, 10);
-                if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return fallback;
+function activateModalFocus(modal, preferredTarget) {
+    if (!modal) return;
+    modalFocusStack = modalFocusStack.filter((entry) => entry.modal !== modal);
+    modalFocusStack.push({ modal, previous: document.activeElement });
+    const focusable = modalFocusableElements(modal);
+    const target = preferredTarget && !preferredTarget.disabled ? preferredTarget : focusable[0];
+    if (target && typeof target.focus === 'function') {
+        window.setTimeout(() => target.focus({ preventScroll: true }), 0);
+    }
+}
+
+function releaseModalFocus(modal) {
+    const index = modalFocusStack.map((entry) => entry.modal).lastIndexOf(modal);
+    if (index === -1) return;
+    const [entry] = modalFocusStack.splice(index, 1);
+    const previous = entry.previous;
+    if (previous && document.contains(previous) && typeof previous.focus === 'function') {
+        window.setTimeout(() => previous.focus({ preventScroll: true }), 0);
+    }
+}
+
+function trapActiveModalFocus(event) {
+    const entry = modalFocusStack[modalFocusStack.length - 1];
+    if (!entry || !entry.modal || !entry.modal.classList.contains('active')) {
+        return false;
+    }
+    const focusable = modalFocusableElements(entry.modal);
+    if (!focusable.length) {
+        event.preventDefault();
+        return true;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+        return true;
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+        return true;
+    }
+    if (!entry.modal.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+        return true;
+    }
+    return false;
+}
+
+function fileInputEmptyLabel(input) {
+    if (!input) return 'Choose file';
+    switch (input.id) {
+        case 'global-key-file':
+            return 'Choose global key';
+        case 'key_file':
+            return 'Choose host key';
+        case 'edit-key':
+            return 'Choose key';
+        default:
+            return 'Choose file';
+    }
+}
+
+function resetFileInputLabel(input) {
+    updateFileLabel(input, fileInputEmptyLabel(input));
+}
+
+	            function normalizePort(value, fallback = 22) {
+	                const parsed = Number.parseInt(value, 10);
+	                if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return fallback;
                 return parsed;
             }
 
@@ -243,12 +319,13 @@ let editPolicyOverrideStates = new Map();
             );
         }
 
-        function closeHostKeyModal(confirmed) {
-            const modal = document.getElementById('hostkey-modal');
-            if (modal) {
-                modal.classList.remove('active');
-            }
-            const resolvers = hostKeyModalResolvers;
+	        function closeHostKeyModal(confirmed) {
+	            const modal = document.getElementById('hostkey-modal');
+	            if (modal) {
+	                modal.classList.remove('active');
+	                releaseModalFocus(modal);
+	            }
+	            const resolvers = hostKeyModalResolvers;
             hostKeyModalResolvers = [];
             hostKeyModalPromise = null;
             for (const resolver of resolvers) {
@@ -264,11 +341,12 @@ let editPolicyOverrideStates = new Map();
             }
             if (hostKeyModalPromise) {
                 return Promise.resolve(false);
-            }
-            details.textContent = hostKeyPromptText(scanned);
-            modal.classList.add('active');
-            hostKeyModalPromise = new Promise((resolve) => {
-                hostKeyModalResolvers = [resolve];
+	            }
+	            details.textContent = hostKeyPromptText(scanned);
+	            modal.classList.add('active');
+	            activateModalFocus(modal, document.getElementById('hostkey-modal-cancel'));
+	            hostKeyModalPromise = new Promise((resolve) => {
+	                hostKeyModalResolvers = [resolve];
             });
             return hostKeyModalPromise;
         }
@@ -339,13 +417,21 @@ let editPolicyOverrideStates = new Map();
             });
         }
 
+        function hasEffectiveKey(server) {
+            return !!server?.has_key || (!!manageGlobalKeyAvailable && !server?.has_key);
+        }
+
+        function usesGlobalKey(server) {
+            return !!manageGlobalKeyAvailable && !server?.has_key;
+        }
+
         function applyFilters(servers) {
             const search = document.getElementById('search').value.trim().toLowerCase();
             const tagFilter = document.getElementById('tag-filter').value.trim().toLowerCase();
             const authFilter = document.getElementById('auth-filter').value;
             return servers.filter(server => {
                 if (authFilter === "password" && !server.has_password) return false;
-                if (authFilter === "key" && !server.has_key) return false;
+                if (authFilter === "key" && !hasEffectiveKey(server)) return false;
                 if (tagFilter) {
                     const tags = (server.tags || []).join(" ").toLowerCase();
                     if (!tags.includes(tagFilter)) return false;
@@ -385,7 +471,7 @@ let editPolicyOverrideStates = new Map();
                 });
             } else if (groupBy === "auth") {
                 servers.forEach(server => {
-                    const key = server.has_key ? "key" : "no key";
+                    const key = hasEffectiveKey(server) ? (usesGlobalKey(server) ? "global key" : "key") : "no key";
                     const pw = server.has_password ? "password" : "no password";
                     const group = `${key} / ${pw}`;
                     if (!groups.has(group)) groups.set(group, []);
@@ -515,6 +601,8 @@ let editPolicyOverrideStates = new Map();
             }
             if (server.has_key) {
                 bits.push('<span class="pill pill-success">Key</span>');
+            } else if (usesGlobalKey(server)) {
+                bits.push('<span class="pill pill-success">Global Key</span>');
             } else {
                 bits.push('<span class="pill pill-muted">No Key</span>');
             }
@@ -576,36 +664,48 @@ let editPolicyOverrideStates = new Map();
             document.getElementById('audit-page-info').textContent = `Page ${currentPage} of ${totalPages} (${auditTotal} events)`;
         }
 
-        async function fetchAuditEvents() {
-            if (window.ensureAppTimezoneLoaded) {
-                await window.ensureAppTimezoneLoaded();
+        async function fetchAuditEvents(options = {}) {
+            const silent = !!options.silent;
+            try {
+                if (window.ensureAppTimezoneLoaded) {
+                    await window.ensureAppTimezoneLoaded();
+                }
+                const params = new URLSearchParams({
+                    page: String(auditPage),
+                    page_size: String(auditPageSize)
+                });
+                const targetName = document.getElementById('audit-target-filter').value.trim();
+                const action = document.getElementById('audit-action-filter').value.trim();
+                const status = document.getElementById('audit-status-filter').value;
+                if (targetName) params.set('target_name', targetName);
+                if (action) params.set('action', action);
+                if (status) params.set('status', status);
+                const res = await fetch(`/api/audit-events?${params.toString()}`);
+                if (!res.ok) {
+                    throw new Error(await parseErrorResponse(res, 'Failed to load audit events.'));
+                }
+                const data = await res.json();
+                auditEvents = data.items || [];
+                auditTotal = Number(data.total || 0);
+                auditFetchHadError = false;
+                const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
+                if (auditPage > totalPages) {
+                    auditPage = totalPages;
+                    await fetchAuditEvents(options);
+                    return;
+                }
+                renderAuditTable();
+            } catch (err) {
+                const message = err && err.message ? err.message : 'Failed to load audit events.';
+                const pageInfo = document.getElementById('audit-page-info');
+                if (pageInfo) {
+                    pageInfo.textContent = `Audit events unavailable: ${message}`;
+                }
+                if (!silent && !auditFetchHadError) {
+                    console.warn('Failed to load audit events:', err);
+                }
+                auditFetchHadError = true;
             }
-            const params = new URLSearchParams({
-                page: String(auditPage),
-                page_size: String(auditPageSize)
-            });
-            const targetName = document.getElementById('audit-target-filter').value.trim();
-            const action = document.getElementById('audit-action-filter').value.trim();
-            const status = document.getElementById('audit-status-filter').value;
-            if (targetName) params.set('target_name', targetName);
-            if (action) params.set('action', action);
-            if (status) params.set('status', status);
-            const res = await fetch(`/api/audit-events?${params.toString()}`);
-            if (!res.ok) {
-                const msg = await parseErrorResponse(res, 'Failed to load audit events.');
-                alert(msg);
-                return;
-            }
-            const data = await res.json();
-            auditEvents = data.items || [];
-            auditTotal = Number(data.total || 0);
-            const totalPages = Math.max(1, Math.ceil(auditTotal / auditPageSize));
-            if (auditPage > totalPages) {
-                auditPage = totalPages;
-                await fetchAuditEvents();
-                return;
-            }
-            renderAuditTable();
         }
 
         document.getElementById('add-server-form').addEventListener('submit', async (e) => {
@@ -641,7 +741,15 @@ let editPolicyOverrideStates = new Map();
                 const serverName = created.name || trimmedName || name;
                 const res = await fetch(`/api/servers/${encodeURIComponent(serverName)}/key`, { method: 'POST', body: form });
                 if (!res.ok) {
-                    alert(await parseErrorResponse(res, 'Failed to upload key.'));
+                    const uploadError = await parseErrorResponse(res, 'Failed to upload key.');
+                    const rollback = await fetch(`/api/servers/${encodeURIComponent(serverName)}`, { method: 'DELETE' }).catch(() => null);
+                    if (rollback && rollback.ok) {
+                        alert(`Server was not saved because key upload failed: ${uploadError}`);
+                    } else {
+                        alert(`Key upload failed and the server could not be removed automatically: ${uploadError}`);
+                        fetchManageServers();
+                    }
+                    return;
                 }
             }
             if (trustHostNow) {
@@ -653,7 +761,7 @@ let editPolicyOverrideStates = new Map();
             }
             if (keyFileInput) {
                 keyFileInput.value = '';
-                updateFileLabel(keyFileInput, 'Click to upload key');
+                resetFileInputLabel(keyFileInput);
             }
             fetchManageServers();
             e.target.reset();
@@ -662,7 +770,7 @@ let editPolicyOverrideStates = new Map();
 
         document.addEventListener('change', (e) => {
             if (e.target && e.target.classList.contains('file-input')) {
-                updateFileLabel(e.target, 'Click to upload key');
+                resetFileInputLabel(e.target);
             }
         });
 
@@ -695,14 +803,16 @@ let editPolicyOverrideStates = new Map();
             const keyInput = document.getElementById('edit-key');
             if (keyInput) {
                 keyInput.value = '';
-                updateFileLabel(keyInput, 'Click to upload key');
+                resetFileInputLabel(keyInput);
                 }
                 setEditHostKeyStatus('');
                 clearEditValidationState();
                 setEditSaveButtonState(false);
                 setEditKnownHostButtonsState(false);
-                document.getElementById('edit-modal').classList.add('active');
-                checkEditKnownHostStatus();
+	                const editModal = document.getElementById('edit-modal');
+	                editModal.classList.add('active');
+	                activateModalFocus(editModal, document.getElementById('edit-name'));
+	                checkEditKnownHostStatus();
                 document.getElementById('edit-policy-overrides').innerHTML = '<div class="subtle">Loading matching policies...</div>';
                 try {
                     await fetchEditPolicyContext(name);
@@ -712,9 +822,11 @@ let editPolicyOverrideStates = new Map();
                 }
             }
 
-            function closeEditModal() {
-                document.getElementById('edit-modal').classList.remove('active');
-                setEditHostKeyStatus('');
+	            function closeEditModal() {
+	                const editModal = document.getElementById('edit-modal');
+	                editModal.classList.remove('active');
+	                releaseModalFocus(editModal);
+	                setEditHostKeyStatus('');
                 clearEditValidationState();
                 setEditSaveButtonState(false);
                 setEditKnownHostButtonsState(false);
@@ -983,7 +1095,7 @@ let editPolicyOverrideStates = new Map();
                 return;
             }
             input.value = '';
-            updateFileLabel(input, 'Click to upload key');
+            resetFileInputLabel(input);
             fetchManageServers();
         }
 
@@ -1033,6 +1145,7 @@ let editPolicyOverrideStates = new Map();
                 maybeClearEditValidationError();
                 if (editingServerName) {
                     editKnownHostCheckPromise = null;
+                    setEditKnownHostButtonsState(false);
                     resetEditKnownHostState();
                     setEditHostKeyStatus('Host/port changed. Click "Check Known Host" to refresh status.');
                 }
@@ -1040,6 +1153,7 @@ let editPolicyOverrideStates = new Map();
             document.getElementById('edit-port').addEventListener('input', () => {
                 if (editingServerName) {
                     editKnownHostCheckPromise = null;
+                    setEditKnownHostButtonsState(false);
                     resetEditKnownHostState();
                     setEditHostKeyStatus('Host/port changed. Click "Check Known Host" to refresh status.');
                 }
@@ -1069,15 +1183,23 @@ let editPolicyOverrideStates = new Map();
             if (e.target && e.target.id === 'hostkey-modal') {
                 closeHostKeyModal(false);
             }
-        });
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                const hostKeyModal = document.getElementById('hostkey-modal');
-                if (hostKeyModal && hostKeyModal.classList.contains('active')) {
-                    closeHostKeyModal(false);
-                }
-            }
-        });
+	        });
+	        document.addEventListener('keydown', (e) => {
+	            if (e.key === 'Tab' && trapActiveModalFocus(e)) {
+	                return;
+	            }
+	            if (e.key === 'Escape') {
+	                const hostKeyModal = document.getElementById('hostkey-modal');
+	                if (hostKeyModal && hostKeyModal.classList.contains('active')) {
+	                    closeHostKeyModal(false);
+	                    return;
+	                }
+	                const editModal = document.getElementById('edit-modal');
+	                if (editModal && editModal.classList.contains('active')) {
+	                    closeEditModal();
+	                }
+	            }
+	        });
 
         async function uploadGlobalKey() {
             const input = document.getElementById('global-key-file');
@@ -1095,7 +1217,7 @@ let editPolicyOverrideStates = new Map();
             }
             alert('Global key saved.');
             input.value = '';
-            updateFileLabel(input, 'Click to upload key');
+            resetFileInputLabel(input);
             fetchGlobalKeyStatus();
         }
 
@@ -1119,7 +1241,13 @@ let editPolicyOverrideStates = new Map();
                 return;
             }
             const data = await res.json();
+            const nextGlobalKeyAvailable = !!data.has_key;
+            const changed = nextGlobalKeyAvailable !== manageGlobalKeyAvailable;
+            manageGlobalKeyAvailable = nextGlobalKeyAvailable;
             status.textContent = data.has_key ? 'Global key: saved' : 'Global key: not set';
+            if (changed && manageServers.length > 0) {
+                renderTable();
+            }
         }
 
         document.getElementById('logout-btn').addEventListener('click', () => window.logout());

@@ -16,6 +16,8 @@ servers.json
 *.key
 *.pem
 id_rsa*
+id_ed25519*
+known_hosts
 
 # local artifacts
 .DS_Store

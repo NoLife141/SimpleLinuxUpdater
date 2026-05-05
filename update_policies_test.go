@@ -23,6 +23,8 @@ func prepareUpdatePolicyTestState(t *testing.T, dbFile string) {
 	preserveSessionState(t)
 	preserveRateLimiterState(t)
 	preserveMetricsTokenState(t)
+	resetMissedUpdatePolicyTicksForTest()
+	t.Cleanup(resetMissedUpdatePolicyTicksForTest)
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
 	if err := initializeJobManager(); err != nil {
 		t.Fatalf("initializeJobManager() unexpected error: %v", err)
@@ -244,6 +246,55 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 	if len(postDeleteOverridesResp.Items) != 0 {
 		t.Fatalf("override items after server delete = %d, want 0", len(postDeleteOverridesResp.Items))
+	}
+}
+
+func TestUpdatePolicyRunsLimitValidationAndClamp(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-runs-limit.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+	base := time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < maxUpdatePolicyRunsLimit+5; i++ {
+		_, inserted, err := createUpdatePolicyRun(UpdatePolicyRun{
+			PolicyID:        1,
+			PolicyName:      "Limit policy",
+			ServerName:      "srv-limit",
+			ScheduledForUTC: base.Add(time.Duration(i) * time.Minute).Format(jobTimestampLayout),
+			ExecutionMode:   updatePolicyExecutionScanOnly,
+			PackageScope:    updatePolicyPackageScopeSecurity,
+			Status:          updatePolicyRunSkipped,
+			Reason:          updatePolicyRunReasonBusy,
+			Summary:         "Skipped for limit test",
+			ResultJSON:      "{}",
+		})
+		if err != nil || !inserted {
+			t.Fatalf("createUpdatePolicyRun(%d) = inserted %t err %v", i, inserted, err)
+		}
+	}
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	invalidRec := httptest.NewRecorder()
+	invalidReq := httptest.NewRequest(http.MethodGet, "/api/update-policies/runs?limit=abc", nil)
+	invalidReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(invalidRec, invalidReq)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid runs limit status = %d, want %d (body=%s)", invalidRec.Code, http.StatusBadRequest, invalidRec.Body.String())
+	}
+
+	clampedRec := httptest.NewRecorder()
+	clampedReq := httptest.NewRequest(http.MethodGet, "/api/update-policies/runs?limit=999999", nil)
+	clampedReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(clampedRec, clampedReq)
+	if clampedRec.Code != http.StatusOK {
+		t.Fatalf("clamped runs status = %d, want %d (body=%s)", clampedRec.Code, http.StatusOK, clampedRec.Body.String())
+	}
+	var resp struct {
+		Items []UpdatePolicyRun `json:"items"`
+	}
+	if err := json.Unmarshal(clampedRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal clamped runs response: %v", err)
+	}
+	if len(resp.Items) != maxUpdatePolicyRunsLimit {
+		t.Fatalf("clamped runs count = %d, want %d", len(resp.Items), maxUpdatePolicyRunsLimit)
 	}
 }
 
@@ -1169,6 +1220,148 @@ func TestMaintenancePageHTMLUsesAppTimezoneFormatting(t *testing.T) {
 	}
 }
 
+func TestProcessDueUpdatePoliciesRecordsMaintenanceSkip(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-maintenance-tick.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	now := time.Date(2026, time.January, 15, 14, 5, 0, 0, time.UTC)
+	server := Server{Name: "srv-maint-tick", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Maintenance tick skip",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     now.In(currentAppLocation()).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("createUpdatePolicy() unexpected error: %v", err)
+	}
+
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      "backup_restore",
+		JobID:     "job-maint-tick",
+		StartedAt: now.Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+		Actor:     "test",
+	})
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(MaintenanceState{})
+	})
+
+	if err := processDueUpdatePolicies(now); err != nil {
+		t.Fatalf("processDueUpdatePolicies() unexpected error: %v", err)
+	}
+
+	runs, err := listUpdatePolicyRuns(10)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyRuns() unexpected error: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("scheduled maintenance runs = %d, want 1: %+v", len(runs), runs)
+	}
+	run := runs[0]
+	if run.PolicyID != policy.ID || run.ServerName != server.Name {
+		t.Fatalf("scheduled maintenance run = %+v, want policy %d server %q", run, policy.ID, server.Name)
+	}
+	if run.Status != updatePolicyRunSkipped {
+		t.Fatalf("maintenance tick run status = %q, want %q", run.Status, updatePolicyRunSkipped)
+	}
+	if run.Reason != updatePolicyRunReasonMaintenance {
+		t.Fatalf("maintenance tick run reason = %q, want %q", run.Reason, updatePolicyRunReasonMaintenance)
+	}
+}
+
+func TestProcessDueUpdatePoliciesRecordsMissedMaintenanceSkipAfterBarrierUnlocks(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-maintenance-cleared.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	now := time.Date(2026, time.January, 15, 14, 5, 0, 0, time.UTC)
+	server := Server{Name: "srv-maint-cleared", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"prod"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "updating", Tags: []string{"prod"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Maintenance cleared tick",
+		Enabled:       true,
+		TargetTag:     "prod",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     now.In(currentAppLocation()).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("createUpdatePolicy() unexpected error: %v", err)
+	}
+
+	backupRestoreMu.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			backupRestoreMu.Unlock()
+		}
+	})
+	setCurrentMaintenanceState(MaintenanceState{
+		Active:    true,
+		Kind:      "backup_restore",
+		JobID:     "job-maint-cleared",
+		StartedAt: now.Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+		Actor:     "test",
+	})
+	t.Cleanup(func() {
+		setCurrentMaintenanceState(MaintenanceState{})
+	})
+
+	if err := processDueUpdatePolicies(now); err != nil {
+		t.Fatalf("processDueUpdatePolicies() unexpected error: %v", err)
+	}
+	setCurrentMaintenanceState(MaintenanceState{})
+	backupRestoreMu.Unlock()
+	locked = false
+
+	runs, err := listUpdatePolicyRuns(10)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyRuns() unexpected error: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("scheduled runs = %d, want 0 while maintenance barrier is locked: %+v", len(runs), runs)
+	}
+
+	if err := processDueUpdatePolicies(now.Add(time.Minute)); err != nil {
+		t.Fatalf("processDueUpdatePolicies() after unlock unexpected error: %v", err)
+	}
+
+	runs, err = listUpdatePolicyRuns(10)
+	if err != nil {
+		t.Fatalf("listUpdatePolicyRuns() after unlock unexpected error: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("scheduled runs after unlock = %d, want 1 missed maintenance skip: %+v", len(runs), runs)
+	}
+	run := runs[0]
+	if run.PolicyID != policy.ID || run.ServerName != server.Name {
+		t.Fatalf("missed maintenance run = %+v, want policy %d server %q", run, policy.ID, server.Name)
+	}
+	if run.Status != updatePolicyRunSkipped {
+		t.Fatalf("missed maintenance run status = %q, want %q", run.Status, updatePolicyRunSkipped)
+	}
+	if run.Reason != updatePolicyRunReasonMaintenance {
+		t.Fatalf("missed maintenance run reason = %q, want %q", run.Reason, updatePolicyRunReasonMaintenance)
+	}
+}
+
 func TestRunUpdateJobWithActorScheduledAutoApplyUsesJobMeta(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "update-policy-auto-apply.db")
 	prepareUpdatePolicyTestState(t, dbFile)
@@ -1467,16 +1660,33 @@ func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) 
 		},
 	}
 	origDial := getDialSSHConnection()
-	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+	setDialSSHConnection(func(got Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		if got.Host != server.Host || got.User != server.User || got.Pass != server.Pass {
+			t.Fatalf(
+				"scheduled scan used stale server data: got host/user %q/%q, want %q/%q; password equal=%t got_password_set=%t want_password_set=%t",
+				got.Host,
+				got.User,
+				server.Host,
+				server.User,
+				got.Pass == server.Pass,
+				got.Pass != "",
+				server.Pass != "",
+			)
+		}
 		return conn, nil
 	})
 	t.Cleanup(func() { setDialSSHConnection(origDial) })
 
-	runScheduledScanPolicy(run, policy, server)
+	staleServer := server
+	staleServer.Host = "old.example.org"
+	staleServer.User = "old-root"
+	staleServer.Pass = "old-pw"
+	runScheduledScanPolicy(run, policy, staleServer)
 	waitForCondition(t, 10*time.Second, func() bool {
 		current, err := getUpdatePolicyRun(run.ID)
 		return err == nil && current.Status == updatePolicyRunSucceeded
 	}, "scan-only policy run to complete")
+	waitForUpdateRunners()
 
 	currentRun, err := getUpdatePolicyRun(run.ID)
 	if err != nil {
@@ -1502,6 +1712,76 @@ func TestScheduledScanPolicyStoresDiscoveryWithoutRuntimeMutation(t *testing.T) 
 	runtimeStatus := currentStatusSnapshot(server.Name)
 	if runtimeStatus == nil || runtimeStatus.Status != "idle" {
 		t.Fatalf("runtime status after scan-only = %+v, want idle", runtimeStatus)
+	}
+}
+
+func TestScheduledScanPolicyPanicMarksRunFailed(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-scan-panic.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	t.Setenv(retryMaxAttemptsEnv, "1")
+	knownHostsPath := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(knownHostsPath, []byte(""), 0600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
+
+	server := Server{Name: "srv-scan-panic", Host: "example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"scan"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"scan"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	policy, err := createUpdatePolicy(UpdatePolicy{
+		Name:          "Scan panic",
+		Enabled:       true,
+		TargetTag:     "scan",
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     time.Now().In(time.Local).Format("15:04"),
+	})
+	if err != nil {
+		t.Fatalf("create scan panic policy: %v", err)
+	}
+	run, inserted, err := createUpdatePolicyRun(UpdatePolicyRun{
+		PolicyID:        policy.ID,
+		PolicyName:      policy.Name,
+		ServerName:      server.Name,
+		ScheduledForUTC: time.Now().UTC().Format(jobTimestampLayout),
+		ExecutionMode:   policy.ExecutionMode,
+		PackageScope:    policy.PackageScope,
+		Status:          updatePolicyRunQueued,
+		Summary:         "Queued",
+		ResultJSON:      "{}",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("createUpdatePolicyRun(scan panic) = (%+v, %t, %v), want inserted", run, inserted, err)
+	}
+
+	origDial := getDialSSHConnection()
+	setDialSSHConnection(func(_ Server, _ *ssh.ClientConfig) (sshConnection, error) {
+		panic("scheduled scan dial panic")
+	})
+	t.Cleanup(func() {
+		waitForUpdateRunners()
+		setDialSSHConnection(origDial)
+	})
+
+	runScheduledScanPolicy(run, policy, server)
+	waitForCondition(t, 5*time.Second, func() bool {
+		current, err := getUpdatePolicyRun(run.ID)
+		return err == nil && current.Status == updatePolicyRunFailed
+	}, "panicked scan-only policy run to fail")
+
+	currentRun, err := getUpdatePolicyRun(run.ID)
+	if err != nil {
+		t.Fatalf("getUpdatePolicyRun(scan panic) unexpected error: %v", err)
+	}
+	if currentRun.Reason != updatePolicyRunFailed {
+		t.Fatalf("panicked scan reason = %q, want %q", currentRun.Reason, updatePolicyRunFailed)
 	}
 }
 

@@ -64,16 +64,6 @@
             .replace(/'/g, "&#39;");
     };
 
-    window.escapeJsSingleQuoted = window.escapeJsSingleQuoted || function escapeJsSingleQuoted(value) {
-        return String(value ?? "")
-            .replace(/\\/g, "\\\\")
-            .replace(/'/g, "\\'")
-            .replace(/\r/g, "\\r")
-            .replace(/\n/g, "\\n")
-            .replace(/\u2028/g, "\\u2028")
-            .replace(/\u2029/g, "\\u2029");
-    };
-
     window.parseErrorResponse = window.parseErrorResponse || async function parseErrorResponse(res, fallbackMessage) {
         const data = await res.json().catch(() => ({}));
         return data.error || fallbackMessage;

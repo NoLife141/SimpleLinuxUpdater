@@ -17,7 +17,7 @@
 Use a named volume for persistence:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.2.0
 ```
 
 ## GHCR images
@@ -30,7 +30,7 @@ Release tags publish images to GitHub Container Registry:
 Example:
 
 ```bash
-docker pull ghcr.io/nolife141/simplelinuxupdater:v0.1.7
+docker pull ghcr.io/nolife141/simplelinuxupdater:v0.2.0
 ```
 
 ## Binary deployment
@@ -90,6 +90,7 @@ The app does not terminate TLS by default. For production:
 
 - Put it behind a reverse proxy (nginx, Caddy, Traefik) for HTTPS.
 - Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` under HTTPS.
+- Set `DEBIAN_UPDATER_TRUSTED_PROXIES` to the reverse proxy IP/CIDR if you want audit logs and rate limits to use the original client IP from forwarded headers.
 - Restrict access to your LAN/VPN.
 
 ## Data persistence

@@ -289,7 +289,7 @@ async function restoreBackup() {
             alert("Passphrase must be at least 12 characters.");
             return;
         }
-        if (!window.confirm("Restore will fully replace current DB/config/known_hosts. Continue?")) {
+        if (!window.confirm("Restore will replace the current DB and optional known_hosts. Local config.json stays in place. Continue?")) {
             return;
         }
         const form = new FormData();
@@ -303,10 +303,15 @@ async function restoreBackup() {
             alert(await parseErrorResponse(res, "Failed to restore backup."));
             return;
         }
+        const payload = await res.json().catch(() => ({}));
         alert("Backup restored successfully.");
         if (fileInput) {
             fileInput.value = "";
             updateFileLabel(fileInput, "Choose backup file");
+        }
+        if (payload.sessions_invalidated) {
+            window.location.assign("/login");
+            return;
         }
         await fetchBackupStatus();
     } catch (err) {
@@ -350,10 +355,6 @@ function normalizeWeekdayToken(raw) {
         default:
             return "";
     }
-}
-
-function normalizeWeekdaysInput(raw) {
-    return normalizeWeekdays(String(raw || "").split(","));
 }
 
 function normalizeWeekdays(values) {

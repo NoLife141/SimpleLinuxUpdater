@@ -331,9 +331,13 @@ func (jm *JobManager) UpsertJobRecord(record JobRecord) error {
 	return nil
 }
 
-func (jm *JobManager) updateJob(id string, update JobUpdate, syncRuntime bool) error {
+func activeJobStatuses() []string {
+	return []string{jobStatusQueued, jobStatusRunning, jobStatusWaitingApproval}
+}
+
+func (jm *JobManager) updateJobWithCondition(id string, update JobUpdate, syncRuntime bool, condition string, conditionArgs ...any) (bool, error) {
 	if jm == nil || jm.db == nil || strings.TrimSpace(id) == "" {
-		return nil
+		return false, nil
 	}
 	now := jobTimestampNow()
 	setClauses := []string{"updated_at = ?"}
@@ -375,13 +379,42 @@ func (jm *JobManager) updateJob(id string, update JobUpdate, syncRuntime bool) e
 		args = append(args, strings.TrimSpace(*update.FinishedAt))
 	}
 	args = append(args, id)
-	if _, err := jm.db.Exec("UPDATE jobs SET "+strings.Join(setClauses, ", ")+" WHERE id = ?", args...); err != nil {
-		return err
+	query := "UPDATE jobs SET " + strings.Join(setClauses, ", ") + " WHERE id = ?"
+	if strings.TrimSpace(condition) != "" {
+		query += " AND " + condition
+		args = append(args, conditionArgs...)
 	}
-	if syncRuntime {
+	result, err := jm.db.Exec(query, args...)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		rowsAffected = 1
+	}
+	updated := rowsAffected > 0
+	if syncRuntime && updated {
 		jm.syncStatusMapFromJobID(id)
 	}
-	return nil
+	return updated, nil
+}
+
+func (jm *JobManager) updateJob(id string, update JobUpdate, syncRuntime bool) error {
+	_, err := jm.updateJobWithCondition(id, update, syncRuntime, "")
+	return err
+}
+
+func (jm *JobManager) UpdateActiveJob(id string, update JobUpdate) (bool, error) {
+	active := activeJobStatuses()
+	return jm.updateJobWithCondition(
+		id,
+		update,
+		true,
+		"status IN (?, ?, ?)",
+		active[0],
+		active[1],
+		active[2],
+	)
 }
 
 func (jm *JobManager) UpdateJob(id string, update JobUpdate) error {
@@ -615,17 +648,18 @@ func startJobRunner(jobID string, run func()) {
 				log.Printf("job runner panic for job %q: %v", jobID, recovered)
 				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusFailed
+					phase := jobPhaseComplete
 					summary := "Runner panicked"
 					errorClass := "panic"
 					finishedAt := jobTimestampNow()
 					_ = jm.UpdateJob(jobID, JobUpdate{
 						Status:     &status,
+						Phase:      &phase,
 						Summary:    &summary,
 						ErrorClass: &errorClass,
 						FinishedAt: &finishedAt,
 					})
 				}
-				panic(recovered)
 			}
 		}()
 		run()

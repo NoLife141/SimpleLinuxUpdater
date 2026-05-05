@@ -62,6 +62,7 @@ Session hardening options:
 
 - Set `DEBIAN_UPDATER_SESSION_COOKIE_SECURE=true` when running behind HTTPS.
 - Optionally set `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (hours). Default is `0`/unset, which means no additional idle timeout is applied.
+- Set `DEBIAN_UPDATER_TRUSTED_PROXIES` only to proxies you control. It controls whether forwarded client IP headers affect audit logs and rate limiting.
 
 ## Metrics endpoint protection
 
@@ -90,7 +91,7 @@ Backup export is available from `/admin` and is session-authenticated.
 - Exported backup files (`.slubkp`) are encrypted with a user-provided passphrase.
 - Payload includes `servers.db`, `config.json`, and optional `known_hosts`.
 - Passphrases are not stored by the app.
-- Restoring a backup fully replaces those files immediately.
+- Restoring a backup immediately replaces `servers.db` and optional `known_hosts`; backup `config.json` is validated while local `config.json` remains in place.
 
 Recommendations:
 

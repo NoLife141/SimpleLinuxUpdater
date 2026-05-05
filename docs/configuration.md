@@ -31,6 +31,9 @@ Environment variables:
 
 - `DEBIAN_UPDATER_SESSION_COOKIE_SECURE` (`true|false`, default `false`)
 - `DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS` (optional, integer hours; unset/`0` keeps default behavior)
+- `DEBIAN_UPDATER_TRUSTED_PROXIES` (optional comma-separated proxy IPs/CIDRs; unset/`none` trusts no proxies)
+
+When `DEBIAN_UPDATER_TRUSTED_PROXIES` is configured, Gin honors forwarded client IP headers from those proxies. This affects audit `client_ip` values and in-memory auth/metrics rate limiting.
 
 ## Metrics API token
 
@@ -62,7 +65,7 @@ Behavior:
   - `config.json`
   - optional `known_hosts` (controlled by export toggle)
 - Restore requires the backup file + passphrase and applies immediately (no restart required).
-- Restore is a full replace of these files; current runtime state is reloaded.
+- Restore replaces `servers.db` and optional `known_hosts`; backup `config.json` is validated, but the local `config.json` remains in place and restored secrets are re-encrypted to its key.
 
 What backup does not include:
 
@@ -142,11 +145,12 @@ Default behavior:
 
 - When using Docker with `/data`, the default known-hosts file is typically `/data/known_hosts`.
 - When running locally, it is stored next to the DB in the local data directory.
+- Host-key verification can read existing fallback known-hosts files, but UI trust/clear, backup, and restore writes use the first configured path or the app data `known_hosts` file.
 
 ## Environment file (.env)
 
 For Docker, `.env` is not automatically loaded unless you pass it:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.1.7
+docker run --env-file .env -p 8080:8080 -v debian-updater-data:/data ghcr.io/nolife141/simplelinuxupdater:v0.2.0
 ```

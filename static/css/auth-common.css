@@ -1,0 +1,82 @@
+body {
+    display: grid;
+    place-items: center;
+    padding: 24px;
+}
+
+.auth-shell {
+    width: min(1120px, 100%);
+    display: grid;
+    grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+    gap: 22px;
+    align-items: stretch;
+}
+
+.auth-hero {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 16px;
+    min-height: 470px;
+    padding: 30px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(17, 24, 36, 0.94), rgba(11, 16, 24, 0.96));
+    box-shadow: var(--shadow);
+}
+
+.auth-hero::after {
+    content: "";
+    position: absolute;
+    top: -10rem;
+    right: -8rem;
+    width: 24rem;
+    height: 24rem;
+    border-radius: 50%;
+    background: radial-gradient(circle at center, rgba(92, 200, 255, 0.14), transparent 68%);
+}
+
+.auth-hero > * {
+    position: relative;
+    z-index: 1;
+}
+
+.auth-brand {
+    margin-bottom: auto;
+}
+
+.auth-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.auth-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 24px;
+}
+
+.auth-card form {
+    display: grid;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.auth-card button[type="submit"] {
+    margin-top: 6px;
+}
+
+@media (max-width: 860px) {
+    .auth-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .auth-hero {
+        min-height: 340px;
+    }
+}

@@ -4,7 +4,7 @@ This file provides guidance for agentic coding agents working on this codebase.
 
 ## Project Overview
 
-- **Language**: Go 1.25+
+- **Language**: Go 1.26+
 - **Web Framework**: Gin
 - **Database**: SQLite (modernc.org/sqlite)
 - **SSH**: golang.org/x/crypto/ssh
@@ -13,7 +13,7 @@ This file provides guidance for agentic coding agents working on this codebase.
 
 ```bash
 # Build the webserver binary
-go build -o webserver webserver.go
+go build -o webserver .
 
 # Run the application
 ./webserver
@@ -21,7 +21,7 @@ go build -o webserver webserver.go
 # Cross-compile for Linux amd64 (from Windows)
 set GOOS=linux
 set GOARCH=amd64
-go build -o webserver webserver.go
+go build -o webserver .
 ```
 
 ## Test Commands
@@ -222,7 +222,7 @@ func TestNormalizePort(t *testing.T) {
 
 The project uses GitHub Actions (see `.github/workflows/ci.yml`):
 - Runs unit tests, race detector tests, and coverage tests on pushes/PRs to main
-- Go version: 1.25.x
+- Go version: Go 1.26+ via `go.mod`
 - No separate lint step (Go's built-in tooling is used)
 
 ## Release Process
