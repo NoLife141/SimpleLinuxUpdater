@@ -7,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -o webserver .
 
 # Runtime stage
-FROM alpine:3.22
+FROM alpine:3.23
 ENV GIN_MODE=release
 RUN apk --no-cache add ca-certificates su-exec
 RUN addgroup -S app && adduser -S -G app app && mkdir -p /app /data && chown -R app:app /app /data
