@@ -1191,7 +1191,7 @@ func TestProcessDueUpdatePoliciesDedupesAndHandlesSkips(t *testing.T) {
 	}
 }
 
-func TestMaintenancePageHTMLUsesAppTimezoneFormatting(t *testing.T) {
+func TestMaintenancePageHTMLUsesLocalTimezoneFormatting(t *testing.T) {
 	dbFile := filepath.Join(t.TempDir(), "maintenance-page-timezone.db")
 	prepareUpdatePolicyTestState(t, dbFile)
 
@@ -1212,11 +1212,13 @@ func TestMaintenancePageHTMLUsesAppTimezoneFormatting(t *testing.T) {
 	})
 
 	html := maintenancePageHTML()
-	if !strings.Contains(html, "America/Toronto") {
-		t.Fatalf("maintenance HTML missing timezone label: %s", html)
+	if !strings.Contains(html, "Server local time") {
+		t.Fatalf("maintenance HTML missing local timezone label: %s", html)
 	}
-	if !strings.Contains(html, "2026-01-15 07:34:56 EST") {
-		t.Fatalf("maintenance HTML missing localized timestamp: %s", html)
+	startedAt := time.Date(2026, time.January, 15, 12, 34, 56, 0, time.UTC)
+	wantStartedAt := startedAt.In(defaultAppLocation()).Format(appDisplayTimestampLayout)
+	if !strings.Contains(html, wantStartedAt) {
+		t.Fatalf("maintenance HTML missing expected timestamp %q: %s", wantStartedAt, html)
 	}
 }
 

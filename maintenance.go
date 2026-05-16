@@ -146,7 +146,7 @@ func maintenancePageHTML() string {
 	if kind == "" {
 		kind = "maintenance"
 	}
-	startedAtDisplay, timezoneLabel := formatTimestampForAppDisplay(state.StartedAt)
+	startedAtDisplay, timezoneLabel := formatTimestampForAppDisplayWithTimezone(state.StartedAt, defaultAppLocation(), appTimezoneLocalDisplayLabel)
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
