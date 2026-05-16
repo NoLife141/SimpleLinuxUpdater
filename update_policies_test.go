@@ -1215,8 +1215,10 @@ func TestMaintenancePageHTMLUsesLocalTimezoneFormatting(t *testing.T) {
 	if !strings.Contains(html, "Server local time") {
 		t.Fatalf("maintenance HTML missing local timezone label: %s", html)
 	}
-	if !strings.Contains(html, "2026-01-15 12:34:56 UTC") {
-		t.Fatalf("maintenance HTML missing expected timestamp: %s", html)
+	startedAt := time.Date(2026, time.January, 15, 12, 34, 56, 0, time.UTC)
+	wantStartedAt := startedAt.In(defaultAppLocation()).Format(appDisplayTimestampLayout)
+	if !strings.Contains(html, wantStartedAt) {
+		t.Fatalf("maintenance HTML missing expected timestamp %q: %s", wantStartedAt, html)
 	}
 }
 
