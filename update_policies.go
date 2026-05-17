@@ -888,6 +888,68 @@ func renameUpdatePolicyOverridesServerTx(tx *sql.Tx, oldServerName, newServerNam
 	return nil
 }
 
+func renameUpdatePolicyTargetServersTx(tx *sql.Tx, oldServerName, newServerName string) error {
+	if tx == nil {
+		return errors.New("tx is required")
+	}
+	oldServerName = strings.TrimSpace(oldServerName)
+	newServerName = strings.TrimSpace(newServerName)
+	if oldServerName == "" || newServerName == "" {
+		return nil
+	}
+
+	rows, err := tx.Query(`SELECT id, target_servers_json FROM update_policies`)
+	if err != nil {
+		return err
+	}
+
+	type policyTargetUpdate struct {
+		id      int64
+		targets []string
+	}
+	updates := make([]policyTargetUpdate, 0)
+	for rows.Next() {
+		var id int64
+		var rawTargets string
+		if err := rows.Scan(&id, &rawTargets); err != nil {
+			return err
+		}
+		targets := parseStringListJSON(rawTargets)
+		changed := false
+		for i, target := range targets {
+			if strings.EqualFold(strings.TrimSpace(target), oldServerName) {
+				targets[i] = newServerName
+				changed = true
+			}
+		}
+		if changed {
+			updates = append(updates, policyTargetUpdate{
+				id:      id,
+				targets: normalizeStringList(targets),
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	now := jobTimestampNow()
+	for _, update := range updates {
+		if _, err := tx.Exec(`
+			UPDATE update_policies
+			   SET target_servers_json = ?, updated_at = ?
+			 WHERE id = ?
+		`, marshalJobJSON(update.targets), now, update.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func pruneUpdatePolicyOverridesForServersTx(tx *sql.Tx, activeServers []Server) error {
 	if tx == nil {
 		return errors.New("tx is required")

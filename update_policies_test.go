@@ -264,6 +264,82 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 }
 
+func TestUpdatePolicyExplicitTargetsFollowServerRename(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "update-policy-rename-targets.db")
+	prepareUpdatePolicyTestState(t, dbFile)
+
+	server := Server{Name: "srv-explicit-old", Host: "explicit.example.org", Port: 22, User: "root", Pass: "pw", Tags: []string{"batch"}}
+	mu.Lock()
+	servers = []Server{server}
+	statusMap = map[string]*ServerStatus{
+		server.Name: {Name: server.Name, Status: "idle", Tags: []string{"batch"}, Upgradable: []string{}},
+	}
+	mu.Unlock()
+
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	createBody := bytes.NewBufferString(`{
+		"name":"Explicit rename policy",
+		"enabled":true,
+		"target_servers":["srv-explicit-old"],
+		"package_scope":"security",
+		"execution_mode":"scan_only",
+		"cadence_kind":"daily",
+		"time_local":"02:15",
+		"weekdays":[]
+	}`)
+	createRec := httptest.NewRecorder()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/update-policies", createBody)
+	createReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(createReq)
+	createReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d (body=%s)", createRec.Code, http.StatusCreated, createRec.Body.String())
+	}
+
+	renameBody := bytes.NewBufferString(`{
+		"name":"srv-explicit-new",
+		"host":"explicit.example.org",
+		"port":22,
+		"user":"root",
+		"pass":"",
+		"tags":["batch"]
+	}`)
+	renameRec := httptest.NewRecorder()
+	renameReq := httptest.NewRequest(http.MethodPut, "/api/servers/"+server.Name, renameBody)
+	renameReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(renameReq)
+	renameReq.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(renameRec, renameReq)
+	if renameRec.Code != http.StatusOK {
+		t.Fatalf("rename status = %d, want %d (body=%s)", renameRec.Code, http.StatusOK, renameRec.Body.String())
+	}
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/update-policies", nil)
+	listReq.AddCookie(sessionCookie)
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d (body=%s)", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listResp struct {
+		Items []UpdatePolicy `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal policy list: %v", err)
+	}
+	if len(listResp.Items) != 1 {
+		t.Fatalf("policy count = %d, want 1", len(listResp.Items))
+	}
+	if got := listResp.Items[0].TargetServers; len(got) != 1 || got[0] != "srv-explicit-new" {
+		t.Fatalf("target servers after rename = %+v, want [srv-explicit-new]", got)
+	}
+	if got := listResp.Items[0].MatchedServers; len(got) != 1 || got[0] != "srv-explicit-new" {
+		t.Fatalf("matched servers after rename = %+v, want [srv-explicit-new]", got)
+	}
+}
+
 func TestPolicyMatchesServerAdvancedTargets(t *testing.T) {
 	policy := UpdatePolicy{
 		ID:            1,

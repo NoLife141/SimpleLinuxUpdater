@@ -156,6 +156,40 @@ func (l *AuthRateLimiter) allow(key string) bool {
 	return true
 }
 
+func (l *AuthRateLimiter) limited(key string) bool {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	bucket, ok := l.buckets[key]
+	if ok && now.After(bucket.windowEnd) {
+		delete(l.buckets, key)
+		return false
+	}
+	return ok && bucket.attempts >= l.max
+}
+
+func (l *AuthRateLimiter) recordFailure(key string) {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	bucket, ok := l.buckets[key]
+	if ok && now.After(bucket.windowEnd) {
+		delete(l.buckets, key)
+		ok = false
+	}
+	if !ok {
+		l.buckets[key] = AuthRateBucket{
+			attempts:  1,
+			windowEnd: now.Add(l.window),
+		}
+		return
+	}
+	bucket.attempts++
+	l.buckets[key] = bucket
+}
+
 var (
 	loginRateLimiter          = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
 	passwordChangeRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
@@ -563,6 +597,10 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 			writeMaintenanceBlockedResponse(c)
 			return
 		}
+		if backupRestoreBarrierBypassPath(path) {
+			c.Next()
+			return
+		}
 		if maintenanceExclusivePath(path) {
 			if !backupRestoreMu.TryLock() {
 				writeMaintenanceBlockedResponse(c)
@@ -587,6 +625,10 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func backupRestoreBarrierBypassPath(path string) bool {
+	return path == "/api/dashboard/events"
 }
 
 func rateLimitClientIP(c *gin.Context) string {
@@ -728,13 +770,19 @@ func handleAuthSessionsStatus(c *gin.Context) {
 
 func handleAuthPasswordChange(c *gin.Context) {
 	key := fmt.Sprintf("%s:%s:password-change", rateLimitClientIP(c), sessionUsername(c))
-	if passwordChangeRateLimiter != nil && !passwordChangeRateLimiter.allow(key) {
+	recordPasswordChangeFailure := func() {
+		if passwordChangeRateLimiter != nil {
+			passwordChangeRateLimiter.recordFailure(key)
+		}
+	}
+	if passwordChangeRateLimiter != nil && passwordChangeRateLimiter.limited(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many password change attempts"})
 		return
 	}
 	var req AuthPasswordChangeRequest
 	limitAuthRequestBody(c)
 	if err := c.ShouldBindJSON(&req); err != nil {
+		recordPasswordChangeFailure()
 		if authRequestBodyTooLarge(err) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request payload too large"})
 			return
@@ -743,10 +791,12 @@ func handleAuthPasswordChange(c *gin.Context) {
 		return
 	}
 	if strings.TrimSpace(req.CurrentPassword) == "" || strings.TrimSpace(req.NewPassword) == "" {
+		recordPasswordChangeFailure()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password and new_password are required"})
 		return
 	}
 	if err := changeSingleUserPassword(req.CurrentPassword, req.NewPassword, req.ConfirmPassword); err != nil {
+		recordPasswordChangeFailure()
 		status := http.StatusBadRequest
 		message := err.Error()
 		if errors.Is(err, errSetupRequired) {

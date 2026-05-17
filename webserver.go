@@ -5952,6 +5952,9 @@ func setupRouter() (*gin.Engine, error) {
 						if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
 							return err
 						}
+						if err := renameUpdatePolicyTargetServersTx(tx, oldServerName, newServerName); err != nil {
+							return err
+						}
 						return renameServerFactsTx(tx, oldServerName, newServerName)
 					}
 				}
