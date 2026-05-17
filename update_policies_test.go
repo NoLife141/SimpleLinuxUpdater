@@ -69,6 +69,9 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 		"name":"Nightly security",
 		"enabled":true,
 		"target_tag":"prod",
+		"include_tags":["web"],
+		"exclude_tags":["maintenance-hold"],
+		"target_servers":["srv-explicit"],
 		"package_scope":"security",
 		"execution_mode":"approval_required",
 		"cadence_kind":"daily",
@@ -92,6 +95,15 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 	if created.ID <= 0 || created.Name != "Nightly security" {
 		t.Fatalf("created policy = %+v, want persisted record", created)
+	}
+	if len(created.IncludeTags) != 1 || created.IncludeTags[0] != "web" {
+		t.Fatalf("created IncludeTags = %+v, want [web]", created.IncludeTags)
+	}
+	if len(created.ExcludeTags) != 1 || created.ExcludeTags[0] != "maintenance-hold" {
+		t.Fatalf("created ExcludeTags = %+v, want [maintenance-hold]", created.ExcludeTags)
+	}
+	if len(created.TargetServers) != 1 || created.TargetServers[0] != "srv-explicit" {
+		t.Fatalf("created TargetServers = %+v, want [srv-explicit]", created.TargetServers)
 	}
 
 	listRec := httptest.NewRecorder()
@@ -122,6 +134,9 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 		"name":"Weekly full",
 		"enabled":false,
 		"target_tag":"prod",
+		"include_tags":["batch-a","batch-a"],
+		"exclude_tags":["hold"],
+		"target_servers":[],
 		"package_scope":"full",
 		"execution_mode":"scan_only",
 		"cadence_kind":"weekly",
@@ -246,6 +261,33 @@ func TestUpdatePolicyAPIValidationAndCRUD(t *testing.T) {
 	}
 	if len(postDeleteOverridesResp.Items) != 0 {
 		t.Fatalf("override items after server delete = %d, want 0", len(postDeleteOverridesResp.Items))
+	}
+}
+
+func TestPolicyMatchesServerAdvancedTargets(t *testing.T) {
+	policy := UpdatePolicy{
+		ID:            1,
+		Enabled:       true,
+		TargetTag:     "prod",
+		IncludeTags:   []string{"web"},
+		ExcludeTags:   []string{"hold"},
+		TargetServers: []string{"manual-host"},
+	}
+	if !policyMatchesServer(policy, Server{Name: "srv-prod", Tags: []string{"prod"}}, nil) {
+		t.Fatalf("prod target tag should match")
+	}
+	if !policyMatchesServer(policy, Server{Name: "srv-web", Tags: []string{"web"}}, nil) {
+		t.Fatalf("include tag should match")
+	}
+	if !policyMatchesServer(policy, Server{Name: "manual-host", Tags: []string{"misc"}}, nil) {
+		t.Fatalf("explicit server should match")
+	}
+	if policyMatchesServer(policy, Server{Name: "blocked", Tags: []string{"prod", "hold"}}, nil) {
+		t.Fatalf("exclude tag should block a matching server")
+	}
+	overrides := map[int64]map[string]bool{1: {"srv-prod": true}}
+	if policyMatchesServer(policy, Server{Name: "srv-prod", Tags: []string{"prod"}}, overrides) {
+		t.Fatalf("server override should disable a match")
 	}
 }
 

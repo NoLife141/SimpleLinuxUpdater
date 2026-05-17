@@ -63,6 +63,36 @@
         <section class="workspace fade-in section-spaced">
             <div class="workspace-head">
                 <div>
+                    <div class="eyebrow">Account security</div>
+                    <h2>Admin Password &amp; Sessions</h2>
+                </div>
+                <p class="muted workspace-note">Rotate the local admin password and invalidate server-side sessions when needed.</p>
+            </div>
+            <div class="admin-grid">
+                <div class="admin-block">
+                    <h3>Change Password</h3>
+                    <input type="password" id="auth-current-password" placeholder="Current password" autocomplete="current-password">
+                    <input type="password" id="auth-new-password" placeholder="New password" autocomplete="new-password">
+                    <input type="password" id="auth-confirm-password" placeholder="Confirm new password" autocomplete="new-password">
+                    <div class="policy-actions">
+                        <button class="btn-success" type="button" id="auth-password-save">Change Password</button>
+                    </div>
+                    <div id="auth-password-error" class="form-feedback form-feedback-error" aria-live="polite" aria-atomic="true"></div>
+                    <div id="auth-password-status" class="form-feedback form-feedback-success" role="status" aria-live="polite" aria-atomic="true"></div>
+                </div>
+                <div class="admin-block">
+                    <h3>Sessions</h3>
+                    <p class="muted" id="auth-session-status">Session status loading...</p>
+                    <div class="policy-actions">
+                        <button class="btn-danger" type="button" id="auth-sessions-clear">Logout All Sessions</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="workspace fade-in section-spaced">
+            <div class="workspace-head">
+                <div>
                     <div class="eyebrow">Scheduled updates</div>
                     <h2>Policy control</h2>
                 </div>
@@ -91,7 +121,19 @@
                                 </div>
                                 <div>
                                     <label for="policy-target-tag" class="form-label">Target tag</label>
-                                    <input type="text" id="policy-target-tag" placeholder="prod" required>
+                                    <input type="text" id="policy-target-tag" placeholder="prod">
+                                </div>
+                                <div>
+                                    <label for="policy-include-tags" class="form-label">Include tags</label>
+                                    <input type="text" id="policy-include-tags" placeholder="prod, web">
+                                </div>
+                                <div>
+                                    <label for="policy-exclude-tags" class="form-label">Exclude tags</label>
+                                    <input type="text" id="policy-exclude-tags" placeholder="canary-hold, db">
+                                </div>
+                                <div>
+                                    <label for="policy-target-servers" class="form-label">Explicit servers</label>
+                                    <input type="text" id="policy-target-servers" placeholder="host-a, host-b">
                                 </div>
                                 <div class="field-span checkbox-inline checkbox-row">
                                     <input type="checkbox" id="policy-enabled" checked>
@@ -267,6 +309,7 @@
                             <th>Status</th>
                             <th>Summary</th>
                             <th>Job</th>
+                            <th>Report</th>
                         </tr>
                     </thead>
                     <tbody></tbody>

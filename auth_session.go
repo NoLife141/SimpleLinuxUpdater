@@ -31,6 +31,7 @@ const (
 	authMaxPasswordLen            = 64
 	authMaxRequestBytes           = 8 * 1024
 	authLoginRateLimitMaxAttempts = 10
+	authPasswordChangeMaxAttempts = 5
 	authSetupRateLimitMaxAttempts = 5
 	metricsRateLimitMaxAttempts   = 120
 	authRateLimitWindow           = 10 * time.Minute
@@ -156,14 +157,18 @@ func (l *AuthRateLimiter) allow(key string) bool {
 }
 
 var (
-	loginRateLimiter   = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
-	setupRateLimiter   = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
-	metricsRateLimiter = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
+	loginRateLimiter          = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+	passwordChangeRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
+	setupRateLimiter          = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+	metricsRateLimiter        = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
 )
 
 func StopAuthRateLimiters() {
 	if loginRateLimiter != nil {
 		loginRateLimiter.Stop()
+	}
+	if passwordChangeRateLimiter != nil {
+		passwordChangeRateLimiter.Stop()
 	}
 	if setupRateLimiter != nil {
 		setupRateLimiter.Stop()
@@ -176,6 +181,12 @@ func StopAuthRateLimiters() {
 type AuthCredentialsRequest struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+}
+
+type AuthPasswordChangeRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+	ConfirmPassword string `json:"confirm_password"`
 }
 
 func bindAuthCredentialsRequest(c *gin.Context, requirePasswordConfirm bool) (AuthCredentialsRequest, bool, error) {
@@ -399,6 +410,59 @@ func authenticateUser(username, password string) (bool, error) {
 		return false, nil
 	}
 	return match, nil
+}
+
+func changeSingleUserPassword(currentPassword, newPassword, confirmPassword string) error {
+	if newPassword != confirmPassword {
+		return errAuthPasswordMismatch
+	}
+	storedUsername, _, exists, err := getSingleUser()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errSetupRequired
+	}
+	ok, err := authenticateUser(storedUsername, currentPassword)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("current password is invalid")
+	}
+	if err := validatePasswordPolicy(newPassword); err != nil {
+		return err
+	}
+	hash, err := argon2id.CreateHash(newPassword, argon2id.DefaultParams)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err = getDB().Exec(
+		"UPDATE auth_users SET password_hash = ?, updated_at = ? WHERE id = ?",
+		hash,
+		now,
+		authUserID,
+	)
+	return err
+}
+
+func countStoredSessions() (int, error) {
+	var count int
+	err := getDB().QueryRow("SELECT COUNT(1) FROM sessions").Scan(&count)
+	return count, err
+}
+
+func clearStoredSessions() (int64, error) {
+	result, err := getDB().Exec("DELETE FROM sessions")
+	if err != nil {
+		return 0, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return rows, nil
 }
 
 func sessionUsername(c *gin.Context) string {
@@ -651,6 +715,62 @@ func handleAuthStatus(c *gin.Context) {
 		"username":       username,
 		"setup_required": required,
 	})
+}
+
+func handleAuthSessionsStatus(c *gin.Context) {
+	count, err := countStoredSessions()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count sessions"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"session_count": count})
+}
+
+func handleAuthPasswordChange(c *gin.Context) {
+	key := fmt.Sprintf("%s:%s:password-change", rateLimitClientIP(c), sessionUsername(c))
+	if passwordChangeRateLimiter != nil && !passwordChangeRateLimiter.allow(key) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many password change attempts"})
+		return
+	}
+	var req AuthPasswordChangeRequest
+	limitAuthRequestBody(c)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		if authRequestBodyTooLarge(err) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request payload too large"})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request payload"})
+		return
+	}
+	if strings.TrimSpace(req.CurrentPassword) == "" || strings.TrimSpace(req.NewPassword) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password and new_password are required"})
+		return
+	}
+	if err := changeSingleUserPassword(req.CurrentPassword, req.NewPassword, req.ConfirmPassword); err != nil {
+		status := http.StatusBadRequest
+		message := err.Error()
+		if errors.Is(err, errSetupRequired) {
+			status = http.StatusConflict
+			message = "setup required"
+		}
+		audit(c, "auth.password.change", "auth_user", sessionUsername(c), "failure", "Password change failed", map[string]any{"error": message})
+		c.JSON(status, gin.H{"error": message})
+		return
+	}
+	audit(c, "auth.password.change", "auth_user", sessionUsername(c), "success", "Password changed", nil)
+	c.JSON(http.StatusOK, gin.H{"message": "password changed"})
+}
+
+func handleAuthSessionsClear(c *gin.Context) {
+	actor := sessionUsername(c)
+	deleted, err := clearStoredSessions()
+	if err != nil {
+		audit(c, "auth.sessions.clear", "auth_user", actor, "failure", "Failed to clear sessions", map[string]any{"error": err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear sessions"})
+		return
+	}
+	auditWithActor(actor, clientIPFromContext(c), "auth.sessions.clear", "auth_user", actor, "success", "All sessions cleared", map[string]any{"deleted_sessions": deleted})
+	c.JSON(http.StatusOK, gin.H{"message": "sessions cleared", "deleted_sessions": deleted})
 }
 
 func handleAuthSetup(c *gin.Context) {

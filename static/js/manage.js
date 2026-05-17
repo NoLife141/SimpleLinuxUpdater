@@ -126,8 +126,19 @@ function resetFileInputLabel(input) {
 
             function serverMatchesPolicyTags(tags, policy) {
                 const targetTag = String(policy?.target_tag || '').trim().toLowerCase();
-                if (!targetTag) return false;
-                return tags.some((tag) => String(tag || '').trim().toLowerCase() === targetTag);
+                const includeTags = Array.isArray(policy?.include_tags) ? policy.include_tags : [];
+                const excludeTags = Array.isArray(policy?.exclude_tags) ? policy.exclude_tags : [];
+                const targetServers = Array.isArray(policy?.target_servers) ? policy.target_servers : [];
+                const loweredTags = tags.map((tag) => String(tag || '').trim().toLowerCase()).filter(Boolean);
+                if (excludeTags.some((tag) => loweredTags.includes(String(tag || '').trim().toLowerCase()))) return false;
+                const editingServerKey = String(editingServerName || '').trim().toLowerCase();
+                if (editingServerKey && targetServers.some((name) => String(name || '').trim().toLowerCase() === editingServerKey)) return true;
+                if (targetTag && loweredTags.includes(targetTag)) return true;
+                if (includeTags.some((tag) => loweredTags.includes(String(tag || '').trim().toLowerCase()))) return true;
+                const hasTargetFields = !!targetTag || includeTags.length > 0 || targetServers.length > 0;
+                return !hasTargetFields && editingServerName && Array.isArray(policy?.matched_servers)
+                    ? policy.matched_servers.some((name) => String(name || '') === editingServerName)
+                    : false;
             }
 
             async function fetchEditPolicyContext(serverName) {
@@ -584,6 +595,9 @@ function resetFileInputLabel(input) {
         });
         document.getElementById('audit-refresh').addEventListener('click', fetchAuditEvents);
         document.getElementById('audit-prune').addEventListener('click', async () => {
+            if (!window.confirmTypedAction('Prune audit events older than the configured retention window?', 'PRUNE')) {
+                return;
+            }
             const res = await fetch('/api/audit-events/prune', { method: 'POST' });
             if (!res.ok) {
                 alert(await parseErrorResponse(res, 'Failed to prune audit events.'));
@@ -638,7 +652,7 @@ function resetFileInputLabel(input) {
             tbody.innerHTML = '';
             if (!auditEvents.length) {
                 const row = document.createElement('tr');
-                row.innerHTML = '<td colspan="6" class="subtle">No activity yet.</td>';
+                row.innerHTML = '<td colspan="7" class="subtle">No activity yet.</td>';
                 tbody.appendChild(row);
             } else {
                 auditEvents.forEach(evt => {
@@ -655,6 +669,7 @@ function resetFileInputLabel(input) {
                         <td>${escapeHtml(evt.target_type || '')}: ${escapeHtml(evt.target_name || '')}</td>
                         <td><span class="status-badge ${statusClass}">${status}</span></td>
                         <td>${escapeHtml(evt.message || '')}</td>
+                        <td><a class="inline-btn btn-ghost" href="/api/reports/audit/${encodeURIComponent(evt.id)}">Report</a></td>
                     `;
                     tbody.appendChild(row);
                 });
@@ -775,7 +790,7 @@ function resetFileInputLabel(input) {
         });
 
         async function deleteServer(name) {
-            if (confirm('Delete server?')) {
+            if (window.confirmTypedAction(`Delete server "${name}"?`, name)) {
                 try {
                     const response = await fetch(`/api/servers/${encodeURIComponent(name)}`, { method: 'DELETE' });
                     if (!response.ok) {
@@ -963,7 +978,7 @@ function resetFileInputLabel(input) {
                     alert('Host is required.');
                     return;
                 }
-                if (!confirm(`Remove known_hosts entry for ${host}:${port}?`)) {
+                if (!window.confirmTypedAction(`Remove known_hosts entry for ${host}:${port}?`, `${host}:${port}`)) {
                     return;
                 }
                 setEditKnownHostButtonsState(true, 'Check Known Host', 'Clearing...');
@@ -1222,6 +1237,9 @@ function resetFileInputLabel(input) {
         }
 
         async function clearGlobalKey() {
+            if (!window.confirmTypedAction('Clear the global SSH key?', 'CLEAR GLOBAL KEY')) {
+                return;
+            }
             const res = await fetch('/api/keys/global', { method: 'DELETE' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
