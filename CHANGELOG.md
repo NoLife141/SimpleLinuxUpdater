@@ -6,6 +6,24 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.3] - 2026-05-16
+
+### Changed
+
+- Refresh README demo assets.
+- Upgrade the runtime container baseline to Alpine 3.23 and Go 1.26.3.
+- Upgrade Go dependencies to the latest compatible patch baselines.
+
+### Fixed
+
+- Prevent password manager autofill from leaking saved credentials into sudo password prompts.
+- Restrict generated sudoers helpers for `dpkg` and `fuser` to the intended apt lock inspection commands.
+- Avoid database reads while rendering the maintenance page during backup restore flows.
+- Scope release workflow package permissions more tightly.
+- Prevent release packaging from dereferencing symlinks in Windows zip archives.
+- Remove the spoofable apt lock fallback from precheck handling.
+- Preserve dashboard action clicks and pending-update drawer scroll position across live refreshes.
+
 ## [v0.2.2] - 2026-05-05
 
 ### Added
