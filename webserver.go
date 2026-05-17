@@ -5713,6 +5713,27 @@ func setupRouter() (*gin.Engine, error) {
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
 
+	if err := registerRoutes(r, AppDeps{}); err != nil {
+		return nil, err
+	}
+
+	return r, nil
+}
+
+type AppDeps struct{}
+
+func registerRoutes(r *gin.Engine, deps AppDeps) error {
+	registerPublicRoutes(r)
+	r.Use(authGateMiddleware())
+	r.Use(sameOriginWriteMiddleware())
+	registerProtectedPageRoutes(r)
+	registerProtectedAuthAndSettingsRoutes(r)
+	registerPolicyAuditObservabilityRoutes(r)
+	registerServerAndActionRoutes(r)
+	return nil
+}
+
+func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/setup", handleSetupPage)
 	r.GET("/login", handleLoginPage)
 	r.POST("/api/auth/setup", sameOriginWriteMiddleware(), handleAuthSetup)
@@ -5721,9 +5742,9 @@ func setupRouter() (*gin.Engine, error) {
 	r.GET("/api/maintenance", handleMaintenanceStatus)
 	r.GET("/metrics", metricsBearerMiddleware(), handleMetrics)
 
-	r.Use(authGateMiddleware())
-	r.Use(sameOriginWriteMiddleware())
+}
 
+func registerProtectedPageRoutes(r *gin.Engine) {
 	r.GET("/", func(c *gin.Context) {
 		setNoStoreHeaders(c)
 		c.HTML(http.StatusOK, "index.html", nil)
@@ -5744,6 +5765,9 @@ func setupRouter() (*gin.Engine, error) {
 		c.HTML(http.StatusOK, "admin.html", nil)
 	})
 
+}
+
+func registerProtectedAuthAndSettingsRoutes(r *gin.Engine) {
 	r.POST("/api/auth/logout", handleAuthLogout)
 	r.GET("/api/auth/sessions", handleAuthSessionsStatus)
 	r.PUT("/api/auth/password", handleAuthPasswordChange)
@@ -5757,6 +5781,9 @@ func setupRouter() (*gin.Engine, error) {
 	r.PUT("/api/app-settings/timezone", handleAppTimezoneUpdate)
 	r.POST("/api/backup/export", handleBackupExport)
 	r.POST("/api/backup/restore", handleBackupRestore)
+}
+
+func registerPolicyAuditObservabilityRoutes(r *gin.Engine) {
 	r.GET("/api/update-policies", handleUpdatePoliciesList)
 	r.POST("/api/update-policies", handleUpdatePolicyCreate)
 	r.GET("/api/update-policies/runs", handleUpdatePolicyRuns)
@@ -5767,6 +5794,22 @@ func setupRouter() (*gin.Engine, error) {
 	r.PUT("/api/update-policies/:id", handleUpdatePolicyUpdate)
 	r.DELETE("/api/update-policies/:id", handleUpdatePolicyDelete)
 
+	r.GET("/api/audit-events", handleAuditEvents)
+	r.GET("/api/reports/audit/:id", handleAuditReport)
+	r.GET("/api/reports/jobs/:id", handleJobReport)
+	r.GET("/api/observability/summary", handleObservabilitySummary)
+	r.GET("/api/dashboard/summary", handleDashboardSummary)
+	r.POST("/api/audit-events/prune", func(c *gin.Context) {
+		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune audit events"})
+			return
+		}
+		audit(c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
+		c.JSON(http.StatusOK, gin.H{"message": "Audit events pruned"})
+	})
+}
+
+func registerServerAndActionRoutes(r *gin.Engine) {
 	r.GET("/api/servers", func(c *gin.Context) {
 		mu.Lock()
 		statuses := make([]ServerStatus, 0, len(servers))
@@ -6209,21 +6252,7 @@ func setupRouter() (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{"has_key": true})
 	})
 
-	r.GET("/api/audit-events", handleAuditEvents)
-	r.GET("/api/reports/audit/:id", handleAuditReport)
-	r.GET("/api/reports/jobs/:id", handleJobReport)
-	r.GET("/api/observability/summary", handleObservabilitySummary)
-	r.GET("/api/dashboard/summary", handleDashboardSummary)
 	r.POST("/api/servers/:name/facts/refresh", handleServerFactsRefresh)
-
-	r.POST("/api/audit-events/prune", func(c *gin.Context) {
-		if err := pruneAuditEvents(auditRetentionDays); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune audit events"})
-			return
-		}
-		audit(c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
-		c.JSON(http.StatusOK, gin.H{"message": "Audit events pruned"})
-	})
 
 	r.POST("/api/hostkeys/scan", func(c *gin.Context) {
 		var req struct {
@@ -6761,7 +6790,6 @@ func setupRouter() (*gin.Engine, error) {
 		c.JSON(http.StatusOK, gin.H{"message": "Upgrade cancelled"})
 	})
 
-	return r, nil
 }
 
 func main() {
