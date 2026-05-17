@@ -23,10 +23,15 @@ const LOG_BOTTOM_THRESHOLD = 20;
         let drawerTab = "logs";
         let drawerLogFollow = true;
         let drawerLogScrollTop = 0;
+        let drawerPendingScrollTop = 0;
         let passwordResolve = null;
         let passwordReject = null;
         let passwordModalPreviousFocus = null;
         let suppressSortClickUntil = 0;
+        let actionInteractionDepth = 0;
+        let actionInteractionReleaseTimer = null;
+        let deferredServerRender = false;
+        const actionInteractionDeferMs = 350;
         const columnResizeStorageKey = "simplelinuxupdater.statusTableColWidths.v8";
         const dashboardFilterStorageKey = "simplelinuxupdater.dashboard.filters.v1";
         const defaultColumnWidths = Object.freeze({
@@ -730,6 +735,76 @@ const LOG_BOTTOM_THRESHOLD = 20;
             window.scrollTo(pos.x, pos.y);
         }
 
+        function isActionInteractionActive() {
+            return actionInteractionDepth > 0 || actionInteractionReleaseTimer !== null;
+        }
+
+        function renderServerState() {
+            const pageScroll = saveWindowScroll();
+            renderDashboardMetrics();
+            renderTable();
+            renderDrawer();
+            requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+        }
+
+        function flushDeferredServerRender() {
+            if (!deferredServerRender || isActionInteractionActive()) return;
+            deferredServerRender = false;
+            renderServerState();
+        }
+
+        function renderServerStateWhenSafe(forceRender = false) {
+            if (!forceRender && isActionInteractionActive()) {
+                deferredServerRender = true;
+                return;
+            }
+            deferredServerRender = false;
+            renderServerState();
+        }
+
+        function beginActionInteraction() {
+            actionInteractionDepth += 1;
+            if (actionInteractionReleaseTimer !== null) {
+                clearTimeout(actionInteractionReleaseTimer);
+                actionInteractionReleaseTimer = null;
+            }
+        }
+
+        function endActionInteraction() {
+            if (actionInteractionDepth > 0) {
+                actionInteractionDepth -= 1;
+            }
+            if (actionInteractionDepth > 0) return;
+            if (actionInteractionReleaseTimer !== null) {
+                clearTimeout(actionInteractionReleaseTimer);
+            }
+            actionInteractionReleaseTimer = setTimeout(() => {
+                actionInteractionReleaseTimer = null;
+                flushDeferredServerRender();
+            }, actionInteractionDeferMs);
+        }
+
+        function resetActionInteraction() {
+            actionInteractionDepth = 0;
+            if (actionInteractionReleaseTimer !== null) {
+                clearTimeout(actionInteractionReleaseTimer);
+                actionInteractionReleaseTimer = null;
+            }
+            flushDeferredServerRender();
+        }
+
+        function isServerActionControl(target) {
+            return !!target?.closest?.([
+                'button[data-action]',
+                '#bulk-update',
+                '#bulk-approve',
+                '#bulk-cancel',
+                '#bulk-autoremove',
+                '#drawer-approve-all',
+                '#drawer-approve-security'
+            ].join(','));
+        }
+
         function getTableColByKey(key) {
             return document.querySelector(`#servers-table col[data-col-key="${key}"]`);
         }
@@ -906,7 +981,6 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 return;
             }
             fetchInFlight = true;
-            const pageScroll = saveWindowScroll();
             try {
                 let parsedServers;
                 try {
@@ -927,10 +1001,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 allServers = parsedServers;
                 lastFetchError = null;
                 lastSuccessfulSyncAt = new Date();
-                renderDashboardMetrics();
-                renderTable();
-                renderDrawer();
-                requestAnimationFrame(() => restoreWindowScroll(pageScroll));
+                renderServerStateWhenSafe(forceRender);
             } finally {
                 fetchInFlight = false;
                 if (fetchQueued) {
@@ -1065,6 +1136,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             if (drawerServerName !== name) {
                 drawerLogFollow = true;
                 drawerLogScrollTop = 0;
+                drawerPendingScrollTop = 0;
             }
             drawerOpen = true;
             drawerServerName = name;
@@ -1127,6 +1199,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 : `Approve security only (${approvalCounts.security})`;
             if (drawerTab === "pending" && !hasPending) {
                 drawerTab = "logs";
+                drawerPendingScrollTop = 0;
             }
 
             title.textContent = server.name || "Server details";
@@ -1153,7 +1226,12 @@ const LOG_BOTTOM_THRESHOLD = 20;
             }
 
             if (drawerTab === "pending") {
+                const pendingScrollTop = drawerPendingScrollTop;
                 pendingPanel.innerHTML = renderPendingUpdatesHtml(server, true);
+                requestAnimationFrame(() => {
+                    const maxScrollTop = Math.max(0, pendingPanel.scrollHeight - pendingPanel.clientHeight);
+                    pendingPanel.scrollTop = Math.min(pendingScrollTop, maxScrollTop);
+                });
             } else {
                 pendingPanel.innerHTML = "";
             }
@@ -1473,7 +1551,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 alert(`Bulk ${actionLabel} completed for visible selected hosts; ${hiddenCount} hidden selected host(s) were skipped.`);
             }
 
-            await fetchServers();
+            await fetchServers(true);
         }
 
         document.getElementById('bulk-update').addEventListener('click', async () => {
@@ -1505,13 +1583,13 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         async function updateServer(name) {
             if (await postServerAction(`/api/update/${encodeURIComponent(name)}`, 'Failed to start update.')) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
         async function runAutoremove(name) {
             if (await postServerAction(`/api/autoremove/${encodeURIComponent(name)}`, 'Failed to start apt autoremove.')) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
@@ -1527,7 +1605,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password })
             })) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
@@ -1543,7 +1621,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password })
             })) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
@@ -1698,6 +1776,47 @@ const LOG_BOTTOM_THRESHOLD = 20;
             document.getElementById('drawer-logs-hint').textContent = drawerLogFollow ? "Live auto-scroll" : "Auto-scroll paused";
         });
 
+        const drawerPendingElement = document.getElementById('drawer-panel-pending');
+        drawerPendingElement.addEventListener('scroll', () => {
+            if (drawerTab === "pending") {
+                drawerPendingScrollTop = drawerPendingElement.scrollTop;
+            }
+        });
+
+        document.addEventListener('pointerdown', (event) => {
+            if (isServerActionControl(event.target)) {
+                beginActionInteraction();
+            }
+        }, true);
+        document.addEventListener('pointerup', () => {
+            if (actionInteractionDepth > 0) {
+                endActionInteraction();
+            }
+        }, true);
+        document.addEventListener('pointercancel', () => {
+            if (actionInteractionDepth > 0) {
+                endActionInteraction();
+            }
+        }, true);
+        document.addEventListener('keydown', (event) => {
+            if (event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
+            if (isServerActionControl(event.target)) {
+                beginActionInteraction();
+            }
+        }, true);
+        document.addEventListener('keyup', (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            if (actionInteractionDepth > 0) {
+                endActionInteraction();
+            }
+        }, true);
+        window.addEventListener('blur', resetActionInteraction);
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                resetActionInteraction();
+            }
+        });
+
         window.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && drawerOpen) {
                 e.preventDefault();
@@ -1707,19 +1826,19 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         async function approveAllUpdates(name) {
             if (await postServerAction(`/api/approve/${encodeURIComponent(name)}`, 'Failed to approve updates.')) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
         async function approveSecurityUpdates(name) {
             if (await postServerAction(`/api/approve-security/${encodeURIComponent(name)}`, 'Failed to approve security updates.')) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
         async function cancelUpgrade(name) {
             if (await postServerAction(`/api/cancel/${encodeURIComponent(name)}`, 'Failed to cancel upgrade.')) {
-                fetchServers();
+                fetchServers(true);
             }
         }
 
