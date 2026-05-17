@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,21 +34,26 @@ func preserveSessionState(t *testing.T) {
 func preserveRateLimiterState(t *testing.T) {
 	t.Helper()
 	origLogin := loginRateLimiter
+	origPasswordChange := passwordChangeRateLimiter
 	origSetup := setupRateLimiter
 	origMetrics := metricsRateLimiter
 
 	testLogin := NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+	testPasswordChange := NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
 	testSetup := NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
 	testMetrics := NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
 	loginRateLimiter = testLogin
+	passwordChangeRateLimiter = testPasswordChange
 	setupRateLimiter = testSetup
 	metricsRateLimiter = testMetrics
 
 	t.Cleanup(func() {
 		testLogin.Stop()
+		testPasswordChange.Stop()
 		testSetup.Stop()
 		testMetrics.Stop()
 		loginRateLimiter = origLogin
+		passwordChangeRateLimiter = origPasswordChange
 		setupRateLimiter = origSetup
 		metricsRateLimiter = origMetrics
 	})
@@ -216,6 +222,51 @@ func TestBackupRestoreBarrierMiddlewareBlocksReadsAndSerializesBackupRoutes(t *t
 			t.Fatalf("backup restore did not reject while shared lock held")
 		}
 		backupRestoreMu.RUnlock()
+	})
+
+	t.Run("dashboard event stream does not hold shared lock", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		r := gin.New()
+		r.Use(backupRestoreBarrierMiddleware())
+
+		streamStarted := make(chan struct{})
+		releaseStream := make(chan struct{})
+		streamDone := make(chan struct{})
+		r.GET("/api/dashboard/events", func(c *gin.Context) {
+			close(streamStarted)
+			<-releaseStream
+			c.Status(http.StatusNoContent)
+		})
+		r.POST("/api/backup/restore", func(c *gin.Context) {
+			c.Status(http.StatusNoContent)
+		})
+
+		go func() {
+			defer close(streamDone)
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/dashboard/events", nil)
+			r.ServeHTTP(rec, req)
+		}()
+
+		select {
+		case <-streamStarted:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("dashboard event stream did not start")
+		}
+
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/backup/restore", nil)
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("backup restore status with event stream open = %d, want %d", rec.Code, http.StatusNoContent)
+		}
+
+		close(releaseStream)
+		select {
+		case <-streamDone:
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("dashboard event stream did not finish")
+		}
 	})
 }
 
@@ -1174,5 +1225,147 @@ func TestAuthGateAllowsStaticAssetsUnauthenticated(t *testing.T) {
 	}
 	if ctype := rec.Header().Get("Content-Type"); !strings.Contains(ctype, "javascript") {
 		t.Fatalf("static asset content-type = %q, want javascript", ctype)
+	}
+}
+
+func TestAuthPasswordChangeAndSessionClearAPI(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "auth-admin.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	changeBody := bytes.NewBufferString(`{
+		"current_password":"` + testPasswordStrong + `",
+		"new_password":"NewStrongPass123",
+		"confirm_password":"NewStrongPass123"
+	}`)
+	changeReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", changeBody)
+	changeReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(changeReq)
+	changeReq.Header.Set("Content-Type", "application/json")
+	changeRec := httptest.NewRecorder()
+	handler.ServeHTTP(changeRec, changeReq)
+	if changeRec.Code != http.StatusOK {
+		t.Fatalf("password change status = %d, want %d (body=%s)", changeRec.Code, http.StatusOK, changeRec.Body.String())
+	}
+
+	ok, err := authenticateUser("admin", "NewStrongPass123")
+	if err != nil {
+		t.Fatalf("authenticateUser() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("new password did not authenticate")
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/api/auth/sessions", nil)
+	statusReq.AddCookie(sessionCookie)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("session status = %d, want %d", statusRec.Code, http.StatusOK)
+	}
+
+	clearReq := httptest.NewRequest(http.MethodDelete, "/api/auth/sessions", nil)
+	clearReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(clearReq)
+	clearRec := httptest.NewRecorder()
+	handler.ServeHTTP(clearRec, clearReq)
+	if clearRec.Code != http.StatusOK {
+		t.Fatalf("session clear status = %d, want %d (body=%s)", clearRec.Code, http.StatusOK, clearRec.Body.String())
+	}
+
+	count, err := countStoredSessions()
+	if err != nil {
+		t.Fatalf("countStoredSessions() error = %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("session count after clear = %d, want 0", count)
+	}
+}
+
+func TestAuthPasswordChangeSuccessesDoNotConsumeFailureLimit(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "auth-admin-success-rate-limit.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	currentPassword := testPasswordStrong
+	for i := 0; i < authPasswordChangeMaxAttempts+1; i++ {
+		nextPassword := fmt.Sprintf("RotatedPass%03d", i)
+		changeBody := bytes.NewBufferString(`{
+			"current_password":"` + currentPassword + `",
+			"new_password":"` + nextPassword + `",
+			"confirm_password":"` + nextPassword + `"
+		}`)
+		changeReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", changeBody)
+		changeReq.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(changeReq)
+		changeReq.Header.Set("Content-Type", "application/json")
+		changeRec := httptest.NewRecorder()
+		handler.ServeHTTP(changeRec, changeReq)
+		if changeRec.Code != http.StatusOK {
+			t.Fatalf("successful password change %d status = %d, want %d (body=%s)", i+1, changeRec.Code, http.StatusOK, changeRec.Body.String())
+		}
+		currentPassword = nextPassword
+	}
+
+	failedBody := bytes.NewBufferString(`{
+		"current_password":"WrongStrongPass123",
+		"new_password":"FinalStrongPass123",
+		"confirm_password":"FinalStrongPass123"
+	}`)
+	failedReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", failedBody)
+	failedReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(failedReq)
+	failedReq.Header.Set("Content-Type", "application/json")
+	failedRec := httptest.NewRecorder()
+	handler.ServeHTTP(failedRec, failedReq)
+	if failedRec.Code != http.StatusBadRequest {
+		t.Fatalf("first failed password change after successes status = %d, want %d (body=%s)", failedRec.Code, http.StatusBadRequest, failedRec.Body.String())
+	}
+}
+
+func TestAuthPasswordChangeRateLimited(t *testing.T) {
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	dbFile := filepath.Join(t.TempDir(), "auth-admin-rate-limit.db")
+	handler, sessionCookie := setupAuthenticatedHandler(t, dbFile)
+
+	for i := 0; i < authPasswordChangeMaxAttempts; i++ {
+		changeBody := bytes.NewBufferString(`{
+			"current_password":"WrongStrongPass123",
+			"new_password":"NewStrongPass123",
+			"confirm_password":"NewStrongPass123"
+		}`)
+		changeReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", changeBody)
+		changeReq.AddCookie(sessionCookie)
+		markSameOriginAuthRequest(changeReq)
+		changeReq.Header.Set("Content-Type", "application/json")
+		changeRec := httptest.NewRecorder()
+		handler.ServeHTTP(changeRec, changeReq)
+		if changeRec.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d status = %d, want %d (body=%s)", i+1, changeRec.Code, http.StatusBadRequest, changeRec.Body.String())
+		}
+	}
+
+	changeBody := bytes.NewBufferString(`{
+		"current_password":"WrongStrongPass123",
+		"new_password":"NewStrongPass123",
+		"confirm_password":"NewStrongPass123"
+	}`)
+	changeReq := httptest.NewRequest(http.MethodPut, "/api/auth/password", changeBody)
+	changeReq.AddCookie(sessionCookie)
+	markSameOriginAuthRequest(changeReq)
+	changeReq.Header.Set("Content-Type", "application/json")
+	changeRec := httptest.NewRecorder()
+	handler.ServeHTTP(changeRec, changeReq)
+	if changeRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited status = %d, want %d (body=%s)", changeRec.Code, http.StatusTooManyRequests, changeRec.Body.String())
 	}
 }

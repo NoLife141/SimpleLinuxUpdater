@@ -177,6 +177,53 @@ var errInvalidWindow = errors.New("invalid observability window")
 var cveRegex = regexp.MustCompile(`CVE-[0-9]{4}-[0-9]+`)
 var securitySuiteTokenRegex = regexp.MustCompile(`(?:^|[\s/:])[a-z0-9][a-z0-9+.-]*-security(?:$|[\s/\],:\)])`)
 
+type clientEventBroker struct {
+	mu      sync.Mutex
+	clients map[chan string]struct{}
+}
+
+func newClientEventBroker() *clientEventBroker {
+	return &clientEventBroker{clients: make(map[chan string]struct{})}
+}
+
+func (b *clientEventBroker) subscribe() chan string {
+	ch := make(chan string, 8)
+	b.mu.Lock()
+	b.clients[ch] = struct{}{}
+	b.mu.Unlock()
+	return ch
+}
+
+func (b *clientEventBroker) unsubscribe(ch chan string) {
+	b.mu.Lock()
+	delete(b.clients, ch)
+	close(ch)
+	b.mu.Unlock()
+}
+
+func (b *clientEventBroker) publish(reason string) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "changed"
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ch := range b.clients {
+		select {
+		case ch <- reason:
+		default:
+		}
+	}
+}
+
+var dashboardEventBroker = newClientEventBroker()
+
+func notifyDashboardEvent(reason string) {
+	if dashboardEventBroker != nil {
+		dashboardEventBroker.publish(reason)
+	}
+}
+
 type AuditEvent struct {
 	ID               int64  `json:"id"`
 	CreatedAt        string `json:"created_at"`
@@ -1917,6 +1964,41 @@ func handleAuditEvents(c *gin.Context) {
 	})
 }
 
+func handleDashboardEvents(c *gin.Context) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming unsupported"})
+		return
+	}
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	events := dashboardEventBroker.subscribe()
+	defer dashboardEventBroker.unsubscribe(events)
+
+	fmt.Fprintf(c.Writer, "event: dashboard\n")
+	fmt.Fprintf(c.Writer, "data: {\"reason\":\"connected\"}\n\n")
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case reason := <-events:
+			fmt.Fprintf(c.Writer, "event: dashboard\n")
+			fmt.Fprintf(c.Writer, "data: {\"reason\":%q}\n\n", reason)
+			flusher.Flush()
+		case <-heartbeat.C:
+			fmt.Fprintf(c.Writer, ": keepalive\n\n")
+			flusher.Flush()
+		case <-c.Request.Context().Done():
+			return
+		}
+	}
+}
+
 func parseObservabilityWindow(raw string) (string, time.Duration, error) {
 	window := strings.TrimSpace(strings.ToLower(raw))
 	if window == "" {
@@ -3096,7 +3178,9 @@ func auditWithActor(actor, clientIP, action, targetType, targetName, status, mes
 	}
 	if err := writeAuditEvent(evt); err != nil {
 		log.Printf("audit write failed: action=%s target=%s err=%v", action, targetName, err)
+		return
 	}
+	notifyDashboardEvent(action)
 }
 
 func audit(c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
@@ -5661,10 +5745,14 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.POST("/api/auth/logout", handleAuthLogout)
+	r.GET("/api/auth/sessions", handleAuthSessionsStatus)
+	r.PUT("/api/auth/password", handleAuthPasswordChange)
+	r.DELETE("/api/auth/sessions", handleAuthSessionsClear)
 	r.GET("/api/metrics/token", handleMetricsTokenStatus)
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
 	r.GET("/api/backup/status", handleBackupStatus)
+	r.GET("/api/dashboard/events", handleDashboardEvents)
 	r.GET("/api/app-settings/timezone", handleAppTimezoneStatus)
 	r.PUT("/api/app-settings/timezone", handleAppTimezoneUpdate)
 	r.POST("/api/backup/export", handleBackupExport)
@@ -5862,6 +5950,9 @@ func setupRouter() (*gin.Engine, error) {
 					newServerName := updatedServer.Name
 					txHook = func(tx *sql.Tx) error {
 						if err := renameUpdatePolicyOverridesServerTx(tx, oldServerName, newServerName); err != nil {
+							return err
+						}
+						if err := renameUpdatePolicyTargetServersTx(tx, oldServerName, newServerName); err != nil {
 							return err
 						}
 						return renameServerFactsTx(tx, oldServerName, newServerName)
@@ -6119,6 +6210,8 @@ func setupRouter() (*gin.Engine, error) {
 	})
 
 	r.GET("/api/audit-events", handleAuditEvents)
+	r.GET("/api/reports/audit/:id", handleAuditReport)
+	r.GET("/api/reports/jobs/:id", handleJobReport)
 	r.GET("/api/observability/summary", handleObservabilitySummary)
 	r.GET("/api/dashboard/summary", handleDashboardSummary)
 	r.POST("/api/servers/:name/facts/refresh", handleServerFactsRefresh)

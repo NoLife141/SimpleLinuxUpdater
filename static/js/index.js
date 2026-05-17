@@ -31,7 +31,16 @@ const LOG_BOTTOM_THRESHOLD = 20;
         let actionInteractionDepth = 0;
         let actionInteractionReleaseTimer = null;
         let deferredServerRender = false;
+        let dashboardEventSource = null;
+        let dashboardEventReconnectTimer = null;
+        let dashboardEventReconnectDelay = 1000;
+        let serverPollIntervalID = null;
+        let dashboardExtrasIntervalID = null;
         const actionInteractionDeferMs = 350;
+        const eventBackedServerPollMs = 10000;
+        const fallbackServerPollMs = 5000;
+        const eventBackedExtrasPollMs = 60000;
+        const fallbackExtrasPollMs = 30000;
         const columnResizeStorageKey = "simplelinuxupdater.statusTableColWidths.v8";
         const dashboardFilterStorageKey = "simplelinuxupdater.dashboard.filters.v1";
         const defaultColumnWidths = Object.freeze({
@@ -391,7 +400,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 : "";
             const degraded = !!lastFetchError || !!extrasError;
             if (pollingEl) {
-                pollingEl.textContent = degraded ? "Polling degraded" : "Live polling 2s";
+                pollingEl.textContent = degraded ? "Polling degraded" : (dashboardEventSource ? "Live events" : "Live polling");
                 pollingEl.classList.toggle('warning', degraded);
                 pollingEl.classList.toggle('live', !degraded);
             }
@@ -724,6 +733,57 @@ const LOG_BOTTOM_THRESHOLD = 20;
             fetchObservabilitySummary();
             fetchPolicySummary();
             fetchDashboardSummary();
+        }
+
+        function configurePolling(serverMs, extrasMs) {
+            if (serverPollIntervalID !== null) {
+                clearInterval(serverPollIntervalID);
+            }
+            if (dashboardExtrasIntervalID !== null) {
+                clearInterval(dashboardExtrasIntervalID);
+            }
+            serverPollIntervalID = setInterval(fetchServers, serverMs);
+            dashboardExtrasIntervalID = setInterval(fetchDashboardExtras, extrasMs);
+        }
+
+        function scheduleDashboardEventReconnect() {
+            if (dashboardEventReconnectTimer !== null) return;
+            const delay = dashboardEventReconnectDelay;
+            dashboardEventReconnectDelay = Math.min(dashboardEventReconnectDelay * 2, 30000);
+            dashboardEventReconnectTimer = setTimeout(() => {
+                dashboardEventReconnectTimer = null;
+                connectDashboardEvents();
+            }, delay);
+        }
+
+        function connectDashboardEvents() {
+            if (!window.EventSource) {
+                configurePolling(fallbackServerPollMs, fallbackExtrasPollMs);
+                return;
+            }
+            if (dashboardEventSource) {
+                dashboardEventSource.close();
+            }
+            const source = new EventSource('/api/dashboard/events');
+            dashboardEventSource = source;
+            source.addEventListener('open', () => {
+                dashboardEventReconnectDelay = 1000;
+                configurePolling(eventBackedServerPollMs, eventBackedExtrasPollMs);
+                renderSyncState();
+            });
+            source.addEventListener('dashboard', () => {
+                fetchServers(true);
+                fetchDashboardExtras();
+            });
+            source.addEventListener('error', () => {
+                if (dashboardEventSource === source) {
+                    dashboardEventSource = null;
+                }
+                source.close();
+                configurePolling(fallbackServerPollMs, fallbackExtrasPollMs);
+                renderSyncState();
+                scheduleDashboardEventReconnect();
+            });
         }
 
         function saveWindowScroll() {
@@ -1558,6 +1618,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
             await runBulkAction('update', 'update');
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
+            if (!window.confirmTypedAction('Bulk approve all pending updates for the visible selected hosts?', 'APPROVE ALL')) {
+                return;
+            }
             await runBulkAction('approve', 'approve');
         });
         document.getElementById('bulk-cancel').addEventListener('click', async () => {
@@ -1825,6 +1888,9 @@ const LOG_BOTTOM_THRESHOLD = 20;
         });
 
         async function approveAllUpdates(name) {
+            if (!window.confirmTypedAction(`Approve all pending updates for ${name}?`, name)) {
+                return;
+            }
             if (await postServerAction(`/api/approve/${encodeURIComponent(name)}`, 'Failed to approve updates.')) {
                 fetchServers(true);
             }
@@ -1879,8 +1945,8 @@ const LOG_BOTTOM_THRESHOLD = 20;
         document.getElementById('logout-btn').addEventListener('click', () => window.logout());
         loadDashboardFilters();
         initColumnResizing();
-        setInterval(fetchServers, 2000);
         setInterval(renderSyncState, 5000);
-        setInterval(fetchDashboardExtras, 30000);
+        configurePolling(fallbackServerPollMs, fallbackExtrasPollMs);
+        connectDashboardEvents();
         fetchDashboardExtras();
         fetchServers();

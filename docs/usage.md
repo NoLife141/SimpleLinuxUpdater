@@ -89,7 +89,7 @@ If you approve security-only and no security packages are detected, the upgrade 
 Before `apt-get update`, update actions run mandatory pre-checks over SSH:
 
 - Disk space: checks free space on `/var` and `/` and requires at least `1 GiB` (`1048576 KB`).
-- Lock contention: checks apt/dpkg locks (uses `fuser` when available and falls back to process-based checks if `fuser` is missing).
+- Lock contention: checks apt/dpkg locks with `/usr/bin/fuser` from the `psmisc` package. If `fuser` is missing or not allowed by passwordless sudo, the pre-check fails instead of using the older process-name fallback.
 - APT/DPKG health: runs `dpkg --audit` and `apt-get check`.
 
 If any pre-check fails, the update stops before the approval flow and the server enters `error`.

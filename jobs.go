@@ -260,6 +260,7 @@ func (jm *JobManager) CreateJob(params JobCreateParams) (JobRecord, error) {
 	); err != nil {
 		return JobRecord{}, err
 	}
+	notifyDashboardEvent("job.create")
 	return record, nil
 }
 
@@ -328,6 +329,7 @@ func (jm *JobManager) UpsertJobRecord(record JobRecord) error {
 		return err
 	}
 	jm.syncStatusMapFromJobID(record.ID)
+	notifyDashboardEvent("job.upsert")
 	return nil
 }
 
@@ -395,6 +397,9 @@ func (jm *JobManager) updateJobWithCondition(id string, update JobUpdate, syncRu
 	updated := rowsAffected > 0
 	if syncRuntime && updated {
 		jm.syncStatusMapFromJobID(id)
+	}
+	if updated {
+		notifyDashboardEvent("job.update")
 	}
 	return updated, nil
 }

@@ -107,6 +107,78 @@ async function saveAppTimezoneSettings() {
     }
 }
 
+function setAuthPasswordFeedback(successMessage, errorMessage) {
+    const success = document.getElementById("auth-password-status");
+    const error = document.getElementById("auth-password-error");
+    if (success) success.textContent = successMessage || "";
+    if (error) error.textContent = errorMessage || "";
+}
+
+async function fetchAuthSessionStatus() {
+    const status = document.getElementById("auth-session-status");
+    if (!status) return;
+    try {
+        const res = await fetch("/api/auth/sessions");
+        if (!res.ok) {
+            status.textContent = "Session status unavailable.";
+            return;
+        }
+        const data = await res.json().catch(() => ({}));
+        status.textContent = `${Number(data.session_count || 0)} server-side session(s) stored.`;
+    } catch (err) {
+        console.error("Failed to fetch session status:", err);
+        status.textContent = "Session status request failed.";
+    }
+}
+
+async function changeAdminPassword() {
+    const currentInput = document.getElementById("auth-current-password");
+    const newInput = document.getElementById("auth-new-password");
+    const confirmInput = document.getElementById("auth-confirm-password");
+    const button = document.getElementById("auth-password-save");
+    try {
+        setAuthPasswordFeedback("", "");
+        if (button) button.disabled = true;
+        const res = await fetch("/api/auth/password", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                current_password: currentInput?.value || "",
+                new_password: newInput?.value || "",
+                confirm_password: confirmInput?.value || ""
+            })
+        });
+        if (!res.ok) {
+            setAuthPasswordFeedback("", await parseErrorResponse(res, "Failed to change password."));
+            return;
+        }
+        if (currentInput) currentInput.value = "";
+        if (newInput) newInput.value = "";
+        if (confirmInput) confirmInput.value = "";
+        setAuthPasswordFeedback("Password changed.", "");
+    } catch (err) {
+        setAuthPasswordFeedback("", err.message || "Failed to change password.");
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+async function clearAuthSessions() {
+    if (!window.confirmTypedAction("Logout every server-side session, including this browser?", "LOGOUT ALL")) {
+        return;
+    }
+    try {
+        const res = await fetch("/api/auth/sessions", { method: "DELETE" });
+        if (!res.ok) {
+            alert(await parseErrorResponse(res, "Failed to clear sessions."));
+            return;
+        }
+        window.location.assign("/login");
+    } catch (err) {
+        alert(err.message || "Failed to clear sessions.");
+    }
+}
+
 function showMetricsTokenOnce(token) {
     const panel = document.getElementById("metrics-token-once");
     const value = document.getElementById("metrics-token-value");
@@ -141,7 +213,7 @@ async function fetchMetricsTokenStatus(resetReveal = true) {
 }
 
 async function rotateMetricsToken(askConfirm) {
-    if (askConfirm && !window.confirm("Rotate metrics token? Existing scrapers using the old token will fail until updated.")) {
+    if (askConfirm && !window.confirmTypedAction("Rotate metrics token? Existing scrapers using the old token will fail until updated.", "ROTATE TOKEN")) {
         return;
     }
     try {
@@ -165,7 +237,7 @@ async function rotateMetricsToken(askConfirm) {
 }
 
 async function disableMetricsToken() {
-    if (!window.confirm("Disable metrics token and hide /metrics now?")) {
+    if (!window.confirmTypedAction("Disable metrics token and hide /metrics now?", "DISABLE METRICS")) {
         return;
     }
     try {
@@ -289,7 +361,7 @@ async function restoreBackup() {
             alert("Passphrase must be at least 12 characters.");
             return;
         }
-        if (!window.confirm("Restore will replace the current DB and optional known_hosts. Local config.json stays in place. Continue?")) {
+        if (!window.confirmTypedAction("Restore will replace the current DB and optional known_hosts. Local config.json stays in place.", "RESTORE")) {
             return;
         }
         const form = new FormData();
@@ -368,6 +440,20 @@ function normalizeWeekdays(values) {
             return true;
         })
         .sort((a, b) => weekdayOrder(a) - weekdayOrder(b));
+}
+
+function parseCommaList(raw) {
+    const seen = new Set();
+    return String(raw || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .filter((item) => {
+            const key = item.toLowerCase();
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
 }
 
 function formatWeekdayLabel(token) {
@@ -671,6 +757,9 @@ function updatePolicySummary() {
     if (!summary) return;
     const name = document.getElementById("policy-name").value.trim() || "Unnamed policy";
     const targetTag = document.getElementById("policy-target-tag").value.trim() || "unset tag";
+    const includeTags = parseCommaList(document.getElementById("policy-include-tags").value);
+    const excludeTags = parseCommaList(document.getElementById("policy-exclude-tags").value);
+    const targetServers = parseCommaList(document.getElementById("policy-target-servers").value);
     const cadence = document.getElementById("policy-cadence-kind").value;
     const timeLocal = document.getElementById("policy-time-local").value || "--:--";
     const executionMode = document.getElementById("policy-execution-mode").value;
@@ -689,9 +778,15 @@ function updatePolicySummary() {
     const noRunText = noRunCount
         ? `${pluralize(noRunCount, "no-run window", "no-run windows")} configured`
         : "No policy no-run windows";
+    const targetBits = [];
+    if (targetTag && targetTag !== "unset tag") targetBits.push(`tag=${targetTag}`);
+    if (includeTags.length) targetBits.push(`include=${includeTags.join(", ")}`);
+    if (excludeTags.length) targetBits.push(`exclude=${excludeTags.join(", ")}`);
+    if (targetServers.length) targetBits.push(`servers=${targetServers.join(", ")}`);
+    const targetText = targetBits.length ? targetBits.join("; ") : "no target";
     summary.innerHTML = `
         <div class="summary-title">${escapeHtml(name)}</div>
-        <div class="summary-body">${escapeHtml(`${scheduleText} (${timezone}), ${executionText}, ${scopeText}${timeoutText}, tag=${targetTag}. ${noRunText}.`)}</div>
+        <div class="summary-body">${escapeHtml(`${scheduleText} (${timezone}), ${executionText}, ${scopeText}${timeoutText}, ${targetText}. ${noRunText}.`)}</div>
     `;
 }
 
@@ -744,6 +839,15 @@ function renderMatchedServers(policy) {
     `;
 }
 
+function formatPolicyTargets(policy) {
+    const bits = [];
+    if (String(policy?.target_tag || "").trim()) bits.push(`tag ${policy.target_tag}`);
+    if (Array.isArray(policy?.include_tags) && policy.include_tags.length) bits.push(`include ${policy.include_tags.join(", ")}`);
+    if (Array.isArray(policy?.exclude_tags) && policy.exclude_tags.length) bits.push(`exclude ${policy.exclude_tags.join(", ")}`);
+    if (Array.isArray(policy?.target_servers) && policy.target_servers.length) bits.push(`servers ${policy.target_servers.join(", ")}`);
+    return bits.length ? bits.join(" / ") : "No targets";
+}
+
 function safeRunStatusClassToken(status) {
     const normalized = String(status || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
     switch (normalized) {
@@ -765,6 +869,9 @@ function resetPolicyForm() {
     document.getElementById("policy-id").value = "";
     document.getElementById("policy-name").value = "";
     document.getElementById("policy-target-tag").value = "";
+    document.getElementById("policy-include-tags").value = "";
+    document.getElementById("policy-exclude-tags").value = "";
+    document.getElementById("policy-target-servers").value = "";
     document.getElementById("policy-time-local").value = "02:00";
     document.getElementById("policy-execution-mode").value = "scan_only";
     document.getElementById("policy-package-scope").value = "security";
@@ -786,6 +893,9 @@ function applyPolicyToForm(policy) {
     document.getElementById("policy-id").value = String(policy.id || "");
     document.getElementById("policy-name").value = policy.name || "";
     document.getElementById("policy-target-tag").value = policy.target_tag || "";
+    document.getElementById("policy-include-tags").value = (policy.include_tags || []).join(", ");
+    document.getElementById("policy-exclude-tags").value = (policy.exclude_tags || []).join(", ");
+    document.getElementById("policy-target-servers").value = (policy.target_servers || []).join(", ");
     document.getElementById("policy-time-local").value = policy.time_local || "02:00";
     document.getElementById("policy-execution-mode").value = policy.execution_mode || "scan_only";
     document.getElementById("policy-package-scope").value = policy.package_scope || "security";
@@ -821,7 +931,7 @@ function renderScheduledPolicies() {
                     <div>${escapeHtml(policy.name || "")}</div>
                     <span class="pill ${policy.enabled ? "" : "pill-muted"}">${policy.enabled ? "Enabled" : "Disabled"}</span>
                 </div>
-                <div class="table-secondary">Target tag: ${escapeHtml(policy.target_tag || "")}</div>
+                <div class="table-secondary">Targets: ${escapeHtml(formatPolicyTargets(policy))}</div>
             </td>
             <td>${renderPolicySchedule(policy)}</td>
             <td>${renderPolicyExecution(policy)}</td>
@@ -844,7 +954,7 @@ function renderScheduledRuns(items) {
     tbody.innerHTML = "";
     if (!scheduledPoliciesState.runs.length) {
         const row = document.createElement("tr");
-        row.innerHTML = '<td colspan="6" class="subtle">No scheduled runs recorded yet.</td>';
+        row.innerHTML = '<td colspan="7" class="subtle">No scheduled runs recorded yet.</td>';
         tbody.appendChild(row);
         return;
     }
@@ -870,6 +980,7 @@ function renderScheduledRuns(items) {
             <td><span class="status-chip status-${statusToken}">${escapeHtml(run.status || "unknown")}</span></td>
             <td>${escapeHtml(run.summary || run.reason || "")}</td>
             <td>${jobValue}</td>
+            <td>${run.job_id ? `<a class="inline-btn btn-ghost" href="/api/reports/jobs/${encodeURIComponent(run.job_id)}">Report</a>` : '<span class="subtle">-</span>'}</td>
         `;
         tbody.appendChild(row);
     });
@@ -930,6 +1041,9 @@ function collectPolicyPayload() {
     setPolicyFeedback("", "");
     const name = document.getElementById("policy-name").value.trim();
     const targetTag = document.getElementById("policy-target-tag").value.trim();
+    const includeTags = parseCommaList(document.getElementById("policy-include-tags").value);
+    const excludeTags = parseCommaList(document.getElementById("policy-exclude-tags").value);
+    const targetServers = parseCommaList(document.getElementById("policy-target-servers").value);
     const cadenceKind = document.getElementById("policy-cadence-kind").value;
     const executionMode = document.getElementById("policy-execution-mode").value;
     const packageScope = document.getElementById("policy-package-scope").value;
@@ -941,13 +1055,13 @@ function collectPolicyPayload() {
         setPolicyFieldInvalid("policy-name", true);
         firstInvalidId = firstInvalidId || "policy-name";
     }
-    if (!targetTag) {
+    if (!targetTag && !includeTags.length && !targetServers.length) {
         setPolicyFieldInvalid("policy-target-tag", true);
         firstInvalidId = firstInvalidId || "policy-target-tag";
     }
     if (firstInvalidId) {
         document.getElementById(firstInvalidId)?.focus();
-        throw new Error("Policy name and target tag are required.");
+        throw new Error("Policy name and at least one target tag, included tag, or explicit server are required.");
     }
     if (cadenceKind === "weekly" && !weekdays.length) {
         throw new Error("Weekly policies require at least one weekday.");
@@ -957,6 +1071,9 @@ function collectPolicyPayload() {
         name,
         enabled: document.getElementById("policy-enabled").checked,
         target_tag: targetTag,
+        include_tags: includeTags,
+        exclude_tags: excludeTags,
+        target_servers: targetServers,
         package_scope: packageScope,
         execution_mode: executionMode,
         cadence_kind: cadenceKind,
@@ -1033,7 +1150,9 @@ async function saveScheduledSettings() {
 }
 
 async function deleteScheduledPolicy(id) {
-    if (!window.confirm("Delete this scheduled update policy?")) {
+    const policy = scheduledPoliciesState.items.find((item) => String(item.id) === String(id));
+    const required = policy?.name || String(id);
+    if (!window.confirmTypedAction(`Delete scheduled update policy "${required}"?`, required)) {
         return;
     }
     try {
@@ -1140,6 +1259,9 @@ function bindPolicyFormInteractions() {
     const summaryFields = [
         "policy-name",
         "policy-target-tag",
+        "policy-include-tags",
+        "policy-exclude-tags",
+        "policy-target-servers",
         "policy-time-local",
         "policy-execution-mode",
         "policy-package-scope",
@@ -1187,6 +1309,8 @@ document.getElementById("backup-export-btn").addEventListener("click", exportBac
 document.getElementById("backup-restore-btn").addEventListener("click", restoreBackup);
 document.getElementById("app-timezone-save").addEventListener("click", saveAppTimezoneSettings);
 document.getElementById("app-timezone-input").addEventListener("input", () => setAppTimezoneFeedback("", ""));
+document.getElementById("auth-password-save").addEventListener("click", changeAdminPassword);
+document.getElementById("auth-sessions-clear").addEventListener("click", clearAuthSessions);
 document.getElementById("update-policy-form").addEventListener("submit", saveScheduledPolicy);
 document.getElementById("policy-reset-btn").addEventListener("click", resetPolicyForm);
 document.getElementById("scheduled-settings-save").addEventListener("click", saveScheduledSettings);
@@ -1203,6 +1327,7 @@ document.getElementById("global-blackout-rows").addEventListener("input", handle
 bindPolicyFormInteractions();
 resetPolicyForm();
 fetchMetricsTokenStatus();
+fetchAuthSessionStatus();
 fetchBackupStatus();
 refreshScheduledUpdateViews();
 updateFileLabel(document.getElementById("backup-restore-file"), "Choose backup file");

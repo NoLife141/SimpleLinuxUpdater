@@ -84,6 +84,9 @@ type UpdatePolicy struct {
 	Name                   string                       `json:"name"`
 	Enabled                bool                         `json:"enabled"`
 	TargetTag              string                       `json:"target_tag"`
+	IncludeTags            []string                     `json:"include_tags"`
+	ExcludeTags            []string                     `json:"exclude_tags"`
+	TargetServers          []string                     `json:"target_servers"`
 	PackageScope           string                       `json:"package_scope"`
 	ExecutionMode          string                       `json:"execution_mode"`
 	CadenceKind            string                       `json:"cadence_kind"`
@@ -180,6 +183,9 @@ func ensureUpdatePolicySchema(db *sql.DB) error {
 			name TEXT NOT NULL,
 			enabled INTEGER NOT NULL DEFAULT 1,
 			target_tag TEXT NOT NULL,
+			include_tags_json TEXT NOT NULL DEFAULT '[]',
+			exclude_tags_json TEXT NOT NULL DEFAULT '[]',
+			target_servers_json TEXT NOT NULL DEFAULT '[]',
 			package_scope TEXT NOT NULL,
 			execution_mode TEXT NOT NULL,
 			cadence_kind TEXT NOT NULL,
@@ -234,7 +240,41 @@ func ensureUpdatePolicySchema(db *sql.DB) error {
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_update_policy_runs_status ON update_policy_runs (status, scheduled_for_utc DESC)"); err != nil {
 		return err
 	}
+	if err := ensureUpdatePolicyColumn(db, "include_tags_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := ensureUpdatePolicyColumn(db, "exclude_tags_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := ensureUpdatePolicyColumn(db, "target_servers_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func ensureUpdatePolicyColumn(db *sql.DB, name, definition string) error {
+	rows, err := db.Query("PRAGMA table_info(update_policies)")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &columnName, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if columnName == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec("ALTER TABLE update_policies ADD COLUMN " + name + " " + definition)
+	return err
 }
 
 func getSettingValue(key string) (string, error) {
@@ -300,6 +340,42 @@ func parseWeekdaysJSON(raw string) []string {
 		return []string{}
 	}
 	return normalized
+}
+
+func parseStringListJSON(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return []string{}
+	}
+	return normalizeStringList(values)
+}
+
+func normalizeStringList(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		clean := strings.TrimSpace(value)
+		if clean == "" {
+			continue
+		}
+		key := strings.ToLower(clean)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, clean)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i]) < strings.ToLower(out[j])
+	})
+	return out
 }
 
 func normalizeWeekdayToken(raw string) (string, error) {
@@ -431,8 +507,11 @@ func normalizeUpdatePolicy(policy *UpdatePolicy) error {
 		return errors.New("name is required")
 	}
 	policy.TargetTag = strings.TrimSpace(policy.TargetTag)
-	if policy.TargetTag == "" {
-		return errors.New("target_tag is required")
+	policy.IncludeTags = normalizeStringList(policy.IncludeTags)
+	policy.ExcludeTags = normalizeStringList(policy.ExcludeTags)
+	policy.TargetServers = normalizeStringList(policy.TargetServers)
+	if policy.TargetTag == "" && len(policy.IncludeTags) == 0 && len(policy.TargetServers) == 0 {
+		return errors.New("at least one target tag, included tag, or explicit server is required")
 	}
 	switch strings.ToLower(strings.TrimSpace(policy.PackageScope)) {
 	case updatePolicyPackageScopeSecurity:
@@ -498,11 +577,17 @@ func scanUpdatePolicyRow(scanner interface {
 	var enabledInt int
 	var weekdaysJSON string
 	var policyBlackoutsJSON string
+	var includeTagsJSON string
+	var excludeTagsJSON string
+	var targetServersJSON string
 	err := scanner.Scan(
 		&policy.ID,
 		&policy.Name,
 		&enabledInt,
 		&policy.TargetTag,
+		&includeTagsJSON,
+		&excludeTagsJSON,
+		&targetServersJSON,
 		&policy.PackageScope,
 		&policy.ExecutionMode,
 		&policy.CadenceKind,
@@ -517,6 +602,9 @@ func scanUpdatePolicyRow(scanner interface {
 		return UpdatePolicy{}, err
 	}
 	policy.Enabled = enabledInt != 0
+	policy.IncludeTags = parseStringListJSON(includeTagsJSON)
+	policy.ExcludeTags = parseStringListJSON(excludeTagsJSON)
+	policy.TargetServers = parseStringListJSON(targetServersJSON)
 	policy.Weekdays = parseWeekdaysJSON(weekdaysJSON)
 	blackouts, err := parseUpdatePolicyBlackouts(policyBlackoutsJSON)
 	if err != nil {
@@ -528,7 +616,8 @@ func scanUpdatePolicyRow(scanner interface {
 
 func listUpdatePolicies() ([]UpdatePolicy, error) {
 	rows, err := getDB().Query(`
-		SELECT id, name, enabled, target_tag, package_scope, execution_mode, cadence_kind, time_local,
+		SELECT id, name, enabled, target_tag, include_tags_json, exclude_tags_json, target_servers_json,
+		       package_scope, execution_mode, cadence_kind, time_local,
 		       weekdays_json, approval_timeout_minutes, policy_blackouts_json, created_at, updated_at
 		  FROM update_policies
 		 ORDER BY created_at ASC, id ASC
@@ -554,7 +643,8 @@ func listUpdatePolicies() ([]UpdatePolicy, error) {
 
 func getUpdatePolicy(id int64) (UpdatePolicy, error) {
 	row := getDB().QueryRow(`
-		SELECT id, name, enabled, target_tag, package_scope, execution_mode, cadence_kind, time_local,
+		SELECT id, name, enabled, target_tag, include_tags_json, exclude_tags_json, target_servers_json,
+		       package_scope, execution_mode, cadence_kind, time_local,
 		       weekdays_json, approval_timeout_minutes, policy_blackouts_json, created_at, updated_at
 		  FROM update_policies
 		 WHERE id = ?
@@ -569,13 +659,17 @@ func createUpdatePolicy(policy UpdatePolicy) (UpdatePolicy, error) {
 	now := jobTimestampNow()
 	result, err := getDB().Exec(`
 		INSERT INTO update_policies (
-			name, enabled, target_tag, package_scope, execution_mode, cadence_kind, time_local,
+			name, enabled, target_tag, include_tags_json, exclude_tags_json, target_servers_json,
+			package_scope, execution_mode, cadence_kind, time_local,
 			weekdays_json, approval_timeout_minutes, policy_blackouts_json, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		policy.Name,
 		boolToInt(policy.Enabled),
 		policy.TargetTag,
+		marshalJobJSON(policy.IncludeTags),
+		marshalJobJSON(policy.ExcludeTags),
+		marshalJobJSON(policy.TargetServers),
 		policy.PackageScope,
 		policy.ExecutionMode,
 		policy.CadenceKind,
@@ -607,7 +701,8 @@ func updateUpdatePolicy(id int64, policy UpdatePolicy) (UpdatePolicy, error) {
 	now := jobTimestampNow()
 	result, err := getDB().Exec(`
 		UPDATE update_policies
-		   SET name = ?, enabled = ?, target_tag = ?, package_scope = ?, execution_mode = ?,
+		   SET name = ?, enabled = ?, target_tag = ?, include_tags_json = ?, exclude_tags_json = ?,
+		       target_servers_json = ?, package_scope = ?, execution_mode = ?,
 		       cadence_kind = ?, time_local = ?, weekdays_json = ?, approval_timeout_minutes = ?,
 		       policy_blackouts_json = ?, updated_at = ?
 		 WHERE id = ?
@@ -615,6 +710,9 @@ func updateUpdatePolicy(id int64, policy UpdatePolicy) (UpdatePolicy, error) {
 		policy.Name,
 		boolToInt(policy.Enabled),
 		policy.TargetTag,
+		marshalJobJSON(policy.IncludeTags),
+		marshalJobJSON(policy.ExcludeTags),
+		marshalJobJSON(policy.TargetServers),
 		policy.PackageScope,
 		policy.ExecutionMode,
 		policy.CadenceKind,
@@ -787,6 +885,68 @@ func renameUpdatePolicyOverridesServerTx(tx *sql.Tx, oldServerName, newServerNam
 		return err
 	}
 
+	return nil
+}
+
+func renameUpdatePolicyTargetServersTx(tx *sql.Tx, oldServerName, newServerName string) error {
+	if tx == nil {
+		return errors.New("tx is required")
+	}
+	oldServerName = strings.TrimSpace(oldServerName)
+	newServerName = strings.TrimSpace(newServerName)
+	if oldServerName == "" || newServerName == "" {
+		return nil
+	}
+
+	rows, err := tx.Query(`SELECT id, target_servers_json FROM update_policies`)
+	if err != nil {
+		return err
+	}
+
+	type policyTargetUpdate struct {
+		id      int64
+		targets []string
+	}
+	updates := make([]policyTargetUpdate, 0)
+	for rows.Next() {
+		var id int64
+		var rawTargets string
+		if err := rows.Scan(&id, &rawTargets); err != nil {
+			return err
+		}
+		targets := parseStringListJSON(rawTargets)
+		changed := false
+		for i, target := range targets {
+			if strings.EqualFold(strings.TrimSpace(target), oldServerName) {
+				targets[i] = newServerName
+				changed = true
+			}
+		}
+		if changed {
+			updates = append(updates, policyTargetUpdate{
+				id:      id,
+				targets: normalizeStringList(targets),
+			})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	now := jobTimestampNow()
+	for _, update := range updates {
+		if _, err := tx.Exec(`
+			UPDATE update_policies
+			   SET target_servers_json = ?, updated_at = ?
+			 WHERE id = ?
+		`, marshalJobJSON(update.targets), now, update.id); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1035,6 +1195,28 @@ func serverHasTag(server Server, tag string) bool {
 	return false
 }
 
+func serverHasAnyTag(server Server, tags []string) bool {
+	for _, tag := range tags {
+		if serverHasTag(server, tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringListContainsFold(values []string, needle string) bool {
+	needle = strings.TrimSpace(needle)
+	if needle == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func snapshotServers() []Server {
 	mu.Lock()
 	defer mu.Unlock()
@@ -1058,13 +1240,25 @@ func policyMatchesServer(policy UpdatePolicy, server Server, overrides map[int64
 	if !policy.Enabled {
 		return false
 	}
-	if !serverHasTag(server, policy.TargetTag) {
+	if len(policy.ExcludeTags) > 0 && serverHasAnyTag(server, policy.ExcludeTags) {
 		return false
 	}
 	if perPolicy := overrides[policy.ID]; perPolicy != nil && perPolicy[server.Name] {
 		return false
 	}
-	return true
+	if stringListContainsFold(policy.TargetServers, server.Name) {
+		return true
+	}
+	if strings.TrimSpace(policy.TargetTag) != "" && serverHasTag(server, policy.TargetTag) {
+		return true
+	}
+	if len(policy.IncludeTags) > 0 && serverHasAnyTag(server, policy.IncludeTags) {
+		return true
+	}
+	if strings.TrimSpace(policy.TargetTag) == "" && len(policy.IncludeTags) == 0 && len(policy.TargetServers) == 0 {
+		return true
+	}
+	return false
 }
 
 func enrichPoliciesWithMatches(policies []UpdatePolicy) []UpdatePolicy {

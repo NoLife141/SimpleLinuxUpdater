@@ -63,20 +63,30 @@ Fix:
 
 ## APT locks and missing fuser
 
-Symptom: pre-check fails due to lock contention.
+Symptom: `apt_locks` pre-check fails before `apt-get update`.
 
 Notes:
 
-- The lock pre-check uses `sudo /usr/bin/fuser` and falls back to a process-based check if `fuser` is missing.
+- The lock pre-check requires `sudo /usr/bin/fuser` from the `psmisc` package.
+- Since v0.2.3, missing `fuser` is a blocking pre-check failure. The older process-name fallback was removed because it could be spoofed by unrelated processes.
 - Missing lock files are treated as no-lock (non-fatal).
 
 Examples you may see in logs:
 
-- Missing `fuser` (fallback path used):
+- Missing `fuser`:
   - `sudo: /usr/bin/fuser: command not found`
   - `sudo: unable to execute /usr/bin/fuser: No such file or directory`
 - Lock file path missing (non-fatal/no-lock):
   - `/usr/bin/fuser: /var/cache/apt/archives/lock: No such file or directory`
+
+Fix:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y psmisc
+```
+
+After installing `psmisc`, rerun the app's passwordless apt helper or add a sudoers rule that allows the exact `fuser` lock-check command shown in [security.md](security.md).
 
 ## Pre-check failures
 
@@ -86,6 +96,24 @@ Common reasons:
 - Disk space minimum is `1 GiB` (1048576 KB)
 - APT/DPKG health failures (`dpkg --audit` or `apt-get check`)
 - Lock contention
+
+## APT/DPKG health failures
+
+Symptom: `apt_health` pre-check fails and the log shows `dpkg --audit` or `apt-get check` output.
+
+Notes:
+
+- This means the host already has an interrupted or inconsistent package state before the updater starts.
+- The updater stops before `apt-get update` so it does not hide or worsen the existing package problem.
+- Fix the package issue directly on the host, then rerun the update from the app.
+
+Common recovery command:
+
+```bash
+sudo dpkg --configure -a
+```
+
+If the command reports a specific package maintainer-script failure, fix that package first. For example, a missing Postfix configuration such as `/etc/postfix/main.cf` must be restored or regenerated before dependent packages can finish configuring.
 
 ## Post-check failures
 

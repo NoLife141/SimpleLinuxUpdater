@@ -77,6 +77,15 @@
         label.textContent = file ? file.name : emptyLabel;
     };
 
+    window.confirmTypedAction = window.confirmTypedAction || function confirmTypedAction(message, requiredText) {
+        const required = String(requiredText || "").trim();
+        if (!required) {
+            return window.confirm(message);
+        }
+        const entered = window.prompt(`${message}\n\nType "${required}" to confirm.`);
+        return entered === required;
+    };
+
     window.setAppTimezoneCache = window.setAppTimezoneCache || function setAppTimezoneCache(payload) {
         if (payload && typeof payload === "object" && !Array.isArray(payload)) {
             appTimezoneState.value = normalizeAppTimezone(payload.timezone);

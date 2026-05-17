@@ -6,6 +6,10 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+### Fixed
+
+- Update pre-check documentation to match the stricter v0.2.3 apt lock and APT/DPKG health behavior.
+
 ## [v0.2.3] - 2026-05-16
 
 ### Changed
