@@ -1854,6 +1854,13 @@ func sanitizeAuditMeta(meta map[string]any) string {
 }
 
 func handleAuditEvents(c *gin.Context) {
+	handleAuditEventsWithService(c, auditService)
+}
+
+func handleAuditEventsWithService(c *gin.Context, service *AuditService) {
+	if service == nil {
+		service = auditService
+	}
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	if page < 1 {
 		page = 1
@@ -1888,7 +1895,7 @@ func handleAuditEvents(c *gin.Context) {
 		to = normalizedTo
 	}
 
-	result, err := auditService.List(AuditListFilter{
+	result, err := service.List(AuditListFilter{
 		Page:       page,
 		PageSize:   pageSize,
 		TargetName: targetName,
@@ -1923,9 +1930,17 @@ func handleAuditEvents(c *gin.Context) {
 }
 
 func handleDashboardEvents(c *gin.Context) {
+	handleDashboardEventsWithBroker(c, dashboardEventBroker)
+}
+
+func handleDashboardEventsWithBroker(c *gin.Context, broker *clientEventBroker) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming unsupported"})
+		return
+	}
+	if broker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming unavailable"})
 		return
 	}
 	c.Header("Content-Type", "text/event-stream")
@@ -1933,8 +1948,8 @@ func handleDashboardEvents(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("X-Accel-Buffering", "no")
 
-	events := dashboardEventBroker.subscribe()
-	defer dashboardEventBroker.unsubscribe(events)
+	events := broker.subscribe()
+	defer broker.unsubscribe(events)
 
 	fmt.Fprintf(c.Writer, "event: dashboard\n")
 	fmt.Fprintf(c.Writer, "data: {\"reason\":\"connected\"}\n\n")
@@ -2168,8 +2183,15 @@ func buildObservabilitySummary(rawWindow string, now time.Time) (observabilitySu
 }
 
 func handleObservabilitySummary(c *gin.Context) {
+	handleObservabilitySummaryWithNow(c, func() time.Time { return time.Now().UTC() })
+}
+
+func handleObservabilitySummaryWithNow(c *gin.Context, now func() time.Time) {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
 	window := c.Query("window")
-	summary, err := buildObservabilitySummary(window, time.Now().UTC())
+	summary, err := buildObservabilitySummary(window, now())
 	if err != nil {
 		if errors.Is(err, errInvalidWindow) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
@@ -2950,7 +2972,14 @@ func buildDashboardSummary(rawWindow string, now time.Time) (dashboardSummaryRes
 }
 
 func handleDashboardSummary(c *gin.Context) {
-	summary, err := buildDashboardSummary(c.Query("window"), time.Now().UTC())
+	handleDashboardSummaryWithNow(c, func() time.Time { return time.Now().UTC() })
+}
+
+func handleDashboardSummaryWithNow(c *gin.Context, now func() time.Time) {
+	if now == nil {
+		now = func() time.Time { return time.Now().UTC() }
+	}
+	summary, err := buildDashboardSummary(c.Query("window"), now())
 	if err != nil {
 		if errors.Is(err, errInvalidWindow) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid window; allowed values: 24h, 7d, 30d"})
@@ -3098,6 +3127,16 @@ func clientIPFromContext(c *gin.Context) string {
 
 func audit(c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
 	auditWithActor(actorFromContext(c), clientIPFromContext(c), action, targetType, targetName, status, message, meta)
+}
+
+func auditWithService(service *AuditService, c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
+	if service == nil {
+		audit(c, action, targetType, targetName, status, message, meta)
+		return
+	}
+	if err := service.Record(actorFromContext(c), clientIPFromContext(c), action, targetType, targetName, status, message, meta); err != nil {
+		log.Printf("audit write failed: action=%s target=%s err=%v", action, targetName, err)
+	}
 }
 
 func startAuditPruner(ctx context.Context) {
@@ -5456,8 +5495,8 @@ func registerRoutes(r *gin.Engine, deps AppDeps) error {
 	r.Use(authGateMiddleware())
 	r.Use(sameOriginWriteMiddleware())
 	registerProtectedPageRoutes(r)
-	registerProtectedAuthAndSettingsRoutes(r)
-	registerPolicyAuditObservabilityRoutes(r)
+	registerProtectedAuthAndSettingsRoutes(r, deps)
+	registerPolicyAuditObservabilityRoutes(r, deps)
 	registerServerAndActionRoutes(r, deps)
 	return nil
 }
@@ -5496,7 +5535,8 @@ func registerProtectedPageRoutes(r *gin.Engine) {
 
 }
 
-func registerProtectedAuthAndSettingsRoutes(r *gin.Engine) {
+func registerProtectedAuthAndSettingsRoutes(r *gin.Engine, deps AppDeps) {
+	deps = deps.withDefaults()
 	r.POST("/api/auth/logout", handleAuthLogout)
 	r.GET("/api/auth/sessions", handleAuthSessionsStatus)
 	r.PUT("/api/auth/password", handleAuthPasswordChange)
@@ -5505,35 +5545,60 @@ func registerProtectedAuthAndSettingsRoutes(r *gin.Engine) {
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
 	r.GET("/api/backup/status", handleBackupStatus)
-	r.GET("/api/dashboard/events", handleDashboardEvents)
+	r.GET("/api/dashboard/events", func(c *gin.Context) {
+		handleDashboardEventsWithBroker(c, deps.DashboardEventBroker)
+	})
 	r.GET("/api/app-settings/timezone", handleAppTimezoneStatus)
 	r.PUT("/api/app-settings/timezone", handleAppTimezoneUpdate)
 	r.POST("/api/backup/export", handleBackupExport)
 	r.POST("/api/backup/restore", handleBackupRestore)
 }
 
-func registerPolicyAuditObservabilityRoutes(r *gin.Engine) {
-	r.GET("/api/update-policies", handleUpdatePoliciesList)
-	r.POST("/api/update-policies", handleUpdatePolicyCreate)
-	r.GET("/api/update-policies/runs", handleUpdatePolicyRuns)
-	r.GET("/api/update-policies/settings", handleUpdatePolicySettingsStatus)
-	r.PUT("/api/update-policies/settings", handleUpdatePolicySettingsUpdate)
+func registerPolicyAuditObservabilityRoutes(r *gin.Engine, deps AppDeps) {
+	deps = deps.withDefaults()
+	r.GET("/api/update-policies", func(c *gin.Context) {
+		handleUpdatePoliciesListWithDeps(c, deps)
+	})
+	r.POST("/api/update-policies", func(c *gin.Context) {
+		handleUpdatePolicyCreateWithDeps(c, deps)
+	})
+	r.GET("/api/update-policies/runs", func(c *gin.Context) {
+		handleUpdatePolicyRunsWithDeps(c, deps)
+	})
+	r.GET("/api/update-policies/settings", func(c *gin.Context) {
+		handleUpdatePolicySettingsStatusWithDeps(c, deps)
+	})
+	r.PUT("/api/update-policies/settings", func(c *gin.Context) {
+		handleUpdatePolicySettingsUpdateWithDeps(c, deps)
+	})
 	r.GET("/api/update-policies/:id/overrides", handleUpdatePolicyOverrides)
 	r.PUT("/api/update-policies/:id/overrides/:server", handleUpdatePolicyOverrideUpsert)
-	r.PUT("/api/update-policies/:id", handleUpdatePolicyUpdate)
+	r.PUT("/api/update-policies/:id", func(c *gin.Context) {
+		handleUpdatePolicyUpdateWithDeps(c, deps)
+	})
 	r.DELETE("/api/update-policies/:id", handleUpdatePolicyDelete)
 
-	r.GET("/api/audit-events", handleAuditEvents)
-	r.GET("/api/reports/audit/:id", handleAuditReport)
-	r.GET("/api/reports/jobs/:id", handleJobReport)
-	r.GET("/api/observability/summary", handleObservabilitySummary)
-	r.GET("/api/dashboard/summary", handleDashboardSummary)
+	r.GET("/api/audit-events", func(c *gin.Context) {
+		handleAuditEventsWithService(c, deps.AuditService)
+	})
+	r.GET("/api/reports/audit/:id", func(c *gin.Context) {
+		handleAuditReportWithService(c, deps.AuditService)
+	})
+	r.GET("/api/reports/jobs/:id", func(c *gin.Context) {
+		handleJobReportWithDeps(c, deps)
+	})
+	r.GET("/api/observability/summary", func(c *gin.Context) {
+		handleObservabilitySummaryWithNow(c, deps.Now)
+	})
+	r.GET("/api/dashboard/summary", func(c *gin.Context) {
+		handleDashboardSummaryWithNow(c, deps.Now)
+	})
 	r.POST("/api/audit-events/prune", func(c *gin.Context) {
-		if err := pruneAuditEvents(auditRetentionDays); err != nil {
+		if err := deps.AuditService.Prune(auditRetentionDays); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prune audit events"})
 			return
 		}
-		audit(c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
+		auditWithService(deps.AuditService, c, "audit.prune", "system", "audit_events", "success", fmt.Sprintf("Pruned entries older than %d days", auditRetentionDays), map[string]any{"retention_days": auditRetentionDays})
 		c.JSON(http.StatusOK, gin.H{"message": "Audit events pruned"})
 	})
 }

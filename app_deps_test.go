@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -206,6 +207,122 @@ func TestActionRoutesUseInjectedUpdateServiceJobManager(t *testing.T) {
 	}
 }
 
+func TestPolicyRoutesUseInjectedPolicyServiceForList(t *testing.T) {
+	policy := UpdatePolicy{
+		ID:            77,
+		Name:          "Injected policy",
+		Enabled:       true,
+		IncludeTags:   []string{"prod"},
+		PackageScope:  updatePolicyPackageScopeSecurity,
+		ExecutionMode: updatePolicyExecutionScanOnly,
+		CadenceKind:   updatePolicyCadenceDaily,
+		TimeLocal:     "02:15",
+	}
+	service := NewPolicyService(PolicyServiceDeps{
+		ListPolicies: func() ([]UpdatePolicy, error) {
+			return []UpdatePolicy{policy}, nil
+		},
+		SnapshotServers: func() []Server {
+			return []Server{{Name: "srv-prod", Tags: []string{"prod"}}}
+		},
+		LoadOverrides: func() (map[int64]map[string]bool, error) {
+			return map[int64]map[string]bool{}, nil
+		},
+	})
+	app := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "policy-list.db"), AppDeps{
+		PolicyService:              service,
+		AppTimezoneDisplayName:     func() string { return "Injected/TZ" },
+		AppTimezoneResolvedName:    func() string { return "Injected/TZ" },
+		InitializeMaintenanceState: func() error { return nil },
+	})
+	sessionCookie := app.authenticate(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/update-policies", nil)
+	req.AddCookie(sessionCookie)
+	app.Handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("policy list status = %d, want %d (body=%s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items            []UpdatePolicy `json:"items"`
+		Timezone         string         `json:"timezone"`
+		ResolvedTimezone string         `json:"resolved_timezone"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal policy list: %v", err)
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != policy.ID {
+		t.Fatalf("policy list items = %+v, want injected policy", resp.Items)
+	}
+	if len(resp.Items[0].MatchedServers) != 1 || resp.Items[0].MatchedServers[0] != "srv-prod" {
+		t.Fatalf("matched servers = %+v, want [srv-prod]", resp.Items[0].MatchedServers)
+	}
+	if resp.Timezone != "Injected/TZ" || resp.ResolvedTimezone != "Injected/TZ" {
+		t.Fatalf("timezone fields = %q/%q, want injected names", resp.Timezone, resp.ResolvedTimezone)
+	}
+}
+
+func TestAuditRoutesUseInjectedAuditService(t *testing.T) {
+	auditDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "audit-routes.db"))
+	if err != nil {
+		t.Fatalf("open audit db: %v", err)
+	}
+	t.Cleanup(func() { _ = auditDB.Close() })
+	ensureAuditEventsTestSchema(t, auditDB)
+	auditSvc := NewAuditService(func() *sql.DB { return auditDB }, nil, nil)
+	if err := auditSvc.Write(AuditEvent{
+		CreatedAt:  "2026-05-17T12:00:00Z",
+		Actor:      "tester",
+		Action:     "route.injected",
+		TargetType: "server",
+		TargetName: "srv-audit",
+		Status:     "success",
+		Message:    "from injected audit service",
+		MetaJSON:   `{"source":"injected"}`,
+	}); err != nil {
+		t.Fatalf("write injected audit event: %v", err)
+	}
+	var auditID int64
+	if err := auditDB.QueryRow("SELECT id FROM audit_events WHERE action = ?", "route.injected").Scan(&auditID); err != nil {
+		t.Fatalf("load injected audit id: %v", err)
+	}
+
+	app := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "audit-app.db"), AppDeps{
+		AuditService: auditSvc,
+	})
+	sessionCookie := app.authenticate(t)
+
+	listRec := httptest.NewRecorder()
+	listReq := httptest.NewRequest(http.MethodGet, "/api/audit-events?action=route.injected", nil)
+	listReq.AddCookie(sessionCookie)
+	app.Handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("audit list status = %d, want %d (body=%s)", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listResp struct {
+		Items []AuditEvent `json:"items"`
+		Total int          `json:"total"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("unmarshal audit list: %v", err)
+	}
+	if listResp.Total != 1 || len(listResp.Items) != 1 || listResp.Items[0].Action != "route.injected" {
+		t.Fatalf("audit list response = %+v, want injected event", listResp)
+	}
+
+	reportRec := httptest.NewRecorder()
+	reportReq := httptest.NewRequest(http.MethodGet, "/api/reports/audit/"+strconvFormatInt(auditID), nil)
+	reportReq.AddCookie(sessionCookie)
+	app.Handler.ServeHTTP(reportRec, reportReq)
+	if reportRec.Code != http.StatusOK {
+		t.Fatalf("audit report status = %d, want %d (body=%s)", reportRec.Code, http.StatusOK, reportRec.Body.String())
+	}
+	if body := reportRec.Body.String(); !strings.Contains(body, "# Audit Event Report #"+strconvFormatInt(auditID)) || !strings.Contains(body, `"source": "injected"`) {
+		t.Fatalf("audit report body missing injected content:\n%s", body)
+	}
+}
+
 func authUserExistsInDB(t *testing.T, dbPath string) bool {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
@@ -219,4 +336,25 @@ func authUserExistsInDB(t *testing.T, dbPath string) bool {
 		t.Fatalf("count auth users in %s: %v", dbPath, err)
 	}
 	return count > 0
+}
+
+func ensureAuditEventsTestSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS audit_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			created_at TEXT NOT NULL,
+			actor TEXT NOT NULL,
+			action TEXT NOT NULL,
+			target_type TEXT NOT NULL,
+			target_name TEXT NOT NULL,
+			status TEXT NOT NULL,
+			message TEXT NOT NULL,
+			meta_json TEXT NOT NULL DEFAULT '{}',
+			request_id TEXT NOT NULL DEFAULT '',
+			client_ip TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		t.Fatalf("create audit_events test schema: %v", err)
+	}
 }

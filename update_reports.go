@@ -33,7 +33,14 @@ func loadAuditEventByID(id string) (AuditEvent, error) {
 }
 
 func handleAuditReport(c *gin.Context) {
-	evt, err := loadAuditEventByID(c.Param("id"))
+	handleAuditReportWithService(c, auditService)
+}
+
+func handleAuditReportWithService(c *gin.Context, service *AuditService) {
+	if service == nil {
+		service = auditService
+	}
+	evt, err := service.LoadByID(c.Param("id"))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "audit event not found"})
@@ -42,7 +49,7 @@ func handleAuditReport(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit event"})
 		return
 	}
-	writeMarkdownDownload(c, markdownReportFilename("audit", fmt.Sprintf("%d", evt.ID)), buildAuditMarkdownReport(evt))
+	writeMarkdownDownload(c, markdownReportFilename("audit", fmt.Sprintf("%d", evt.ID)), service.BuildAuditMarkdownReport(evt))
 }
 
 func buildAuditMarkdownReport(evt AuditEvent) string {
@@ -54,7 +61,12 @@ func buildJobMarkdownReport(job JobRecord) string {
 }
 
 func handleJobReport(c *gin.Context) {
-	jm := currentJobManager()
+	handleJobReportWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleJobReportWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
+	jm := deps.CurrentJobManager()
 	if jm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "job manager unavailable"})
 		return
@@ -68,5 +80,5 @@ func handleJobReport(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load job"})
 		return
 	}
-	writeMarkdownDownload(c, markdownReportFilename("job", job.ID), buildJobMarkdownReport(job))
+	writeMarkdownDownload(c, markdownReportFilename("job", job.ID), deps.AuditService.BuildJobMarkdownReport(job))
 }

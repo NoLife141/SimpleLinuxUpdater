@@ -21,6 +21,11 @@ type testApp struct {
 	Deps           AppDeps
 }
 
+type testAppOptions struct {
+	DBPath string
+	Deps   AppDeps
+}
+
 func setDialSSHConnection(fn func(Server, *ssh.ClientConfig) (sshConnection, error)) {
 	dialSSHConnectionMu.Lock()
 	defer dialSSHConnectionMu.Unlock()
@@ -37,10 +42,20 @@ func newIsolatedTestApp(t *testing.T) *testApp {
 		statusMap = map[string]*ServerStatus{}
 	}()
 	t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", "")
-	return newTestAppWithDB(t, filepath.Join(t.TempDir(), "app.db"))
+	return newTestApp(t, testAppOptions{DBPath: filepath.Join(t.TempDir(), "app.db")})
 }
 
 func newTestAppWithDB(t *testing.T, dbFile string) *testApp {
+	t.Helper()
+	return newTestApp(t, testAppOptions{DBPath: dbFile})
+}
+
+func newTestAppWithDeps(t *testing.T, dbFile string, deps AppDeps) *testApp {
+	t.Helper()
+	return newTestApp(t, testAppOptions{DBPath: dbFile, Deps: deps})
+}
+
+func newTestApp(t *testing.T, opts testAppOptions) *testApp {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	preserveDBState(t)
@@ -50,7 +65,8 @@ func newTestAppWithDB(t *testing.T, dbFile string) *testApp {
 	resetMissedUpdatePolicyTicksForTest()
 	t.Cleanup(resetMissedUpdatePolicyTicksForTest)
 
-	if strings.TrimSpace(dbFile) == "" {
+	dbFile := strings.TrimSpace(opts.DBPath)
+	if dbFile == "" {
 		dbFile = filepath.Join(t.TempDir(), "app.db")
 	}
 	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
@@ -64,7 +80,7 @@ func newTestAppWithDB(t *testing.T, dbFile string) *testApp {
 		t.Setenv("DEBIAN_UPDATER_KNOWN_HOSTS", knownHostsPath)
 	}
 
-	deps := NewDefaultAppDeps()
+	deps := opts.Deps.withDefaults()
 	router, err := setupRouterWithDeps(deps)
 	if err != nil {
 		t.Fatalf("setupRouterWithDeps() unexpected error: %v", err)

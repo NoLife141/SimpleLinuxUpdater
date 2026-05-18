@@ -27,9 +27,13 @@ type AppDeps struct {
 
 	TrustedProxies             func() []string
 	InitializeMaintenanceState func() error
+	Now                        func() time.Time
 	NotifyDashboardEvent       func(string)
+	DashboardEventBroker       *clientEventBroker
 	CurrentAppTimezone         func() (*time.Location, string)
 	CurrentAppLocation         func() *time.Location
+	AppTimezoneDisplayName     func() string
+	AppTimezoneResolvedName    func() string
 }
 
 func NewDefaultAppDeps() AppDeps {
@@ -73,14 +77,26 @@ func (deps AppDeps) withDefaults() AppDeps {
 	if deps.InitializeMaintenanceState == nil {
 		deps.InitializeMaintenanceState = initializeMaintenanceState
 	}
+	if deps.Now == nil {
+		deps.Now = func() time.Time { return time.Now().UTC() }
+	}
 	if deps.NotifyDashboardEvent == nil {
 		deps.NotifyDashboardEvent = notifyDashboardEvent
+	}
+	if deps.DashboardEventBroker == nil {
+		deps.DashboardEventBroker = dashboardEventBroker
 	}
 	if deps.CurrentAppTimezone == nil {
 		deps.CurrentAppTimezone = currentAppTimezone
 	}
 	if deps.CurrentAppLocation == nil {
 		deps.CurrentAppLocation = currentAppLocation
+	}
+	if deps.AppTimezoneDisplayName == nil {
+		deps.AppTimezoneDisplayName = currentAppTimezoneDisplayName
+	}
+	if deps.AppTimezoneResolvedName == nil {
+		deps.AppTimezoneResolvedName = currentAppTimezoneResolvedName
 	}
 	return deps
 }

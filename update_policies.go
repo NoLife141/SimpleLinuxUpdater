@@ -657,7 +657,14 @@ func getUpdatePolicy(id int64) (UpdatePolicy, error) {
 }
 
 func createUpdatePolicy(policy UpdatePolicy) (UpdatePolicy, error) {
-	if err := normalizeUpdatePolicy(&policy); err != nil {
+	return createUpdatePolicyWithService(defaultPolicyService(), policy)
+}
+
+func createUpdatePolicyWithService(service *PolicyService, policy UpdatePolicy) (UpdatePolicy, error) {
+	if service == nil {
+		service = defaultPolicyService()
+	}
+	if err := service.NormalizePolicy(&policy); err != nil {
 		return UpdatePolicy{}, wrapUpdatePolicyValidationError(err)
 	}
 	now := jobTimestampNow()
@@ -695,11 +702,18 @@ func createUpdatePolicy(policy UpdatePolicy) (UpdatePolicy, error) {
 }
 
 func updateUpdatePolicy(id int64, policy UpdatePolicy) (UpdatePolicy, error) {
+	return updateUpdatePolicyWithService(defaultPolicyService(), id, policy)
+}
+
+func updateUpdatePolicyWithService(service *PolicyService, id int64, policy UpdatePolicy) (UpdatePolicy, error) {
 	if id <= 0 {
 		return UpdatePolicy{}, sql.ErrNoRows
 	}
 	policy.ID = id
-	if err := normalizeUpdatePolicy(&policy); err != nil {
+	if service == nil {
+		service = defaultPolicyService()
+	}
+	if err := service.NormalizePolicy(&policy); err != nil {
 		return UpdatePolicy{}, wrapUpdatePolicyValidationError(err)
 	}
 	now := jobTimestampNow()
@@ -1270,7 +1284,13 @@ func policyMatchesServer(policy UpdatePolicy, server Server, overrides map[int64
 }
 
 func enrichPoliciesWithMatches(policies []UpdatePolicy) []UpdatePolicy {
-	service := defaultPolicyService()
+	return enrichPoliciesWithMatchesUsing(defaultPolicyService(), policies)
+}
+
+func enrichPoliciesWithMatchesUsing(service *PolicyService, policies []UpdatePolicy) []UpdatePolicy {
+	if service == nil {
+		service = defaultPolicyService()
+	}
 	deps := service.ensureDeps()
 	serversSnapshot := deps.SnapshotServers()
 	overrides, err := deps.LoadOverrides()
@@ -2283,26 +2303,37 @@ func startUpdatePolicyScheduler(ctx context.Context) {
 }
 
 func handleUpdatePoliciesList(c *gin.Context) {
-	policies, err := listUpdatePolicies()
+	handleUpdatePoliciesListWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePoliciesListWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
+	policyDeps := deps.PolicyService.ensureDeps()
+	policies, err := policyDeps.ListPolicies()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load update policies"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"items":             enrichPoliciesWithMatches(policies),
-		"timezone":          currentAppTimezoneDisplayName(),
-		"resolved_timezone": currentAppTimezoneResolvedName(),
+		"items":             enrichPoliciesWithMatchesUsing(deps.PolicyService, policies),
+		"timezone":          deps.AppTimezoneDisplayName(),
+		"resolved_timezone": deps.AppTimezoneResolvedName(),
 	})
 }
 
 func handleUpdatePolicyCreate(c *gin.Context) {
+	handleUpdatePolicyCreateWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePolicyCreateWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
 	var policy UpdatePolicy
 	if err := c.ShouldBindJSON(&policy); err != nil {
 		audit(c, "update_policy.create", "update_policy", "-", "failure", "Invalid request payload", nil)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	created, err := createUpdatePolicy(policy)
+	created, err := createUpdatePolicyWithService(deps.PolicyService, policy)
 	if err != nil {
 		audit(c, "update_policy.create", "update_policy", policy.Name, "failure", "Failed to create policy", map[string]any{"error": err.Error()})
 		statusCode := http.StatusInternalServerError
@@ -2324,6 +2355,11 @@ func handleUpdatePolicyCreate(c *gin.Context) {
 }
 
 func handleUpdatePolicyUpdate(c *gin.Context) {
+	handleUpdatePolicyUpdateWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePolicyUpdateWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
 	id, err := strconv.ParseInt(strings.TrimSpace(c.Param("id")), 10, 64)
 	if err != nil || id <= 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid policy id"})
@@ -2335,7 +2371,7 @@ func handleUpdatePolicyUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	updated, err := updateUpdatePolicy(id, policy)
+	updated, err := updateUpdatePolicyWithService(deps.PolicyService, id, policy)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "policy not found"})
@@ -2374,6 +2410,11 @@ func handleUpdatePolicyDelete(c *gin.Context) {
 }
 
 func handleUpdatePolicyRuns(c *gin.Context) {
+	handleUpdatePolicyRunsWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePolicyRunsWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
 	rawLimit := strings.TrimSpace(c.DefaultQuery("limit", strconv.Itoa(defaultUpdatePolicyRunsLimit)))
 	limit, err := strconv.Atoi(rawLimit)
 	if err != nil || limit <= 0 {
@@ -2388,14 +2429,14 @@ func handleUpdatePolicyRuns(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load policy runs"})
 		return
 	}
-	loc, timezoneName := currentAppTimezone()
+	loc, timezoneName := deps.CurrentAppTimezone()
 	for i := range runs {
 		runs[i].ScheduledForDisplay, _ = formatTimestampForAppDisplayWithTimezone(runs[i].ScheduledForUTC, loc, timezoneName)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"items":             runs,
-		"timezone":          currentAppTimezoneDisplayName(),
-		"resolved_timezone": currentAppTimezoneResolvedName(),
+		"timezone":          deps.AppTimezoneDisplayName(),
+		"resolved_timezone": deps.AppTimezoneResolvedName(),
 	})
 }
 
@@ -2465,19 +2506,29 @@ func handleUpdatePolicyOverrideUpsert(c *gin.Context) {
 }
 
 func handleUpdatePolicySettingsStatus(c *gin.Context) {
+	handleUpdatePolicySettingsStatusWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePolicySettingsStatusWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
 	windows, err := loadGlobalUpdatePolicyBlackouts()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load scheduled update settings"})
 		return
 	}
 	c.JSON(http.StatusOK, UpdatePolicySettingsResponse{
-		Timezone:         currentAppTimezoneDisplayName(),
-		ResolvedTimezone: currentAppTimezoneResolvedName(),
+		Timezone:         deps.AppTimezoneDisplayName(),
+		ResolvedTimezone: deps.AppTimezoneResolvedName(),
 		GlobalBlackouts:  windows,
 	})
 }
 
 func handleUpdatePolicySettingsUpdate(c *gin.Context) {
+	handleUpdatePolicySettingsUpdateWithDeps(c, NewDefaultAppDeps())
+}
+
+func handleUpdatePolicySettingsUpdateWithDeps(c *gin.Context, deps AppDeps) {
+	deps = deps.withDefaults()
 	var req UpdatePolicySettingsResponse
 	if err := c.ShouldBindJSON(&req); err != nil {
 		audit(c, "update_policy.settings", "update_policy", "global", "failure", "Invalid request payload", nil)
@@ -2496,8 +2547,8 @@ func handleUpdatePolicySettingsUpdate(c *gin.Context) {
 	}
 	audit(c, "update_policy.settings", "update_policy", "global", "success", "Scheduled update settings saved", map[string]any{"global_blackout_count": len(normalizedBlackouts)})
 	c.JSON(http.StatusOK, UpdatePolicySettingsResponse{
-		Timezone:         currentAppTimezoneDisplayName(),
-		ResolvedTimezone: currentAppTimezoneResolvedName(),
+		Timezone:         deps.AppTimezoneDisplayName(),
+		ResolvedTimezone: deps.AppTimezoneResolvedName(),
 		GlobalBlackouts:  normalizedBlackouts,
 	})
 }
