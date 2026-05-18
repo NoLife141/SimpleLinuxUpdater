@@ -1870,30 +1870,14 @@ func handleAuditEvents(c *gin.Context) {
 	status := strings.TrimSpace(c.Query("status"))
 	from := strings.TrimSpace(c.Query("from"))
 	to := strings.TrimSpace(c.Query("to"))
-	offset := (page - 1) * pageSize
 
-	var whereParts []string
-	var args []any
-	if targetName != "" {
-		whereParts = append(whereParts, "target_name = ?")
-		args = append(args, targetName)
-	}
-	if action != "" {
-		whereParts = append(whereParts, "action = ?")
-		args = append(args, action)
-	}
-	if status != "" {
-		whereParts = append(whereParts, "status = ?")
-		args = append(args, status)
-	}
 	if from != "" {
 		normalizedFrom, err := normalizeAuditFilterTimestamp(from)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from timestamp; expected RFC3339"})
 			return
 		}
-		whereParts = append(whereParts, "created_at >= ?")
-		args = append(args, normalizedFrom)
+		from = normalizedFrom
 	}
 	if to != "" {
 		normalizedTo, err := normalizeAuditFilterTimestamp(to)
@@ -1901,66 +1885,40 @@ func handleAuditEvents(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid to timestamp; expected RFC3339"})
 			return
 		}
-		whereParts = append(whereParts, "created_at <= ?")
-		args = append(args, normalizedTo)
+		to = normalizedTo
 	}
 
-	whereClause := ""
-	if len(whereParts) > 0 {
-		whereClause = " WHERE " + strings.Join(whereParts, " AND ")
-	}
-
-	db := getDB()
-	countQuery := "SELECT COUNT(*) FROM audit_events" + whereClause
-	var total int
-	if err := db.QueryRow(countQuery, args...).Scan(&total); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count audit events"})
-		return
-	}
-
-	query := `SELECT id, created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip
-			FROM audit_events` + whereClause + ` ORDER BY id DESC LIMIT ? OFFSET ?`
-	queryArgs := append(append([]any{}, args...), pageSize, offset)
-	loc, timezoneName := currentAppTimezone()
-	rows, err := db.Query(query, queryArgs...)
+	result, err := auditService.List(AuditListFilter{
+		Page:       page,
+		PageSize:   pageSize,
+		TargetName: targetName,
+		Action:     action,
+		Status:     status,
+		From:       from,
+		To:         to,
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load audit events"})
-		return
-	}
-	defer rows.Close()
-
-	items := make([]AuditEvent, 0, pageSize)
-	for rows.Next() {
-		var evt AuditEvent
-		if err := rows.Scan(
-			&evt.ID,
-			&evt.CreatedAt,
-			&evt.Actor,
-			&evt.Action,
-			&evt.TargetType,
-			&evt.TargetName,
-			&evt.Status,
-			&evt.Message,
-			&evt.MetaJSON,
-			&evt.RequestID,
-			&evt.ClientIP,
-		); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to parse audit events"})
-			return
+		message := "failed to load audit events"
+		var listErr *AuditListError
+		if errors.As(err, &listErr) {
+			switch listErr.Stage {
+			case "count":
+				message = "failed to count audit events"
+			case "parse":
+				message = "failed to parse audit events"
+			case "iterate":
+				message = "failed to iterate audit events"
+			}
 		}
-		evt.CreatedAtDisplay, _ = formatTimestampForAppDisplayWithTimezone(evt.CreatedAt, loc, timezoneName)
-		items = append(items, evt)
-	}
-	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to iterate audit events"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": message})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"items":     items,
-		"page":      page,
-		"page_size": pageSize,
-		"total":     total,
+		"items":     result.Items,
+		"page":      result.Page,
+		"page_size": result.PageSize,
+		"total":     result.Total,
 	})
 }
 
@@ -3138,74 +3096,8 @@ func clientIPFromContext(c *gin.Context) string {
 	return strings.TrimSpace(c.ClientIP())
 }
 
-func writeAuditEvent(evt AuditEvent) error {
-	db := getDB()
-	_, err := db.Exec(
-		`INSERT INTO audit_events (created_at, actor, action, target_type, target_name, status, message, meta_json, request_id, client_ip)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		evt.CreatedAt,
-		evt.Actor,
-		evt.Action,
-		evt.TargetType,
-		evt.TargetName,
-		evt.Status,
-		evt.Message,
-		evt.MetaJSON,
-		evt.RequestID,
-		evt.ClientIP,
-	)
-	return err
-}
-
-func auditWithActor(actor, clientIP, action, targetType, targetName, status, message string, meta map[string]any) {
-	evt := AuditEvent{
-		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-		Actor:      truncateString(actor, 128),
-		Action:     truncateString(action, 64),
-		TargetType: truncateString(targetType, 64),
-		TargetName: truncateString(targetName, 255),
-		Status:     truncateString(status, 32),
-		Message:    truncateString(message, auditMessageMaxLen),
-		MetaJSON:   sanitizeAuditMeta(meta),
-		RequestID:  "",
-		ClientIP:   truncateString(clientIP, 128),
-	}
-	if evt.Actor == "" {
-		evt.Actor = "unknown"
-	}
-	if evt.TargetName == "" {
-		evt.TargetName = "-"
-	}
-	if err := writeAuditEvent(evt); err != nil {
-		log.Printf("audit write failed: action=%s target=%s err=%v", action, targetName, err)
-		return
-	}
-	notifyDashboardEvent(action)
-}
-
 func audit(c *gin.Context, action, targetType, targetName, status, message string, meta map[string]any) {
 	auditWithActor(actorFromContext(c), clientIPFromContext(c), action, targetType, targetName, status, message, meta)
-}
-
-func pruneAuditEvents(retentionDays int) error {
-	if retentionDays <= 0 {
-		return nil
-	}
-	// Check maintenance before taking backupRestoreMu to avoid unnecessary lock
-	// contention, then re-check after backupRestoreMu.RLock() because maintenance
-	// can become active in the gap between the first currentMaintenanceState()
-	// read and acquiring backupRestoreMu.
-	if currentMaintenanceState().Active {
-		return nil
-	}
-	backupRestoreMu.RLock()
-	defer backupRestoreMu.RUnlock()
-	if currentMaintenanceState().Active {
-		return nil
-	}
-	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
-	_, err := getDB().Exec("DELETE FROM audit_events WHERE created_at < ?", cutoff)
-	return err
 }
 
 func startAuditPruner(ctx context.Context) {
