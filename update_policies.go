@@ -570,6 +570,7 @@ func (s *PolicyService) NormalizePolicy(policy *UpdatePolicy) error {
 	return nil
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy call sites.
 func normalizeUpdatePolicy(policy *UpdatePolicy) error {
 	return defaultPolicyService().NormalizePolicy(policy)
 }
@@ -701,6 +702,7 @@ func createUpdatePolicyWithService(service *PolicyService, policy UpdatePolicy) 
 	return getUpdatePolicy(id)
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy call sites.
 func updateUpdatePolicy(id int64, policy UpdatePolicy) (UpdatePolicy, error) {
 	return updateUpdatePolicyWithService(defaultPolicyService(), id, policy)
 }
@@ -1283,6 +1285,7 @@ func policyMatchesServer(policy UpdatePolicy, server Server, overrides map[int64
 	return defaultPolicyService().PolicyMatchesServer(policy, server, PolicyMatchContext{Overrides: overrides})
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy call sites.
 func enrichPoliciesWithMatches(policies []UpdatePolicy) []UpdatePolicy {
 	return enrichPoliciesWithMatchesUsing(defaultPolicyService(), policies)
 }
@@ -1436,6 +1439,7 @@ func (s *PolicyService) CandidatePriority(policy UpdatePolicy) [3]int {
 	return [3]int{modeRank, scopeRank, int(policy.ID)}
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy scheduler tests.
 func candidatePriority(policy UpdatePolicy) [3]int {
 	return defaultPolicyService().CandidatePriority(policy)
 }
@@ -1496,6 +1500,7 @@ func (s *PolicyService) CreateSkippedRun(policy UpdatePolicy, serverName, schedu
 	)
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy scheduler tests.
 func createSkippedPolicyRun(policy UpdatePolicy, serverName, scheduledForUTC, reason, summary string) {
 	defaultPolicyService().CreateSkippedRun(policy, serverName, scheduledForUTC, reason, summary)
 }
@@ -2126,6 +2131,7 @@ func (s *PolicyService) RememberMissedTick(now time.Time) {
 	updatePolicyMissedTicks[key] = slotUTC
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional missed-tick tests.
 func rememberMissedUpdatePolicyTick(now time.Time) {
 	defaultPolicyService().RememberMissedTick(now)
 }
@@ -2143,6 +2149,7 @@ func (s *PolicyService) PendingMissedTicks() []time.Time {
 	return ticks
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional missed-tick tests.
 func pendingMissedUpdatePolicyTicks() []time.Time {
 	return defaultPolicyService().PendingMissedTicks()
 }
@@ -2153,6 +2160,7 @@ func (s *PolicyService) ForgetMissedTick(tick time.Time) {
 	delete(updatePolicyMissedTicks, missedUpdatePolicyTickKey(tick))
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional missed-tick tests.
 func forgetMissedUpdatePolicyTick(tick time.Time) {
 	defaultPolicyService().ForgetMissedTick(tick)
 }
@@ -2271,6 +2279,7 @@ func (s *PolicyService) ProcessDueSlot(req PolicyScheduleRequest) error {
 	return nil
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional policy scheduler tests.
 func processDueUpdatePolicySlot(now time.Time, maintenanceActive bool) error {
 	return defaultPolicyService().ProcessDueSlot(PolicyScheduleRequest{Now: now, MaintenanceActive: maintenanceActive})
 }
@@ -2302,6 +2311,7 @@ func startUpdatePolicyScheduler(ctx context.Context) {
 	defaultPolicyService().StartScheduler(ctx, PolicySchedulerOptions{})
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePoliciesList(c *gin.Context) {
 	handleUpdatePoliciesListWithDeps(c, NewDefaultAppDeps())
 }
@@ -2321,6 +2331,7 @@ func handleUpdatePoliciesListWithDeps(c *gin.Context, deps AppDeps) {
 	})
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePolicyCreate(c *gin.Context) {
 	handleUpdatePolicyCreateWithDeps(c, NewDefaultAppDeps())
 }
@@ -2354,6 +2365,7 @@ func handleUpdatePolicyCreateWithDeps(c *gin.Context, deps AppDeps) {
 	c.JSON(http.StatusCreated, created)
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePolicyUpdate(c *gin.Context) {
 	handleUpdatePolicyUpdateWithDeps(c, NewDefaultAppDeps())
 }
@@ -2409,6 +2421,7 @@ func handleUpdatePolicyDelete(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "policy deleted"})
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePolicyRuns(c *gin.Context) {
 	handleUpdatePolicyRunsWithDeps(c, NewDefaultAppDeps())
 }
@@ -2505,6 +2518,7 @@ func handleUpdatePolicyOverrideUpsert(c *gin.Context) {
 	c.JSON(http.StatusOK, override)
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePolicySettingsStatus(c *gin.Context) {
 	handleUpdatePolicySettingsStatusWithDeps(c, NewDefaultAppDeps())
 }
@@ -2523,6 +2537,7 @@ func handleUpdatePolicySettingsStatusWithDeps(c *gin.Context, deps AppDeps) {
 	})
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleUpdatePolicySettingsUpdate(c *gin.Context) {
 	handleUpdatePolicySettingsUpdateWithDeps(c, NewDefaultAppDeps())
 }
