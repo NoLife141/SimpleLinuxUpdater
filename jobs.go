@@ -185,8 +185,15 @@ func markInterruptedServersIdle(serverNames []string) {
 }
 
 func startJobRunner(jobID string, run func()) {
+	startJobRunnerWithManager(currentJobManager, jobID, run)
+}
+
+func startJobRunnerWithManager(current func() *JobManager, jobID string, run func()) {
+	if current == nil {
+		current = currentJobManager
+	}
 	startTrackedActionRunner(func() {
-		jm := currentJobManager()
+		jm := current()
 		if jm != nil && strings.TrimSpace(jobID) != "" {
 			now := jobTimestampNow()
 			status := jobStatusRunning
@@ -200,7 +207,7 @@ func startJobRunner(jobID string, run func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				log.Printf("job runner panic for job %q: %v", jobID, recovered)
-				if jm := currentJobManager(); jm != nil && strings.TrimSpace(jobID) != "" {
+				if jm := current(); jm != nil && strings.TrimSpace(jobID) != "" {
 					status := jobStatusFailed
 					phase := jobPhaseComplete
 					summary := "Runner panicked"

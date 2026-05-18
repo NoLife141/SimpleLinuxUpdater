@@ -8,28 +8,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestRegisterRoutesInventory(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	preserveDBState(t)
-	preserveSessionState(t)
-	preserveRateLimiterState(t)
-	preserveMetricsTokenState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "route-registry.db"))
+type routeInventoryEntry struct {
+	method string
+	path   string
+}
 
-	router, err := setupRouter()
-	if err != nil {
-		t.Fatalf("setupRouter() unexpected error: %v", err)
-	}
-
-	registered := make(map[string]bool)
-	for _, route := range router.Routes() {
-		registered[route.Method+" "+route.Path] = true
-	}
-
-	expected := []struct {
-		method string
-		path   string
-	}{
+func criticalRouteInventory() []routeInventoryEntry {
+	return []routeInventoryEntry{
 		{http.MethodGet, "/setup"},
 		{http.MethodGet, "/login"},
 		{http.MethodPost, "/api/auth/setup"},
@@ -91,7 +76,27 @@ func TestRegisterRoutesInventory(t *testing.T) {
 		{http.MethodPost, "/api/approve-security/:name"},
 		{http.MethodPost, "/api/cancel/:name"},
 	}
+}
 
+func TestRegisterRoutesInventory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	preserveDBState(t)
+	preserveSessionState(t)
+	preserveRateLimiterState(t)
+	preserveMetricsTokenState(t)
+	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "route-registry.db"))
+
+	router, err := setupRouter()
+	if err != nil {
+		t.Fatalf("setupRouter() unexpected error: %v", err)
+	}
+
+	registered := make(map[string]bool)
+	for _, route := range router.Routes() {
+		registered[route.Method+" "+route.Path] = true
+	}
+
+	expected := criticalRouteInventory()
 	for _, route := range expected {
 		key := route.method + " " + route.path
 		if !registered[key] {

@@ -20,24 +20,8 @@ import (
 
 func setupAuthenticatedHandler(t *testing.T, dbFile string) (http.Handler, *http.Cookie) {
 	t.Helper()
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", dbFile)
-
-	r, err := setupRouter()
-	if err != nil {
-		t.Fatalf("setupRouter() unexpected error: %v", err)
-	}
-	handler := sessionManager.LoadAndSave(r)
-
-	setupBody := bytes.NewBufferString(`{"username":"admin","password":"` + testPasswordStrong + `"}`)
-	setupRec := httptest.NewRecorder()
-	setupReq := httptest.NewRequest(http.MethodPost, "/api/auth/setup", setupBody)
-	markSameOriginAuthRequest(setupReq)
-	setupReq.Header.Set("Content-Type", "application/json")
-	handler.ServeHTTP(setupRec, setupReq)
-	if setupRec.Code != http.StatusOK {
-		t.Fatalf("setup status = %d, want %d (body=%s)", setupRec.Code, http.StatusOK, setupRec.Body.String())
-	}
-	return handler, testSessionCookieFromRecorder(t, setupRec)
+	app := newTestAppWithDB(t, dbFile)
+	return app.Handler, app.authenticate(t)
 }
 
 func TestAPIServersReturnsEmptyArrayOnFreshInstall(t *testing.T) {

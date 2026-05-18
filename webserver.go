@@ -3339,7 +3339,10 @@ func rejectGlobalKeyMutationIfServerActionsActive(c *gin.Context, action string)
 }
 
 func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
-	jm := currentJobManager()
+	return createServerActionJobWithManager(currentJobManager(), kind, serverName, actor, clientIP, policy)
+}
+
+func createServerActionJobWithManager(jm *JobManager, kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
 	if jm == nil {
 		return JobRecord{}, errors.New("job manager is not initialized")
 	}
@@ -5416,46 +5419,46 @@ func trustedProxiesFromEnv() []string {
 }
 
 func setupRouter() (*gin.Engine, error) {
+	return setupRouterWithDeps(NewDefaultAppDeps())
+}
+
+func setupRouterWithDeps(deps AppDeps) (*gin.Engine, error) {
+	deps = deps.withDefaults()
 	r := gin.Default()
-	if err := r.SetTrustedProxies(trustedProxiesFromEnv()); err != nil {
+	if err := r.SetTrustedProxies(deps.TrustedProxies()); err != nil {
 		return nil, fmt.Errorf("failed to configure trusted proxies: %w", err)
 	}
 	r.Use(securityHeadersMiddleware())
 	r.Use(backupRestoreBarrierMiddleware())
-	if err := initializeMaintenanceState(); err != nil {
+	if err := deps.InitializeMaintenanceState(); err != nil {
 		return nil, fmt.Errorf("failed to initialize maintenance state: %w", err)
 	}
-	if err := initializeJobManager(); err != nil {
+	if err := deps.initializeJobManager(); err != nil {
 		return nil, fmt.Errorf("failed to initialize job manager: %w", err)
 	}
-	sm, err := newSessionManager(getDB())
-	if err != nil {
+	if err := deps.initializeSessionManager(); err != nil {
 		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
 	}
-	sessionManagerMu.Lock()
-	sessionManager = sm
-	sessionManagerMu.Unlock()
 
 	r.LoadHTMLGlob("templates/*")
 	r.Static("/static", "./static")
 
-	if err := registerRoutes(r, AppDeps{}); err != nil {
+	if err := registerRoutes(r, deps); err != nil {
 		return nil, err
 	}
 
 	return r, nil
 }
 
-type AppDeps struct{}
-
 func registerRoutes(r *gin.Engine, deps AppDeps) error {
+	deps = deps.withDefaults()
 	registerPublicRoutes(r)
 	r.Use(authGateMiddleware())
 	r.Use(sameOriginWriteMiddleware())
 	registerProtectedPageRoutes(r)
 	registerProtectedAuthAndSettingsRoutes(r)
 	registerPolicyAuditObservabilityRoutes(r)
-	registerServerAndActionRoutes(r)
+	registerServerAndActionRoutes(r, deps)
 	return nil
 }
 
@@ -5535,9 +5538,17 @@ func registerPolicyAuditObservabilityRoutes(r *gin.Engine) {
 	})
 }
 
-func registerServerAndActionRoutes(r *gin.Engine) {
+func registerServerAndActionRoutes(r *gin.Engine, deps AppDeps) {
+	deps = deps.withDefaults()
+	inventoryService := deps.ServerInventoryService
+	updateService := deps.UpdateService
+	actionJobManager := deps.CurrentJobManager
+	if updateService != nil {
+		actionJobManager = updateService.ensureDeps().CurrentJobManager
+	}
+
 	r.GET("/api/servers", func(c *gin.Context) {
-		c.JSON(http.StatusOK, serverInventoryService.ListStatuses())
+		c.JSON(http.StatusOK, inventoryService.ListStatuses())
 	})
 
 	r.POST("/api/servers", func(c *gin.Context) {
@@ -5547,7 +5558,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		created, err := serverInventoryService.Create(newServer)
+		created, err := inventoryService.Create(newServer)
 		switch {
 		case err == nil:
 			audit(c, "server.create", "server", created.Name, "success", "Server created", map[string]any{"host": created.Host, "port": created.Port, "tags_count": len(created.Tags)})
@@ -5585,7 +5596,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		updated, err := serverInventoryService.Update(name, updatedServer)
+		updated, err := inventoryService.Update(name, updatedServer)
 		switch {
 		case err == nil:
 			audit(c, "server.update", "server", updated.Name, "success", "Server updated", map[string]any{"from": name, "host": updated.Host, "port": updated.Port, "tags_count": len(updated.Tags)})
@@ -5618,7 +5629,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 
 	r.DELETE("/api/servers/:name", func(c *gin.Context) {
 		name := c.Param("name")
-		err := serverInventoryService.Delete(name)
+		err := inventoryService.Delete(name)
 		switch {
 		case err == nil:
 			audit(c, "server.delete", "server", name, "success", "Server deleted", nil)
@@ -5637,7 +5648,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 
 	r.DELETE("/api/servers/:name/password", func(c *gin.Context) {
 		name := c.Param("name")
-		err := serverInventoryService.ClearPassword(name)
+		err := inventoryService.ClearPassword(name)
 		switch {
 		case err == nil:
 			audit(c, "server.password.clear", "server", name, "success", "Password cleared", nil)
@@ -5657,7 +5668,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 	r.POST("/api/servers/:name/key", func(c *gin.Context) {
 		name := c.Param("name")
 		limitUploadedKeyRequest(c)
-		if err := serverInventoryService.CheckMutationAllowed(name); errors.Is(err, errServerNotFound) {
+		if err := inventoryService.CheckMutationAllowed(name); errors.Is(err, errServerNotFound) {
 			audit(c, "server.key.upload", "server", name, "failure", "Server not found", nil)
 			c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 			return
@@ -5696,7 +5707,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read key"})
 			return
 		}
-		err = serverInventoryService.SetKey(name, key)
+		err = inventoryService.SetKey(name, key)
 		switch {
 		case err == nil:
 			audit(c, "server.key.upload", "server", name, "success", "SSH key uploaded", nil)
@@ -5715,7 +5726,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 
 	r.DELETE("/api/servers/:name/key", func(c *gin.Context) {
 		name := c.Param("name")
-		err := serverInventoryService.ClearKey(name)
+		err := inventoryService.ClearKey(name)
 		switch {
 		case err == nil:
 			audit(c, "server.key.clear", "server", name, "success", "SSH key cleared", nil)
@@ -5819,7 +5830,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			return
 		}
 		port := normalizePort(req.Port)
-		result, err := serverInventoryService.ScanHostKey(host, port)
+		result, err := inventoryService.ScanHostKey(host, port)
 		if err != nil {
 			audit(c, "hostkey.scan", "hostkey", host, "failure", "Host key scan failed", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to scan host key: %v", err)})
@@ -5860,7 +5871,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			return
 		}
 		port := normalizePort(req.Port)
-		result, err := serverInventoryService.TrustHostKey(host, port, expectedFingerprint)
+		result, err := inventoryService.TrustHostKey(host, port, expectedFingerprint)
 		if err != nil {
 			if errors.Is(err, errFingerprintMismatch) {
 				audit(c, "hostkey.trust", "hostkey", host, "failure", "Host key fingerprint mismatch", map[string]any{"port": port})
@@ -5899,7 +5910,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			return
 		}
 		port := normalizePort(req.Port)
-		result, err := serverInventoryService.ClearKnownHost(host, port)
+		result, err := inventoryService.ClearKnownHost(host, port)
 		if err != nil {
 			audit(c, "hostkey.clear", "hostkey", host, "failure", "Failed to clear host key entry", map[string]any{"port": port, "error": err.Error()})
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clear host key: %v", err)})
@@ -5945,7 +5956,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start update"})
 			return
 		}
-		job, err := createServerActionJob(jobKindUpdate, name, actor, ip, retryPolicy)
+		job, err := createServerActionJobWithManager(actionJobManager(), jobKindUpdate, name, actor, ip, retryPolicy)
 		if err != nil {
 			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
@@ -5957,7 +5968,15 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create update job"})
 			return
 		}
-		startUpdateRunner(server, actor, ip, retryPolicy, job.ID)
+		startJobRunnerWithManager(actionJobManager, job.ID, func() {
+			updateService.RunUpdateJob(UpdateRunRequest{
+				Server:   server,
+				Actor:    actor,
+				ClientIP: ip,
+				Policy:   retryPolicy,
+				JobID:    job.ID,
+			})
+		})
 		audit(c, "update.start", "server", name, "started", "Update started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Update started", "job_id": job.ID})
 	})
@@ -5993,7 +6012,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start autoremove"})
 			return
 		}
-		job, err := createServerActionJob(jobKindAutoremove, name, actor, ip, retryPolicy)
+		job, err := createServerActionJobWithManager(actionJobManager(), jobKindAutoremove, name, actor, ip, retryPolicy)
 		if err != nil {
 			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
@@ -6005,8 +6024,14 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create autoremove job"})
 			return
 		}
-		startJobRunner(job.ID, func() {
-			runAutoremoveJobWithActor(server, actor, ip, retryPolicy, job.ID)
+		startJobRunnerWithManager(actionJobManager, job.ID, func() {
+			updateService.RunAutoremoveJob(AutoremoveRunRequest{
+				Server:   server,
+				Actor:    actor,
+				ClientIP: ip,
+				Policy:   retryPolicy,
+				JobID:    job.ID,
+			})
 		})
 		audit(c, "autoremove.start", "server", name, "started", "Autoremove started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Autoremove started", "job_id": job.ID})
@@ -6056,7 +6081,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers setup"})
 			return
 		}
-		job, err := createServerActionJob(jobKindSudoersEnable, name, actor, ip, retryPolicy)
+		job, err := createServerActionJobWithManager(actionJobManager(), jobKindSudoersEnable, name, actor, ip, retryPolicy)
 		if err != nil {
 			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
@@ -6068,8 +6093,15 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sudoers job"})
 			return
 		}
-		startJobRunner(job.ID, func() {
-			runSudoersBootstrapJobWithActor(server, req.Password, actor, ip, retryPolicy, job.ID)
+		startJobRunnerWithManager(actionJobManager, job.ID, func() {
+			updateService.RunSudoersBootstrapJob(SudoersRunRequest{
+				Server:       server,
+				SudoPassword: req.Password,
+				Actor:        actor,
+				ClientIP:     ip,
+				Policy:       retryPolicy,
+				JobID:        job.ID,
+			})
 		})
 		audit(c, "sudoers.enable.start", "server", name, "started", "Sudoers setup started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers setup started", "job_id": job.ID})
@@ -6119,7 +6151,7 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start sudoers disable"})
 			return
 		}
-		job, err := createServerActionJob(jobKindSudoersDisable, name, actor, ip, retryPolicy)
+		job, err := createServerActionJobWithManager(actionJobManager(), jobKindSudoersDisable, name, actor, ip, retryPolicy)
 		if err != nil {
 			restoreStatusSnapshot(name, preStartStatus)
 			if errors.Is(err, errMaintenanceModeActive) {
@@ -6131,8 +6163,15 @@ func registerServerAndActionRoutes(r *gin.Engine) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create sudoers disable job"})
 			return
 		}
-		startJobRunner(job.ID, func() {
-			runSudoersDisableJobWithActor(server, req.Password, actor, ip, retryPolicy, job.ID)
+		startJobRunnerWithManager(actionJobManager, job.ID, func() {
+			updateService.RunSudoersDisableJob(SudoersRunRequest{
+				Server:       server,
+				SudoPassword: req.Password,
+				Actor:        actor,
+				ClientIP:     ip,
+				Policy:       retryPolicy,
+				JobID:        job.ID,
+			})
 		})
 		audit(c, "sudoers.disable.start", "server", name, "started", "Sudoers disable started", retryMeta)
 		c.JSON(http.StatusOK, gin.H{"message": "Sudoers disable started", "job_id": job.ID})
