@@ -1,56 +1,63 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
+
+	authpkg "debian-updater/internal/auth"
 
 	"github.com/alexedwards/argon2id"
-	"github.com/alexedwards/scs/sqlite3store"
 	"github.com/alexedwards/scs/v2"
 	"github.com/gin-gonic/gin"
 )
 
 const (
-	sessionCookieSecureEnv        = "DEBIAN_UPDATER_SESSION_COOKIE_SECURE"
-	sessionIdleTimeoutHoursEnv    = "DEBIAN_UPDATER_SESSION_IDLE_TIMEOUT_HOURS"
-	authSessionUserKey            = "auth_user"
-	authUserID                    = 1
-	authMinPasswordLen            = 10
-	authMaxPasswordLen            = 64
-	authMaxRequestBytes           = 8 * 1024
-	authLoginRateLimitMaxAttempts = 10
-	authPasswordChangeMaxAttempts = 5
-	authSetupRateLimitMaxAttempts = 5
-	metricsRateLimitMaxAttempts   = 120
-	authRateLimitWindow           = 10 * time.Minute
-	metricsRateLimitWindow        = time.Minute
-	defaultSessionLifetime        = 30 * 24 * time.Hour
+	sessionCookieSecureEnv        = authpkg.SessionCookieSecureEnv
+	sessionIdleTimeoutHoursEnv    = authpkg.SessionIdleTimeoutHoursEnv
+	authSessionUserKey            = authpkg.SessionUserKey
+	authUserID                    = authpkg.UserID
+	authMinPasswordLen            = authpkg.MinPasswordLen
+	authMaxPasswordLen            = authpkg.MaxPasswordLen
+	authMaxRequestBytes           = authpkg.MaxRequestBytes
+	authLoginRateLimitMaxAttempts = authpkg.LoginRateLimitMaxAttempts
+	authPasswordChangeMaxAttempts = authpkg.PasswordChangeMaxAttempts
+	authSetupRateLimitMaxAttempts = authpkg.SetupRateLimitMaxAttempts
+	metricsRateLimitMaxAttempts   = authpkg.MetricsRateLimitMaxAttempts
+	authRateLimitWindow           = authpkg.RateLimitWindow
+	metricsRateLimitWindow        = authpkg.MetricsRateLimitWindow
+	defaultSessionLifetime        = authpkg.DefaultSessionLifetime
 )
 
 var sessionManager *scs.SessionManager
 var sessionManagerMu sync.RWMutex
 
 var (
-	errSetupAlreadyCompleted = errors.New("setup already completed")
-	errSetupRequired         = errors.New("setup required")
-	errAuthPasswordMismatch  = errors.New("password confirmation does not match")
+	errSetupAlreadyCompleted = authpkg.ErrSetupAlreadyCompleted
+	errSetupRequired         = authpkg.ErrSetupRequired
+	errAuthPasswordMismatch  = authpkg.ErrPasswordMismatch
 )
 
-type AuthRateBucket struct {
-	attempts  int
-	windowEnd time.Time
+type AuthService = authpkg.Service
+type AuthRateLimiter = authpkg.RateLimiter
+type AuthRateBucket = authpkg.RateBucket
+type AuthCredentialsRequest = authpkg.CredentialsRequest
+type AuthPasswordChangeRequest = authpkg.PasswordChangeRequest
+
+var authService = NewAuthService(getDB)
+
+func NewAuthService(db authpkg.DBProvider) *AuthService {
+	return authpkg.NewService(authpkg.ServiceOptions{DB: db})
+}
+
+func NewAuthRateLimiter(window time.Duration, max int) *AuthRateLimiter {
+	return authpkg.NewRateLimiter(window, max)
 }
 
 func limitAuthRequestBody(c *gin.Context) {
@@ -65,137 +72,79 @@ func authRequestBodyTooLarge(err error) bool {
 	return errors.As(err, &maxBytesErr)
 }
 
-type AuthRateLimiter struct {
-	mu      sync.Mutex
-	window  time.Duration
-	max     int
-	buckets map[string]AuthRateBucket
-	stopCh  chan struct{}
-	doneCh  chan struct{}
-	stopMu  sync.Mutex
-	stopped bool
-}
-
-func NewAuthRateLimiter(window time.Duration, max int) *AuthRateLimiter {
-	if window <= 0 {
-		window = authRateLimitWindow
-	}
-	limiter := &AuthRateLimiter{
-		window:  window,
-		max:     max,
-		buckets: make(map[string]AuthRateBucket),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
-	}
-	cleanupInterval := window / 2
-	if cleanupInterval < time.Minute {
-		cleanupInterval = time.Minute
-	}
-	go limiter.cleanupWorker(cleanupInterval)
-	return limiter
-}
-
-func (l *AuthRateLimiter) cleanupExpiredLocked(now time.Time) {
-	for key, bucket := range l.buckets {
-		if now.After(bucket.windowEnd) {
-			delete(l.buckets, key)
-		}
-	}
-}
-
-func (l *AuthRateLimiter) cleanupWorker(interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	defer close(l.doneCh)
-	for {
-		select {
-		case <-l.stopCh:
-			return
-		case now := <-ticker.C:
-			l.mu.Lock()
-			l.cleanupExpiredLocked(now)
-			l.mu.Unlock()
-		}
-	}
-}
-
-func (l *AuthRateLimiter) Stop() {
-	l.stopMu.Lock()
-	if l.stopped {
-		l.stopMu.Unlock()
-		return
-	}
-	l.stopped = true
-	close(l.stopCh)
-	l.stopMu.Unlock()
-	<-l.doneCh
-}
-
-func (l *AuthRateLimiter) allow(key string) bool {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	bucket, ok := l.buckets[key]
-	if ok && now.After(bucket.windowEnd) {
-		delete(l.buckets, key)
-		ok = false
-	}
-	if !ok {
-		l.buckets[key] = AuthRateBucket{
-			attempts:  1,
-			windowEnd: now.Add(l.window),
-		}
-		return true
-	}
-	if bucket.attempts >= l.max {
-		return false
-	}
-	bucket.attempts++
-	l.buckets[key] = bucket
-	return true
-}
-
-func (l *AuthRateLimiter) limited(key string) bool {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	bucket, ok := l.buckets[key]
-	if ok && now.After(bucket.windowEnd) {
-		delete(l.buckets, key)
-		return false
-	}
-	return ok && bucket.attempts >= l.max
-}
-
-func (l *AuthRateLimiter) recordFailure(key string) {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	bucket, ok := l.buckets[key]
-	if ok && now.After(bucket.windowEnd) {
-		delete(l.buckets, key)
-		ok = false
-	}
-	if !ok {
-		l.buckets[key] = AuthRateBucket{
-			attempts:  1,
-			windowEnd: now.Add(l.window),
-		}
-		return
-	}
-	bucket.attempts++
-	l.buckets[key] = bucket
-}
-
 var (
 	loginRateLimiter          = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
 	passwordChangeRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
 	setupRateLimiter          = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
 	metricsRateLimiter        = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
 )
+
+const authRuntimeDepsContextKey = "auth_runtime_deps"
+
+type authRuntimeDeps struct {
+	service                   *AuthService
+	loginRateLimiter          *AuthRateLimiter
+	passwordChangeRateLimiter *AuthRateLimiter
+	setupRateLimiter          *AuthRateLimiter
+}
+
+func authRuntimeMiddleware(deps AppDeps) gin.HandlerFunc {
+	deps = deps.withDefaults()
+	runtime := authRuntimeDeps{
+		service:                   deps.AuthService,
+		loginRateLimiter:          deps.LoginRateLimiter,
+		passwordChangeRateLimiter: deps.PasswordChangeRateLimiter,
+		setupRateLimiter:          deps.SetupRateLimiter,
+	}
+	return func(c *gin.Context) {
+		c.Set(authRuntimeDepsContextKey, runtime)
+		c.Next()
+	}
+}
+
+func authRuntimeFromContext(c *gin.Context) (authRuntimeDeps, bool) {
+	if c == nil {
+		return authRuntimeDeps{}, false
+	}
+	value, ok := c.Get(authRuntimeDepsContextKey)
+	if !ok {
+		return authRuntimeDeps{}, false
+	}
+	runtime, ok := value.(authRuntimeDeps)
+	return runtime, ok
+}
+
+func authServiceForContext(c *gin.Context) *AuthService {
+	if runtime, ok := authRuntimeFromContext(c); ok && runtime.service != nil {
+		return runtime.service
+	}
+	return authService
+}
+
+func sessionManagerForContext(c *gin.Context) *scs.SessionManager {
+	return currentSessionManager()
+}
+
+func loginRateLimiterForContext(c *gin.Context) *AuthRateLimiter {
+	if runtime, ok := authRuntimeFromContext(c); ok && runtime.loginRateLimiter != nil {
+		return runtime.loginRateLimiter
+	}
+	return loginRateLimiter
+}
+
+func passwordChangeRateLimiterForContext(c *gin.Context) *AuthRateLimiter {
+	if runtime, ok := authRuntimeFromContext(c); ok && runtime.passwordChangeRateLimiter != nil {
+		return runtime.passwordChangeRateLimiter
+	}
+	return passwordChangeRateLimiter
+}
+
+func setupRateLimiterForContext(c *gin.Context) *AuthRateLimiter {
+	if runtime, ok := authRuntimeFromContext(c); ok && runtime.setupRateLimiter != nil {
+		return runtime.setupRateLimiter
+	}
+	return setupRateLimiter
+}
 
 func StopAuthRateLimiters() {
 	if loginRateLimiter != nil {
@@ -210,17 +159,6 @@ func StopAuthRateLimiters() {
 	if metricsRateLimiter != nil {
 		metricsRateLimiter.Stop()
 	}
-}
-
-type AuthCredentialsRequest struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
-type AuthPasswordChangeRequest struct {
-	CurrentPassword string `json:"current_password"`
-	NewPassword     string `json:"new_password"`
-	ConfirmPassword string `json:"confirm_password"`
 }
 
 func bindAuthCredentialsRequest(c *gin.Context, requirePasswordConfirm bool) (AuthCredentialsRequest, bool, error) {
@@ -255,62 +193,14 @@ func writeAuthFormError(c *gin.Context, status int, message string) {
 	c.String(status, message)
 }
 
-func parseBoolEnv(name string, fallback bool) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return fallback, nil
-	}
-	v, err := strconv.ParseBool(raw)
-	if err != nil {
-		return fallback, fmt.Errorf("%s must be a boolean value: %w", name, err)
-	}
-	return v, nil
-}
-
-func parseSessionIdleTimeout() (time.Duration, error) {
-	raw := strings.TrimSpace(os.Getenv(sessionIdleTimeoutHoursEnv))
-	if raw == "" {
-		return 0, nil
-	}
-	hours, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("%s must be an integer number of hours: %w", sessionIdleTimeoutHoursEnv, err)
-	}
-	if hours < 0 {
-		return 0, fmt.Errorf("%s must be >= 0", sessionIdleTimeoutHoursEnv)
-	}
-	if hours == 0 {
-		return 0, nil
-	}
-	return time.Duration(hours) * time.Hour, nil
-}
-
 func newSessionManager(db *sql.DB) (*scs.SessionManager, error) {
-	secureCookie, err := parseBoolEnv(sessionCookieSecureEnv, false)
-	if err != nil {
-		return nil, err
-	}
-	if !secureCookie {
-		log.Printf("%s=false; session cookie Secure flag is disabled (acceptable for local HTTP only). Set true behind HTTPS.", sessionCookieSecureEnv)
-	}
-	idleTimeout, err := parseSessionIdleTimeout()
-	if err != nil {
-		return nil, err
-	}
-
-	sm := scs.New()
-	sm.Store = sqlite3store.New(db)
-	sm.Lifetime = defaultSessionLifetime
-	sm.Cookie.Name = "simplelinuxupdater_session"
-	sm.Cookie.HttpOnly = true
-	sm.Cookie.SameSite = http.SameSiteLaxMode
-	sm.Cookie.Secure = secureCookie
-	sm.Cookie.Persist = true
-	sm.Cookie.Path = "/"
-	if idleTimeout > 0 {
-		sm.IdleTimeout = idleTimeout
-	}
-	return sm, nil
+	return authpkg.NewSessionManager(db, authpkg.SessionManagerOptions{
+		SecureCookieEnv:     sessionCookieSecureEnv,
+		IdleTimeoutHoursEnv: sessionIdleTimeoutHoursEnv,
+		CookieName:          authpkg.DefaultSessionCookieName,
+		Lifetime:            defaultSessionLifetime,
+		Logf:                log.Printf,
+	})
 }
 
 func sessionHandler(next http.Handler) http.Handler {
@@ -325,189 +215,69 @@ func sessionHandler(next http.Handler) http.Handler {
 }
 
 func setupRequired() (bool, error) {
-	db := getDB()
-	var count int
-	err := db.QueryRow("SELECT COUNT(1) FROM auth_users").Scan(&count)
-	if err != nil {
-		return false, err
-	}
-	return count == 0, nil
+	return authService.SetupRequired()
+}
+
+func setupRequiredForContext(c *gin.Context) (bool, error) {
+	return authServiceForContext(c).SetupRequired()
 }
 
 func getSingleUser() (username, passwordHash string, exists bool, err error) {
-	row := getDB().QueryRow("SELECT username, password_hash FROM auth_users WHERE id = ?", authUserID)
-	err = row.Scan(&username, &passwordHash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	return username, passwordHash, true, nil
+	return authService.GetSingleUser()
 }
 
 func validatePasswordPolicy(password string) error {
-	passwordLen := utf8.RuneCountInString(password)
-	if passwordLen < authMinPasswordLen {
-		return fmt.Errorf("password must be at least %d characters long", authMinPasswordLen)
-	}
-	if passwordLen > authMaxPasswordLen {
-		return fmt.Errorf("password must be %d characters or less", authMaxPasswordLen)
-	}
-	hasLetter := false
-	hasDigit := false
-	for _, r := range password {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-			hasLetter = true
-		}
-		if r >= '0' && r <= '9' {
-			hasDigit = true
-		}
-	}
-	if !hasLetter || !hasDigit {
-		return errors.New("password must include at least one letter and one digit")
-	}
-	return nil
+	return authService.ValidatePasswordPolicy(password)
 }
 
 func validateAuthUsername(username string) error {
-	trimmed := strings.TrimSpace(username)
-	if trimmed == "" {
-		return errors.New("username is required")
-	}
-	if len(trimmed) > 64 {
-		return errors.New("username must be 64 characters or less")
-	}
-	if !isValidSSHUsername(trimmed) {
-		return errors.New("username contains unsupported characters")
-	}
-	return nil
+	return authService.ValidateUsername(username)
 }
 
 func createInitialUser(username, password string) error {
-	username = strings.TrimSpace(username)
-	if err := validateAuthUsername(username); err != nil {
-		return err
-	}
-	if err := validatePasswordPolicy(password); err != nil {
-		return err
-	}
+	return authService.CreateInitialUser(username, password)
+}
 
-	hash, err := argon2id.CreateHash(password, argon2id.DefaultParams)
-	if err != nil {
-		return err
-	}
-
-	db := getDB()
-	tx, err := db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	var count int
-	if err := tx.QueryRow("SELECT COUNT(1) FROM auth_users").Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return errSetupAlreadyCompleted
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := tx.Exec(
-		"INSERT INTO auth_users(id, username, password_hash, created_at, updated_at) VALUES(?, ?, ?, ?, ?)",
-		authUserID, username, hash, now, now,
-	); err != nil {
-		return err
-	}
-	return tx.Commit()
+func createInitialUserForContext(c *gin.Context, username, password string) error {
+	return authServiceForContext(c).CreateInitialUser(username, password)
 }
 
 func authenticateUser(username, password string) (bool, error) {
-	username = strings.TrimSpace(username)
-	if username == "" || password == "" {
-		return false, nil
-	}
-	storedUsername, storedHash, exists, err := getSingleUser()
-	if err != nil {
-		return false, err
-	}
-	if !exists {
-		return false, errSetupRequired
-	}
-	usernameMatch := stringsEqualConstantTime(username, storedUsername)
-	match, err := argon2id.ComparePasswordAndHash(password, storedHash)
-	if err != nil {
-		return false, err
-	}
-	if !usernameMatch {
-		return false, nil
-	}
-	return match, nil
+	return authService.Authenticate(username, password)
 }
 
+func authenticateUserForContext(c *gin.Context, username, password string) (bool, error) {
+	return authServiceForContext(c).Authenticate(username, password)
+}
+
+//lint:ignore U1000 compatibility wrapper retained for transitional call sites.
 func changeSingleUserPassword(currentPassword, newPassword, confirmPassword string) error {
-	if newPassword != confirmPassword {
-		return errAuthPasswordMismatch
-	}
-	storedUsername, _, exists, err := getSingleUser()
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return errSetupRequired
-	}
-	ok, err := authenticateUser(storedUsername, currentPassword)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("current password is invalid")
-	}
-	if err := validatePasswordPolicy(newPassword); err != nil {
-		return err
-	}
-	hash, err := argon2id.CreateHash(newPassword, argon2id.DefaultParams)
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = getDB().Exec(
-		"UPDATE auth_users SET password_hash = ?, updated_at = ? WHERE id = ?",
-		hash,
-		now,
-		authUserID,
-	)
-	return err
+	return authService.ChangePassword(currentPassword, newPassword, confirmPassword)
+}
+
+func changeSingleUserPasswordForContext(c *gin.Context, currentPassword, newPassword, confirmPassword string) error {
+	return authServiceForContext(c).ChangePassword(currentPassword, newPassword, confirmPassword)
 }
 
 func countStoredSessions() (int, error) {
-	var count int
-	err := getDB().QueryRow("SELECT COUNT(1) FROM sessions").Scan(&count)
-	return count, err
+	return authService.CountSessions()
 }
 
+func countStoredSessionsForContext(c *gin.Context) (int, error) {
+	return authServiceForContext(c).CountSessions()
+}
+
+//lint:ignore U1000 compatibility wrapper retained for transitional call sites.
 func clearStoredSessions() (int64, error) {
-	result, err := getDB().Exec("DELETE FROM sessions")
-	if err != nil {
-		return 0, err
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return 0, nil
-	}
-	return rows, nil
+	return authService.ClearSessions()
+}
+
+func clearStoredSessionsForContext(c *gin.Context) (int64, error) {
+	return authServiceForContext(c).ClearSessions()
 }
 
 func sessionUsername(c *gin.Context) string {
-	if c == nil {
-		return ""
-	}
-	sm := currentSessionManager()
-	if sm == nil {
-		return ""
-	}
-	return strings.TrimSpace(sm.GetString(c.Request.Context(), authSessionUserKey))
+	return authpkg.SessionUsername(c, sessionManagerForContext(c))
 }
 
 func currentSessionManager() *scs.SessionManager {
@@ -530,56 +300,11 @@ func setNoStoreHeaders(c *gin.Context) {
 //	Referer: http://localhost/
 //	Sec-Fetch-Site: same-origin (optional)
 func sameOriginAuthRequest(c *gin.Context) bool {
-	if c == nil || c.Request == nil {
-		return false
-	}
-	host := strings.ToLower(strings.TrimSpace(c.Request.Host))
-	if host == "" {
-		return false
-	}
-	origin := strings.TrimSpace(c.GetHeader("Origin"))
-	if origin != "" {
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		if !stringsEqualConstantTime(strings.ToLower(u.Host), host) {
-			return false
-		}
-	}
-	referer := strings.TrimSpace(c.GetHeader("Referer"))
-	if referer != "" {
-		u, err := url.Parse(referer)
-		if err != nil {
-			return false
-		}
-		if !stringsEqualConstantTime(strings.ToLower(u.Host), host) {
-			return false
-		}
-	}
-	if origin == "" && referer == "" {
-		return false
-	}
-	secFetchSite := strings.ToLower(strings.TrimSpace(c.GetHeader("Sec-Fetch-Site")))
-	if secFetchSite != "" && secFetchSite != "same-origin" && secFetchSite != "same-site" {
-		return false
-	}
-	return true
+	return authpkg.SameOriginRequest(c)
 }
 
 func sameOriginWriteMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		switch c.Request.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-			c.Next()
-			return
-		}
-		if !sameOriginAuthRequest(c) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross-site write request denied"})
-			return
-		}
-		c.Next()
-	}
+	return authpkg.SameOriginWriteMiddleware()
 }
 
 func backupRestoreBarrierMiddleware() gin.HandlerFunc {
@@ -652,7 +377,7 @@ func metricsBearerMiddleware() gin.HandlerFunc {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
-		if metricsRateLimiter != nil && !metricsRateLimiter.allow(rateLimitClientIP(c)) {
+		if metricsRateLimiter != nil && !metricsRateLimiter.Allow(rateLimitClientIP(c)) {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many requests"})
 			return
 		}
@@ -688,7 +413,7 @@ func authGateMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		required, err := setupRequired()
+		required, err := setupRequiredForContext(c)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "failed to evaluate auth setup state"})
 			return
@@ -711,7 +436,7 @@ func authGateMiddleware() gin.HandlerFunc {
 
 func handleSetupPage(c *gin.Context) {
 	setNoStoreHeaders(c)
-	required, err := setupRequired()
+	required, err := setupRequiredForContext(c)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "failed to evaluate setup state")
 		return
@@ -729,7 +454,7 @@ func handleSetupPage(c *gin.Context) {
 
 func handleLoginPage(c *gin.Context) {
 	setNoStoreHeaders(c)
-	required, err := setupRequired()
+	required, err := setupRequiredForContext(c)
 	if err != nil {
 		c.String(http.StatusInternalServerError, "failed to evaluate setup state")
 		return
@@ -746,7 +471,7 @@ func handleLoginPage(c *gin.Context) {
 }
 
 func handleAuthStatus(c *gin.Context) {
-	required, err := setupRequired()
+	required, err := setupRequiredForContext(c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to evaluate setup state"})
 		return
@@ -760,7 +485,7 @@ func handleAuthStatus(c *gin.Context) {
 }
 
 func handleAuthSessionsStatus(c *gin.Context) {
-	count, err := countStoredSessions()
+	count, err := countStoredSessionsForContext(c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to count sessions"})
 		return
@@ -771,11 +496,11 @@ func handleAuthSessionsStatus(c *gin.Context) {
 func handleAuthPasswordChange(c *gin.Context) {
 	key := fmt.Sprintf("%s:%s:password-change", rateLimitClientIP(c), sessionUsername(c))
 	recordPasswordChangeFailure := func() {
-		if passwordChangeRateLimiter != nil {
-			passwordChangeRateLimiter.recordFailure(key)
+		if limiter := passwordChangeRateLimiterForContext(c); limiter != nil {
+			limiter.RecordFailure(key)
 		}
 	}
-	if passwordChangeRateLimiter != nil && passwordChangeRateLimiter.limited(key) {
+	if limiter := passwordChangeRateLimiterForContext(c); limiter != nil && limiter.Limited(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many password change attempts"})
 		return
 	}
@@ -795,7 +520,7 @@ func handleAuthPasswordChange(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password and new_password are required"})
 		return
 	}
-	if err := changeSingleUserPassword(req.CurrentPassword, req.NewPassword, req.ConfirmPassword); err != nil {
+	if err := changeSingleUserPasswordForContext(c, req.CurrentPassword, req.NewPassword, req.ConfirmPassword); err != nil {
 		recordPasswordChangeFailure()
 		status := http.StatusBadRequest
 		message := err.Error()
@@ -813,7 +538,7 @@ func handleAuthPasswordChange(c *gin.Context) {
 
 func handleAuthSessionsClear(c *gin.Context) {
 	actor := sessionUsername(c)
-	deleted, err := clearStoredSessions()
+	deleted, err := clearStoredSessionsForContext(c)
 	if err != nil {
 		audit(c, "auth.sessions.clear", "auth_user", actor, "failure", "Failed to clear sessions", map[string]any{"error": err.Error()})
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear sessions"})
@@ -829,11 +554,11 @@ func handleAuthSetup(c *gin.Context) {
 		return
 	}
 	key := fmt.Sprintf("%s:setup", rateLimitClientIP(c))
-	if !setupRateLimiter.allow(key) {
+	if limiter := setupRateLimiterForContext(c); limiter != nil && !limiter.Allow(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many setup attempts"})
 		return
 	}
-	required, err := setupRequired()
+	required, err := setupRequiredForContext(c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to evaluate setup state"})
 		return
@@ -871,7 +596,7 @@ func handleAuthSetup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if err := createInitialUser(username, password); err != nil {
+	if err := createInitialUserForContext(c, username, password); err != nil {
 		switch {
 		case errors.Is(err, errSetupAlreadyCompleted):
 			c.JSON(http.StatusConflict, gin.H{"error": "setup already completed"})
@@ -882,7 +607,7 @@ func handleAuthSetup(c *gin.Context) {
 		return
 	}
 
-	sm := currentSessionManager()
+	sm := sessionManagerForContext(c)
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return
@@ -907,11 +632,11 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 	key := fmt.Sprintf("%s:login", rateLimitClientIP(c))
-	if !loginRateLimiter.allow(key) {
+	if limiter := loginRateLimiterForContext(c); limiter != nil && !limiter.Allow(key) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many login attempts"})
 		return
 	}
-	required, err := setupRequired()
+	required, err := setupRequiredForContext(c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to evaluate setup state"})
 		return
@@ -932,7 +657,7 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 	username := strings.TrimSpace(req.Username)
-	ok, authErr := authenticateUser(username, req.Password)
+	ok, authErr := authenticateUserForContext(c, username, req.Password)
 	if authErr != nil && !errors.Is(authErr, errSetupRequired) {
 		log.Printf("handleAuthLogin: authentication failed for username=%q: %v", username, authErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "authentication failed"})
@@ -944,7 +669,7 @@ func handleAuthLogin(c *gin.Context) {
 		return
 	}
 
-	sm := currentSessionManager()
+	sm := sessionManagerForContext(c)
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return
@@ -969,7 +694,7 @@ func handleAuthLogout(c *gin.Context) {
 		return
 	}
 	actor := sessionUsername(c)
-	sm := currentSessionManager()
+	sm := sessionManagerForContext(c)
 	if sm == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session manager not initialized"})
 		return

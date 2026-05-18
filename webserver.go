@@ -5348,6 +5348,7 @@ func setupRouterWithDeps(deps AppDeps) (*gin.Engine, error) {
 
 func registerRoutes(r *gin.Engine, deps AppDeps) error {
 	deps = deps.withDefaults()
+	r.Use(authRuntimeMiddleware(deps))
 	registerPublicRoutes(r)
 	r.Use(authGateMiddleware())
 	r.Use(sameOriginWriteMiddleware())

@@ -93,6 +93,42 @@ func TestIsolatedTestAppSeparatesDBAndJobManager(t *testing.T) {
 	}
 }
 
+func TestIsolatedTestAppSeparatesAuthRateLimiters(t *testing.T) {
+	appOneLimiter := NewAuthRateLimiter(authRateLimitWindow, 1)
+	t.Cleanup(appOneLimiter.Stop)
+	appTwoLimiter := NewAuthRateLimiter(authRateLimitWindow, 5)
+	t.Cleanup(appTwoLimiter.Stop)
+
+	appOne := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "auth-rate-one.db"), AppDeps{
+		SetupRateLimiter: appOneLimiter,
+	})
+	appTwo := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "auth-rate-two.db"), AppDeps{
+		SetupRateLimiter: appTwoLimiter,
+	})
+
+	firstOne := performInvalidSetupRequest(appOne.Handler)
+	if firstOne.Code != http.StatusBadRequest {
+		t.Fatalf("first app first setup status = %d, want %d (body=%s)", firstOne.Code, http.StatusBadRequest, firstOne.Body.String())
+	}
+	secondOne := performInvalidSetupRequest(appOne.Handler)
+	if secondOne.Code != http.StatusTooManyRequests {
+		t.Fatalf("first app second setup status = %d, want %d (body=%s)", secondOne.Code, http.StatusTooManyRequests, secondOne.Body.String())
+	}
+	firstTwo := performInvalidSetupRequest(appTwo.Handler)
+	if firstTwo.Code != http.StatusBadRequest {
+		t.Fatalf("second app first setup status = %d, want %d (body=%s)", firstTwo.Code, http.StatusBadRequest, firstTwo.Body.String())
+	}
+}
+
+func performInvalidSetupRequest(handler http.Handler) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"","password":"short"}`))
+	markSameOriginAuthRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestSetupRouterWithDepsPreservesRouteInventory(t *testing.T) {
 	app := newIsolatedTestApp(t)
 

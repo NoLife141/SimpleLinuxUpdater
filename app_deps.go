@@ -14,6 +14,7 @@ type AppDeps struct {
 	DB func() *sql.DB
 
 	AuditService           *AuditService
+	AuthService            *AuthService
 	ServerInventoryService *ServerInventoryService
 	PolicyService          *PolicyService
 	UpdateService          *UpdateService
@@ -23,9 +24,12 @@ type AppDeps struct {
 	NewJobManager        func(*sql.DB) *JobManager
 	SetCurrentJobManager func(*JobManager)
 
-	SessionManager    *scs.SessionManager
-	NewSessionManager func(*sql.DB) (*scs.SessionManager, error)
-	SetSessionManager func(*scs.SessionManager)
+	SessionManager            *scs.SessionManager
+	NewSessionManager         func(*sql.DB) (*scs.SessionManager, error)
+	SetSessionManager         func(*scs.SessionManager)
+	LoginRateLimiter          *AuthRateLimiter
+	PasswordChangeRateLimiter *AuthRateLimiter
+	SetupRateLimiter          *AuthRateLimiter
 
 	TrustedProxies             func() []string
 	InitializeMaintenanceState func() error
@@ -48,6 +52,9 @@ func (deps AppDeps) withDefaults() AppDeps {
 	}
 	if deps.AuditService == nil {
 		deps.AuditService = auditService
+	}
+	if deps.AuthService == nil {
+		deps.AuthService = authService
 	}
 	if deps.ServerInventoryService == nil {
 		deps.ServerInventoryService = serverInventoryService
@@ -72,6 +79,15 @@ func (deps AppDeps) withDefaults() AppDeps {
 	}
 	if deps.SetSessionManager == nil {
 		deps.SetSessionManager = setGlobalSessionManager
+	}
+	if deps.LoginRateLimiter == nil {
+		deps.LoginRateLimiter = loginRateLimiter
+	}
+	if deps.PasswordChangeRateLimiter == nil {
+		deps.PasswordChangeRateLimiter = passwordChangeRateLimiter
+	}
+	if deps.SetupRateLimiter == nil {
+		deps.SetupRateLimiter = setupRateLimiter
 	}
 	if deps.TrustedProxies == nil {
 		deps.TrustedProxies = trustedProxiesFromEnv

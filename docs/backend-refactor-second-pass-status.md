@@ -8,7 +8,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 1 - Events Package: complete on `codex/events-package`
 - [x] Phase 2 - Audit Package: complete on `codex/audit-package`
 - [x] Phase 3 - App Shell And Config Package: complete on `codex/app-shell-config`
-- [ ] Phase 4 - Auth Package
+- [x] Phase 4 - Auth Package: complete on `codex/auth-package`
 - [ ] Phase 5 - Backup Package
 - [ ] Phase 6 - Server Inventory Package
 - [ ] Phase 7 - Policy Package
@@ -94,6 +94,25 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 3 because this phase only moves router/app-shell composition behind `internal/app`.
 
+## Phase 4 Validation
+
+Required:
+
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 4 because this phase only moves auth/session behavior behind `internal/auth`.
+
 ## Compatibility Wrappers To Remove Later
 
 These wrappers are intentionally retained after the first pass and are marked with `//lint:ignore U1000`. They should disappear by Phase 11 after package APIs replace all transitional call sites.
@@ -146,8 +165,9 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Auth And Session State
 
+- `internal/auth`: owns auth service logic, auth/session repositories, session manager construction helpers, same-origin helpers, and auth rate limiter implementation.
 - `auth_session.go`: `sessionManager`, `sessionManagerMu`
-- `auth_session.go`: auth/setup/login/password rate limiter state
+- `auth_session.go`: temporary default auth service and auth/setup/login/password rate limiter singletons remain until final app-scoped ownership cleanup.
 
 ### Job State
 
