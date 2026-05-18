@@ -9,7 +9,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 2 - Audit Package: complete on `codex/audit-package`
 - [x] Phase 3 - App Shell And Config Package: complete on `codex/app-shell-config`
 - [x] Phase 4 - Auth Package: complete on `codex/auth-package`
-- [ ] Phase 5 - Backup Package
+- [x] Phase 5 - Backup Package: complete on `codex/backup-package`
 - [ ] Phase 6 - Server Inventory Package
 - [ ] Phase 7 - Policy Package
 - [ ] Phase 8 - Update Package
@@ -113,6 +113,25 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 4 because this phase only moves auth/session behavior behind `internal/auth`.
 
+## Phase 5 Validation
+
+Required:
+
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 5 because this phase only moves backup/export restore behavior behind `internal/backup`.
+
 ## Compatibility Wrappers To Remove Later
 
 These wrappers are intentionally retained after the first pass and are marked with `//lint:ignore U1000`. They should disappear by Phase 11 after package APIs replace all transitional call sites.
@@ -200,8 +219,9 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Backup And Maintenance State
 
+- `internal/backup`: owns backup archive format, export/restore service behavior, and the restore/export barrier implementation.
 - `backup_restore.go`: `backupRestoreMu`
-- `backup_restore.go`: backup/restore runtime state
+- `backup_restore.go`: temporary default backup service/barrier singletons and handler adapters remain until final app-scoped ownership cleanup.
 - `maintenance.go`: maintenance state and lock
 
 ### Dashboard, Observability, And Metrics State

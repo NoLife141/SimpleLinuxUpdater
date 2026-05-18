@@ -164,6 +164,21 @@ func TestSetupRouterWithDepsDefaultsAuthServiceToInjectedDB(t *testing.T) {
 	}
 }
 
+func TestAppDepsDefaultsBackupServiceToFullyWiredSingleton(t *testing.T) {
+	routeDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "route-backup.db"))
+	if err != nil {
+		t.Fatalf("open injected db: %v", err)
+	}
+	t.Cleanup(func() { _ = routeDB.Close() })
+
+	deps := AppDeps{
+		DB: func() *sql.DB { return routeDB },
+	}.withDefaults()
+	if deps.BackupService != backupService {
+		t.Fatalf("default backup service = %p, want fully wired singleton %p", deps.BackupService, backupService)
+	}
+}
+
 func performInvalidSetupRequest(handler http.Handler) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", strings.NewReader(`{"username":"","password":"short"}`))

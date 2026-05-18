@@ -15,6 +15,8 @@ type AppDeps struct {
 
 	AuditService           *AuditService
 	AuthService            *AuthService
+	BackupService          *BackupService
+	BackupBarrier          *BackupBarrier
 	ServerInventoryService *ServerInventoryService
 	PolicyService          *PolicyService
 	UpdateService          *UpdateService
@@ -55,6 +57,12 @@ func (deps AppDeps) withDefaults() AppDeps {
 	}
 	if deps.AuthService == nil {
 		deps.AuthService = NewAuthService(deps.DB)
+	}
+	if deps.BackupService == nil {
+		deps.BackupService = backupService
+	}
+	if deps.BackupBarrier == nil {
+		deps.BackupBarrier = backupRestoreBarrier
 	}
 	if deps.ServerInventoryService == nil {
 		deps.ServerInventoryService = serverInventoryService

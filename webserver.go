@@ -5333,7 +5333,7 @@ func setupRouterWithDeps(deps AppDeps) (*gin.Engine, error) {
 	deps = deps.withDefaults()
 	return appshell.NewRouter(appshell.RouterConfig{
 		TrustedProxies:        deps.TrustedProxies,
-		GlobalMiddleware:      []gin.HandlerFunc{securityHeadersMiddleware(), backupRestoreBarrierMiddleware()},
+		GlobalMiddleware:      []gin.HandlerFunc{securityHeadersMiddleware(), backupRestoreBarrierMiddleware(deps.BackupBarrier)},
 		InitializeMaintenance: deps.InitializeMaintenanceState,
 		InitializeJobs:        deps.initializeJobManager,
 		InitializeSessions:    deps.initializeSessionManager,
@@ -5402,14 +5402,20 @@ func registerProtectedAuthAndSettingsRoutes(r *gin.Engine, deps AppDeps) {
 	r.GET("/api/metrics/token", handleMetricsTokenStatus)
 	r.POST("/api/metrics/token", handleMetricsTokenRotate)
 	r.DELETE("/api/metrics/token", handleMetricsTokenClear)
-	r.GET("/api/backup/status", handleBackupStatus)
+	r.GET("/api/backup/status", func(c *gin.Context) {
+		handleBackupStatusWithService(c, deps.BackupService)
+	})
 	r.GET("/api/dashboard/events", func(c *gin.Context) {
 		handleDashboardEventsWithBroker(c, deps.DashboardEventBroker)
 	})
 	r.GET("/api/app-settings/timezone", handleAppTimezoneStatus)
 	r.PUT("/api/app-settings/timezone", handleAppTimezoneUpdate)
-	r.POST("/api/backup/export", handleBackupExport)
-	r.POST("/api/backup/restore", handleBackupRestore)
+	r.POST("/api/backup/export", func(c *gin.Context) {
+		handleBackupExportWithService(c, deps.BackupService)
+	})
+	r.POST("/api/backup/restore", func(c *gin.Context) {
+		handleBackupRestoreWithService(c, deps.BackupService)
+	})
 }
 
 func registerPolicyAuditObservabilityRoutes(r *gin.Engine, deps AppDeps) {

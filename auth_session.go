@@ -307,7 +307,11 @@ func sameOriginWriteMiddleware() gin.HandlerFunc {
 	return authpkg.SameOriginWriteMiddleware()
 }
 
-func backupRestoreBarrierMiddleware() gin.HandlerFunc {
+func backupRestoreBarrierMiddleware(barriers ...*BackupBarrier) gin.HandlerFunc {
+	barrier := backupRestoreBarrier
+	if len(barriers) > 0 && barriers[0] != nil {
+		barrier = barriers[0]
+	}
 	return func(c *gin.Context) {
 		if c == nil || c.Request == nil || c.Request.URL == nil {
 			c.Next()
@@ -327,11 +331,11 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 			return
 		}
 		if maintenanceExclusivePath(path) {
-			if !backupRestoreMu.TryLock() {
+			if !barrier.TryLock() {
 				writeMaintenanceBlockedResponse(c)
 				return
 			}
-			defer backupRestoreMu.Unlock()
+			defer barrier.Unlock()
 			if currentMaintenanceState().Active {
 				writeMaintenanceBlockedResponse(c)
 				return
@@ -339,11 +343,11 @@ func backupRestoreBarrierMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if !backupRestoreMu.TryRLock() {
+		if !barrier.TryRLock() {
 			writeMaintenanceBlockedResponse(c)
 			return
 		}
-		defer backupRestoreMu.RUnlock()
+		defer barrier.RUnlock()
 		if currentMaintenanceState().Active {
 			writeMaintenanceBlockedResponse(c)
 			return
