@@ -218,6 +218,7 @@ type ServiceOptions struct {
 	Timezone      TimezoneProvider
 	FormatDisplay DisplayFormatter
 	PruneAllowed  func() bool
+	PruneGuard    func(func() error) error
 	Now           func() time.Time
 }
 
@@ -227,6 +228,7 @@ type Service struct {
 	timezone      TimezoneProvider
 	formatDisplay DisplayFormatter
 	pruneAllowed  func() bool
+	pruneGuard    func(func() error) error
 	now           func() time.Time
 }
 
@@ -252,6 +254,7 @@ func NewService(opts ServiceOptions) *Service {
 		timezone:      opts.Timezone,
 		formatDisplay: opts.FormatDisplay,
 		pruneAllowed:  opts.PruneAllowed,
+		pruneGuard:    opts.PruneGuard,
 		now:           opts.Now,
 	}
 }
@@ -332,11 +335,17 @@ func (s *Service) Prune(retentionDays int) error {
 	if retentionDays <= 0 {
 		return nil
 	}
+	prune := func() error {
+		cutoff := s.now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
+		return s.repo.PruneBefore(cutoff)
+	}
+	if s.pruneGuard != nil {
+		return s.pruneGuard(prune)
+	}
 	if s.pruneAllowed != nil && !s.pruneAllowed() {
 		return nil
 	}
-	cutoff := s.now().UTC().AddDate(0, 0, -retentionDays).Format(time.RFC3339)
-	return s.repo.PruneBefore(cutoff)
+	return prune()
 }
 
 func (s *Service) BuildAuditMarkdownReport(evt Event) string {

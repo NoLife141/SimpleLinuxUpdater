@@ -38,21 +38,24 @@ func NewAuditService(db auditDBProvider, notify auditNotifier, timezone auditTim
 		Notify:        notifier,
 		Timezone:      func() (*time.Location, string) { return timezone() },
 		FormatDisplay: formatTimestampForAppDisplayWithTimezone,
-		PruneAllowed:  auditPruneAllowed,
+		PruneGuard:    auditPruneGuard,
 	})
 }
 
-func auditPruneAllowed() bool {
+func auditPruneGuard(prune func() error) error {
 	// Check maintenance before taking backupRestoreMu to avoid unnecessary lock
 	// contention, then re-check after backupRestoreMu.RLock() because maintenance
 	// can become active in the gap between the first currentMaintenanceState()
 	// read and acquiring backupRestoreMu.
 	if currentMaintenanceState().Active {
-		return false
+		return nil
 	}
 	backupRestoreMu.RLock()
 	defer backupRestoreMu.RUnlock()
-	return !currentMaintenanceState().Active
+	if currentMaintenanceState().Active {
+		return nil
+	}
+	return prune()
 }
 
 func sanitizeAuditMeta(meta map[string]any) string {

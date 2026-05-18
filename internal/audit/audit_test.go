@@ -186,6 +186,37 @@ func TestServicePruneDeletesOldEventsAndRespectsGuard(t *testing.T) {
 	}
 }
 
+func TestServicePruneRunsDeleteInsidePruneGuard(t *testing.T) {
+	repo := &guardedPruneRepository{}
+	inGuard := false
+	svc := NewService(ServiceOptions{
+		Repository: repo,
+		Now: func() time.Time {
+			return time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+		},
+		PruneGuard: func(prune func() error) error {
+			inGuard = true
+			defer func() { inGuard = false }()
+			return prune()
+		},
+	})
+	repo.pruneCheck = func(cutoff string) {
+		if !inGuard {
+			t.Fatalf("PruneBefore called outside PruneGuard")
+		}
+		if cutoff != "2026-04-17T12:00:00Z" {
+			t.Fatalf("cutoff = %q, want fixed retention cutoff", cutoff)
+		}
+	}
+
+	if err := svc.Prune(30); err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if repo.pruneCalls != 1 {
+		t.Fatalf("PruneBefore calls = %d, want 1", repo.pruneCalls)
+	}
+}
+
 func TestServiceMarkdownReports(t *testing.T) {
 	svc := NewService(ServiceOptions{Timezone: fixedTimezone})
 
@@ -228,6 +259,35 @@ func TestServiceMarkdownReports(t *testing.T) {
 			t.Fatalf("job report missing %q:\n%s", want, jobBody)
 		}
 	}
+}
+
+type guardedPruneRepository struct {
+	pruneCalls int
+	pruneCheck func(string)
+}
+
+func (r *guardedPruneRepository) Write(Event) error {
+	return nil
+}
+
+func (r *guardedPruneRepository) Count(ListFilter) (int, error) {
+	return 0, nil
+}
+
+func (r *guardedPruneRepository) List(ListFilter, int, int) ([]Event, error) {
+	return nil, nil
+}
+
+func (r *guardedPruneRepository) LoadByID(string) (Event, error) {
+	return Event{}, sql.ErrNoRows
+}
+
+func (r *guardedPruneRepository) PruneBefore(cutoff string) error {
+	r.pruneCalls++
+	if r.pruneCheck != nil {
+		r.pruneCheck(cutoff)
+	}
+	return nil
 }
 
 func fixedTimezone() (*time.Location, string) {
