@@ -2,6 +2,8 @@
 
 Use this checklist to manually explore the production SimpleLinuxUpdater app and catch regressions or rough edges before they become real operational bugs.
 
+For release gating with real SSH operations, use the disposable-target flow in [Release Smoke Checklist](release-smoke.md). This production checklist is for careful exploration of an existing app and should not mutate production hosts unless the tester explicitly intends that action.
+
 ## Before Testing
 
 - [ ] Use a browser you normally use in production.

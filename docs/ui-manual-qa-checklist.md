@@ -2,6 +2,8 @@
 
 Use this checklist for a disposable local run of the current build. Prefer a temp database and temp `known_hosts` file so the pass does not affect real configured hosts.
 
+This UI checklist can be run without a real SSH target. For release validation that exercises setup, login, add-host, host-key trust, update, audit, scheduled policy, backup, and reports against a real target, use [Release Smoke Checklist](release-smoke.md).
+
 ## Environment
 
 - [ ] Build succeeds with `go build -o webserver .`.

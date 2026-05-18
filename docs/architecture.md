@@ -2,59 +2,104 @@
 
 # Architecture
 
+SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered pages, JSON APIs, SQLite persistence, and SSH runners for Debian/Ubuntu maintenance. The current backend is intentionally transitional: most services live in `package main`, while the persisted job manager has already moved to `internal/jobs`.
+
 ## Table of contents
 
-- [High-level components](#high-level-components)
+- [Runtime shape](#runtime-shape)
+- [Request flow](#request-flow)
+- [Services and state](#services-and-state)
 - [Data storage](#data-storage)
 - [Update runner lifecycle](#update-runner-lifecycle)
-- [Audit events](#audit-events)
-- [Observability](#observability)
+- [Scheduled policies](#scheduled-policies)
+- [Audit, reports, and observability](#audit-reports-and-observability)
+- [Compatibility wrappers](#compatibility-wrappers)
 
-## High-level components
+## Runtime shape
 
-- Web server: Go + Gin, server-rendered templates
-- SSH layer: connects to targets and executes commands (per-action sessions)
-- State: in-memory status map for live UI, persisted server config in SQLite
-- UI: Status/Manage/Observability/Admin pages backed by JSON APIs
+- Web server: Go + Gin, HTML templates under `templates/`, static assets under `static/`.
+- Route registry: `setupRouterWithDeps(AppDeps)` builds the engine, middleware, sessions, jobs, templates, static files, and then calls `registerRoutes`.
+- Dependency boundary: `AppDeps` provides injectable DB, service, job-manager, session, timezone, dashboard-event, and initialization dependencies.
+- Services: audit, server inventory, update runner, and policy scheduling services are still in `package main` for low-churn transition.
+- Jobs: persisted job records and repository behavior live in `internal/jobs`, with aliases and wrappers in `package main`.
+- UI: Status, Manage, Observability, and Admin pages are backed by JSON APIs and live dashboard events.
+
+## Request flow
+
+1. `setupRouter()` delegates to `setupRouterWithDeps(NewDefaultAppDeps())`.
+2. Router setup configures trusted proxies, security headers, backup/restore barriers, maintenance state, job recovery, sessions, templates, and static files.
+3. `registerRoutes(router, deps)` registers public setup/login/status routes first.
+4. Protected routes are installed after `authGateMiddleware()` and `sameOriginWriteMiddleware()`.
+5. Route groups pass `AppDeps` into low-risk seams, including server/action routes, policy/audit/report routes, dashboard summaries, and dashboard events.
+6. Handlers preserve existing HTTP paths, JSON shapes, middleware behavior, and status codes while delegating business behavior into services where that seam exists.
+
+## Services and state
+
+- `AuditService` writes audit rows, lists audit events, prunes old rows, and renders Markdown reports.
+- `ServerInventoryService` owns server CRUD, tag normalization, secret persistence, rollback behavior, and per-server known-host operations.
+- `UpdateService` owns update, autoremove, sudoers, approval, scheduled-scan, SSH, retry, precheck/postcheck, CVE, job, and audit runner behavior.
+- `PolicyService` owns scheduled-policy validation, matching, blackout handling, due-slot processing, missed-tick replay, scheduler ticks, and interrupted-run recovery.
+- `internal/jobs.Manager` owns persisted job creation, update, recovery, runtime-status sync callbacks, and dashboard notifications after successful writes.
+- Shared runtime maps such as server inventory snapshots and live `statusMap` remain guarded by existing mutexes until a later package-boundary cleanup.
 
 ## Data storage
 
 SQLite stores:
 
-- Server inventory and encrypted credentials
-- Audit events (`audit_events`)
-- Local auth user (`auth_users`)
-- Server-side sessions (`sessions`)
+- Server inventory and encrypted credentials.
+- Audit events (`audit_events`).
+- Local auth user (`auth_users`).
+- Server-side sessions (`sessions`).
+- Persisted jobs (`jobs`).
+- Scheduled policies, policy runs, policy overrides, app settings, server facts, metrics token state, backup/restore metadata, and related operational state.
 
-An encryption key is stored in `config.json` alongside the DB (typically under `/data`).
+An encryption key is stored in `config.json` alongside the DB, typically under `/data`.
 
 Legacy import:
 
-- On first run, the app may import `servers.json` (if present) and then uses SQLite going forward.
+- On first run, the app may import `servers.json` if present, then uses SQLite going forward.
 
 ## Update runner lifecycle
 
 Typical update:
 
-1. Pre-checks run before `apt-get update`
-2. `apt-get update`
-3. Simulated upgrade to determine pending packages
-4. Status becomes `pending_approval`
-5. Approval or cancel occurs
-6. Upgrade runs (`apt-get upgrade` or scoped `--only-upgrade` when security-only)
-7. Post-update health checks run (if enabled)
-8. Completion is recorded as `update.complete` audit event
+1. A route creates a persisted job and starts the runner through `UpdateService`.
+2. SSH auth methods and host-key callback are built from per-server credentials, global key fallback, and known-hosts configuration.
+3. Pre-checks run before `apt-get update`.
+4. `apt-get update` runs with retry and timeout metadata.
+5. Simulated upgrade determines pending packages.
+6. Status becomes `pending_approval` when approval is required.
+7. Approval or cancel transitions the pending state.
+8. Upgrade runs with all packages or scoped security packages.
+9. Post-update health checks run when enabled.
+10. Job state, status map, audit metadata, server facts, and dashboard events are updated.
 
-## Audit events
+Autoremove, sudoers enable/disable, CVE enrichment, and scheduled scans use the same job/status/report foundations.
 
-Actions record status, message, and metadata. The actor is the authenticated session username (or `system` for internal/background flows).
+## Scheduled policies
 
-The audit store is auto-pruned (default retention 90 days).
+Scheduled update policies support legacy `target_tag`, `include_tags`, `exclude_tags`, explicit `target_servers`, per-server overrides, global blackouts, and per-policy blackout windows. `PolicyService` evaluates matching, due slots in the app timezone, skip reasons, missed scheduler ticks during backup restore, and run creation before handing execution to the update service.
 
-## Observability
+Policy APIs still live in `package main` and keep the existing wire format. Service extraction is a behavior seam, not a public API change.
 
-The observability dashboard and `/metrics` endpoint are derived from `update.complete` audit events:
+## Audit, reports, and observability
 
-- totals and success rate
-- average duration (when duration metadata is present)
-- failure-cause aggregation
+Actions record actor, client IP, action, target type/name, status, message, and sanitized metadata. Raw audit writes do not notify dashboard clients; service-backed record calls notify after a successful write.
+
+Markdown reports are generated for:
+
+- audit events at `/api/reports/audit/:id`;
+- persisted jobs at `/api/reports/jobs/:id`.
+
+The observability dashboard and `/metrics` endpoint derive summaries from `update.complete` audit events and related persisted runtime data:
+
+- totals and success rate;
+- average duration when duration metadata exists;
+- failure-cause aggregation;
+- policy/run/job summaries used by dashboard panels.
+
+Dashboard event streaming uses the shared client event broker. The UI can fall back to polling when live events are unavailable.
+
+## Compatibility wrappers
+
+The refactor keeps wrappers such as `setupRouter`, `audit`, `auditWithActor`, `writeAuditEvent`, `normalizeUpdatePolicy`, `processDueUpdatePolicies`, `startUpdateRunner`, and job aliases in place. New code should prefer the service or `AppDeps` seam when it keeps behavior identical, but existing wrappers remain supported until a later global-removal phase.

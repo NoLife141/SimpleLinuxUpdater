@@ -1929,6 +1929,7 @@ func handleAuditEventsWithService(c *gin.Context, service *AuditService) {
 	})
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleDashboardEvents(c *gin.Context) {
 	handleDashboardEventsWithBroker(c, dashboardEventBroker)
 }
@@ -2971,6 +2972,7 @@ func buildDashboardSummary(rawWindow string, now time.Time) (dashboardSummaryRes
 	return response, nil
 }
 
+//lint:ignore U1000 compatibility handler retained for direct handler tests and route migration.
 func handleDashboardSummary(c *gin.Context) {
 	handleDashboardSummaryWithNow(c, func() time.Time { return time.Now().UTC() })
 }
@@ -3377,6 +3379,7 @@ func rejectGlobalKeyMutationIfServerActionsActive(c *gin.Context, action string)
 	return true
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional action call sites.
 func createServerActionJob(kind, serverName, actor, clientIP string, policy RetryPolicy) (JobRecord, error) {
 	return createServerActionJobWithManager(currentJobManager(), kind, serverName, actor, clientIP, policy)
 }
@@ -5150,6 +5153,7 @@ func issueMetricsBearerToken() (string, error) {
 	return token, nil
 }
 
+//lint:ignore U1000 compatibility wrapper retained for transitional server inventory call sites.
 func updateServerKey(name, key string) error {
 	return serverInventoryService.updateServerKey(name, key)
 }
