@@ -54,7 +54,7 @@ func (deps AppDeps) withDefaults() AppDeps {
 		deps.AuditService = auditService
 	}
 	if deps.AuthService == nil {
-		deps.AuthService = authService
+		deps.AuthService = NewAuthService(deps.DB)
 	}
 	if deps.ServerInventoryService == nil {
 		deps.ServerInventoryService = serverInventoryService
