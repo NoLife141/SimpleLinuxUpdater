@@ -126,8 +126,6 @@ const maxUploadedKeyRequestBytes = maxUploadedKeyBytes + 1024*1024
 const sshConnectTimeout = 15 * time.Second
 const auditRetentionDays = 90
 const auditPruneInterval = 12 * time.Hour
-const auditMessageMaxLen = 512
-const auditMetaMaxLen = 2048
 const observabilityMetricsCacheTTL = 45 * time.Second
 const retryMaxAttemptsEnv = "DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS"
 const retryBaseDelayMSEnv = "DEBIAN_UPDATER_RETRY_BASE_DELAY_MS"
@@ -185,21 +183,6 @@ func notifyDashboardEvent(reason string) {
 	if dashboardEventBroker != nil {
 		dashboardEventBroker.Publish(reason)
 	}
-}
-
-type AuditEvent struct {
-	ID               int64  `json:"id"`
-	CreatedAt        string `json:"created_at"`
-	CreatedAtDisplay string `json:"created_at_display,omitempty"`
-	Actor            string `json:"actor"`
-	Action           string `json:"action"`
-	TargetType       string `json:"target_type"`
-	TargetName       string `json:"target_name"`
-	Status           string `json:"status"`
-	Message          string `json:"message"`
-	MetaJSON         string `json:"meta_json"`
-	RequestID        string `json:"request_id"`
-	ClientIP         string `json:"client_ip"`
 }
 
 type observabilityFailureItem struct {
@@ -1749,71 +1732,6 @@ func runUpdatePrechecks(client sshConnection) updatePrecheckSummary {
 		}
 	}
 	return summary
-}
-
-func sanitizeAuditMeta(meta map[string]any) string {
-	if meta == nil {
-		return "{}"
-	}
-	redacted := make(map[string]any, len(meta))
-	for k, v := range meta {
-		key := strings.ToLower(strings.TrimSpace(k))
-		isPrecheckField := strings.HasPrefix(key, "precheck")
-		isPassField := key == "pass" || strings.HasPrefix(key, "pass_") || strings.HasSuffix(key, "_pass")
-		if (isPassField || strings.Contains(key, "password") || strings.Contains(key, "secret") || strings.Contains(key, "token")) && !isPrecheckField {
-			continue
-		}
-		if !isPrecheckField && (key == "api_key" ||
-			key == "access_key" ||
-			key == "secret_key" ||
-			key == "private_key" ||
-			key == "ssh_key" ||
-			key == "key" ||
-			strings.HasPrefix(key, "key_") ||
-			strings.HasSuffix(key, "_key") ||
-			strings.HasSuffix(key, "_secret")) {
-			continue
-		}
-		redacted[k] = v
-	}
-	raw, err := json.Marshal(redacted)
-	if err != nil {
-		return "{}"
-	}
-	if len(raw) > auditMetaMaxLen {
-		log.Printf("Warning: audit metadata truncated from %d bytes across %d fields", len(raw), len(redacted))
-		truncated := map[string]any{
-			"_truncated":      true,
-			"original_length": len(raw),
-			"fields":          len(redacted),
-			"preview":         "",
-		}
-		previewRunes := []rune(string(raw))
-		lo := 0
-		hi := len(previewRunes)
-		best := `{"_truncated":true}`
-		for lo <= hi {
-			mid := (lo + hi) / 2
-			preview := string(previewRunes[:mid])
-			if mid < len(previewRunes) {
-				preview += "..."
-			}
-			truncated["preview"] = preview
-			candidate, marshalErr := json.Marshal(truncated)
-			if marshalErr != nil {
-				hi = mid - 1
-				continue
-			}
-			if len(candidate) <= auditMetaMaxLen {
-				best = string(candidate)
-				lo = mid + 1
-				continue
-			}
-			hi = mid - 1
-		}
-		return best
-	}
-	return string(raw)
 }
 
 func handleAuditEvents(c *gin.Context) {

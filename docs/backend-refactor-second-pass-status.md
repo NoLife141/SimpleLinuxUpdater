@@ -6,7 +6,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 
 - [x] Phase 0 - Baseline And Extraction Harness: complete on `codex/backend-second-pass-harness`
 - [x] Phase 1 - Events Package: complete on `codex/events-package`
-- [ ] Phase 2 - Audit Package
+- [x] Phase 2 - Audit Package: complete on `codex/audit-package`
 - [ ] Phase 3 - App Shell And Config Package
 - [ ] Phase 4 - Auth Package
 - [ ] Phase 5 - Backup Package
@@ -55,6 +55,25 @@ Broader gates:
 - [x] `npm audit --audit-level=moderate`
 
 Live disposable-host smoke is not required for Phase 1 because this phase only moves the dashboard event broker behind `internal/events`.
+
+## Phase 2 Validation
+
+Required:
+
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 2 because this phase only moves audit persistence, listing, pruning, and Markdown rendering behind `internal/audit`.
 
 ## Compatibility Wrappers To Remove Later
 
@@ -115,7 +134,7 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Audit State
 
-- `audit_service.go`: `auditService`
+- `audit_service.go`: `auditService` is now only the temporary main-owned default singleton for `internal/audit.Service`; app-shell ownership is deferred to Phase 3 and final global removal.
 - `webserver.go`: `auditPruneTickerOnce`
 
 ### Server Inventory And Runtime State

@@ -1,4 +1,4 @@
-package main
+package audit
 
 import (
 	"database/sql"
@@ -6,27 +6,33 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"debian-updater/internal/jobs"
+
+	_ "modernc.org/sqlite"
 )
 
-func TestAuditServiceRecordSanitizesTruncatesAndNotifies(t *testing.T) {
-	preserveDBState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit-service-record.db"))
-	_ = getDB()
+func TestServiceRecordSanitizesTruncatesAndNotifies(t *testing.T) {
+	db := newTestDB(t)
 
 	var notifications []string
-	svc := NewAuditService(getDB, func(reason string) {
-		notifications = append(notifications, reason)
-	}, fixedAuditTimezone)
-	svc.now = func() time.Time {
-		return time.Date(2026, 5, 17, 12, 34, 56, 0, time.UTC)
-	}
+	svc := NewService(ServiceOptions{
+		DB: func() *sql.DB { return db },
+		Notify: func(reason string) {
+			notifications = append(notifications, reason)
+		},
+		Timezone: fixedTimezone,
+		Now: func() time.Time {
+			return time.Date(2026, 5, 17, 12, 34, 56, 0, time.UTC)
+		},
+	})
 
 	longAction := strings.Repeat("a", 80)
 	longStatus := strings.Repeat("s", 40)
 	longClientIP := strings.Repeat("1", 150)
-	longMessage := strings.Repeat("m", auditMessageMaxLen+20)
+	longMessage := strings.Repeat("m", MessageMaxLen+20)
 	meta := map[string]any{
-		"safe":     strings.Repeat("x", auditMetaMaxLen*2),
+		"safe":     strings.Repeat("x", MetaMaxLen*2),
 		"password": "should-not-be-stored",
 	}
 
@@ -37,8 +43,8 @@ func TestAuditServiceRecordSanitizesTruncatesAndNotifies(t *testing.T) {
 		t.Fatalf("notifications = %v, want raw action once", notifications)
 	}
 
-	var evt AuditEvent
-	if err := getDB().QueryRow(`
+	var evt Event
+	if err := db.QueryRow(`
 		SELECT created_at, actor, action, target_type, target_name, status, message, meta_json, client_ip
 		  FROM audit_events
 		 ORDER BY id DESC LIMIT 1
@@ -61,15 +67,15 @@ func TestAuditServiceRecordSanitizesTruncatesAndNotifies(t *testing.T) {
 	if evt.Actor != "unknown" || evt.TargetName != "-" {
 		t.Fatalf("defaults actor/target = %q/%q, want unknown/-", evt.Actor, evt.TargetName)
 	}
-	if len([]rune(evt.Action)) != 64 || len([]rune(evt.Status)) != 32 || len([]rune(evt.Message)) != auditMessageMaxLen || len([]rune(evt.ClientIP)) != 128 {
+	if len([]rune(evt.Action)) != 64 || len([]rune(evt.Status)) != 32 || len([]rune(evt.Message)) != MessageMaxLen || len([]rune(evt.ClientIP)) != 128 {
 		t.Fatalf("unexpected truncation lengths: action=%d status=%d message=%d client_ip=%d", len([]rune(evt.Action)), len([]rune(evt.Status)), len([]rune(evt.Message)), len([]rune(evt.ClientIP)))
 	}
-	if len(evt.MetaJSON) > auditMetaMaxLen || !strings.Contains(evt.MetaJSON, `"_truncated":true`) || strings.Contains(evt.MetaJSON, "should-not-be-stored") {
+	if len(evt.MetaJSON) > MetaMaxLen || !strings.Contains(evt.MetaJSON, `"_truncated":true`) || strings.Contains(evt.MetaJSON, "should-not-be-stored") {
 		t.Fatalf("MetaJSON not sanitized/truncated as expected: len=%d body=%s", len(evt.MetaJSON), evt.MetaJSON)
 	}
 }
 
-func TestAuditServiceRecordDoesNotNotifyWhenWriteFails(t *testing.T) {
+func TestServiceRecordDoesNotNotifyWhenWriteFails(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("sql.Open() error = %v", err)
@@ -79,9 +85,11 @@ func TestAuditServiceRecordDoesNotNotifyWhenWriteFails(t *testing.T) {
 	}
 
 	var notifications []string
-	svc := NewAuditService(func() *sql.DB { return db }, func(reason string) {
-		notifications = append(notifications, reason)
-	}, fixedAuditTimezone)
+	svc := NewService(ServiceOptions{
+		DB:       func() *sql.DB { return db },
+		Notify:   func(reason string) { notifications = append(notifications, reason) },
+		Timezone: fixedTimezone,
+	})
 
 	if err := svc.Record("admin", "127.0.0.1", "server.update", "server", "srv", "success", "done", nil); err == nil {
 		t.Fatalf("Record() error = nil, want write failure")
@@ -91,14 +99,14 @@ func TestAuditServiceRecordDoesNotNotifyWhenWriteFails(t *testing.T) {
 	}
 }
 
-func TestAuditServiceListFiltersPaginatesAndFormatsTimezone(t *testing.T) {
-	preserveDBState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit-service-list.db"))
-	_ = getDB()
-
-	svc := NewAuditService(getDB, nil, fixedAuditTimezone)
+func TestServiceListFiltersPaginatesAndFormatsTimezone(t *testing.T) {
+	db := newTestDB(t)
+	svc := NewService(ServiceOptions{
+		DB:       func() *sql.DB { return db },
+		Timezone: fixedTimezone,
+	})
 	base := time.Date(2026, 2, 10, 10, 0, 0, 0, time.UTC)
-	seed := []AuditEvent{
+	seed := []Event{
 		{CreatedAt: base.Add(-3 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "alpha", Status: "success", Message: "alpha-ok", MetaJSON: "{}"},
 		{CreatedAt: base.Add(-2 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "beta-fail-1", MetaJSON: "{}"},
 		{CreatedAt: base.Add(-1 * time.Hour).Format(time.RFC3339), Actor: "admin", Action: "server.update", TargetType: "server", TargetName: "beta", Status: "failure", Message: "beta-fail-2", MetaJSON: "{}"},
@@ -110,7 +118,7 @@ func TestAuditServiceListFiltersPaginatesAndFormatsTimezone(t *testing.T) {
 		}
 	}
 
-	result, err := svc.List(AuditListFilter{
+	result, err := svc.List(ListFilter{
 		Page:       1,
 		PageSize:   1,
 		TargetName: "beta",
@@ -132,7 +140,7 @@ func TestAuditServiceListFiltersPaginatesAndFormatsTimezone(t *testing.T) {
 		t.Fatalf("CreatedAtDisplay = %q, want +02:00 formatted display", result.Items[0].CreatedAtDisplay)
 	}
 
-	result, err = svc.List(AuditListFilter{Page: 1, PageSize: 500})
+	result, err = svc.List(ListFilter{Page: 1, PageSize: 500})
 	if err != nil {
 		t.Fatalf("List(page size cap) error = %v", err)
 	}
@@ -141,18 +149,20 @@ func TestAuditServiceListFiltersPaginatesAndFormatsTimezone(t *testing.T) {
 	}
 }
 
-func TestAuditServicePruneDeletesOldEventsAndSkipsDuringMaintenance(t *testing.T) {
-	preserveDBState(t)
-	t.Setenv("DEBIAN_UPDATER_DB_PATH", filepath.Join(t.TempDir(), "audit-service-prune.db"))
-	_ = getDB()
+func TestServicePruneDeletesOldEventsAndRespectsGuard(t *testing.T) {
+	db := newTestDB(t)
+	pruneAllowed := false
+	svc := NewService(ServiceOptions{
+		DB: func() *sql.DB { return db },
+		Now: func() time.Time {
+			return time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+		},
+		PruneAllowed: func() bool { return pruneAllowed },
+		Timezone:     fixedTimezone,
+	})
 
-	svc := NewAuditService(getDB, nil, fixedAuditTimezone)
-	svc.now = func() time.Time {
-		return time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	}
-
-	newEvt := AuditEvent{CreatedAt: "2026-05-16T12:00:00Z", Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "srv-new", Status: "success", Message: "created", MetaJSON: "{}"}
-	oldEvt := AuditEvent{CreatedAt: "2026-04-01T12:00:00Z", Actor: "admin", Action: "server.delete", TargetType: "server", TargetName: "srv-old", Status: "success", Message: "deleted", MetaJSON: "{}"}
+	newEvt := Event{CreatedAt: "2026-05-16T12:00:00Z", Actor: "admin", Action: "server.create", TargetType: "server", TargetName: "srv-new", Status: "success", Message: "created", MetaJSON: "{}"}
+	oldEvt := Event{CreatedAt: "2026-04-01T12:00:00Z", Actor: "admin", Action: "server.delete", TargetType: "server", TargetName: "srv-old", Status: "success", Message: "deleted", MetaJSON: "{}"}
 	if err := svc.Write(newEvt); err != nil {
 		t.Fatalf("Write(new) error = %v", err)
 	}
@@ -160,27 +170,26 @@ func TestAuditServicePruneDeletesOldEventsAndSkipsDuringMaintenance(t *testing.T
 		t.Fatalf("Write(old) error = %v", err)
 	}
 
-	setCurrentMaintenanceState(MaintenanceState{Active: true, Kind: jobKindBackupRestore, JobID: "job-maintenance"})
 	if err := svc.Prune(30); err != nil {
-		t.Fatalf("Prune(active maintenance) error = %v", err)
+		t.Fatalf("Prune(blocked) error = %v", err)
 	}
-	if got := countAuditEventsForTest(t); got != 2 {
-		t.Fatalf("audit rows during maintenance = %d, want 2", got)
+	if got := countAuditEvents(t, db); got != 2 {
+		t.Fatalf("audit rows while blocked = %d, want 2", got)
 	}
 
-	setCurrentMaintenanceState(MaintenanceState{})
+	pruneAllowed = true
 	if err := svc.Prune(30); err != nil {
 		t.Fatalf("Prune() error = %v", err)
 	}
-	if got := countAuditEventsForTest(t); got != 1 {
+	if got := countAuditEvents(t, db); got != 1 {
 		t.Fatalf("audit rows after prune = %d, want 1", got)
 	}
 }
 
-func TestAuditServiceMarkdownReports(t *testing.T) {
-	svc := NewAuditService(nil, nil, fixedAuditTimezone)
+func TestServiceMarkdownReports(t *testing.T) {
+	svc := NewService(ServiceOptions{Timezone: fixedTimezone})
 
-	auditBody := svc.BuildAuditMarkdownReport(AuditEvent{
+	auditBody := svc.BuildAuditMarkdownReport(Event{
 		ID:         42,
 		CreatedAt:  "2026-05-17T12:00:00Z",
 		Actor:      "admin",
@@ -198,13 +207,13 @@ func TestAuditServiceMarkdownReports(t *testing.T) {
 		}
 	}
 
-	jobBody := svc.BuildJobMarkdownReport(JobRecord{
+	jobBody := svc.BuildJobMarkdownReport(jobs.Record{
 		ID:              "job-42",
-		Kind:            jobKindUpdate,
+		Kind:            jobs.KindUpdate,
 		ServerName:      "srv",
 		Actor:           "admin",
-		Status:          jobStatusSucceeded,
-		Phase:           jobPhaseComplete,
+		Status:          jobs.StatusSucceeded,
+		Phase:           jobs.PhaseComplete,
 		Summary:         "Update completed",
 		LogsText:        "Upgrade completed.",
 		RetryPolicyJSON: `{"max_attempts":3}`,
@@ -221,14 +230,49 @@ func TestAuditServiceMarkdownReports(t *testing.T) {
 	}
 }
 
-func fixedAuditTimezone() (*time.Location, string) {
+func fixedTimezone() (*time.Location, string) {
 	return time.FixedZone("+02:00", 2*60*60), "+02:00"
 }
 
-func countAuditEventsForTest(t *testing.T) int {
+func newTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("db.Close() error = %v", err)
+		}
+	})
+	ensureTestSchema(t, db)
+	return db
+}
+
+func ensureTestSchema(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS audit_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		created_at TEXT NOT NULL,
+		actor TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL,
+		target_name TEXT NOT NULL,
+		status TEXT NOT NULL,
+		message TEXT NOT NULL,
+		meta_json TEXT NOT NULL DEFAULT '{}',
+		request_id TEXT NOT NULL DEFAULT '',
+		client_ip TEXT NOT NULL DEFAULT ''
+	)`)
+	if err != nil {
+		t.Fatalf("create audit_events schema: %v", err)
+	}
+}
+
+func countAuditEvents(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var count int
-	if err := getDB().QueryRow("SELECT COUNT(*) FROM audit_events").Scan(&count); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM audit_events").Scan(&count); err != nil {
 		t.Fatalf("count audit events: %v", err)
 	}
 	return count
