@@ -59,6 +59,7 @@ func newTestApp(t *testing.T, opts testAppOptions) *testApp {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	preserveDBState(t)
+	preserveEncryptionState(t)
 	preserveSessionState(t)
 	preserveRateLimiterState(t)
 	preserveMetricsTokenState(t)
