@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	appshell "debian-updater/internal/app"
 	"debian-updater/internal/events"
 
 	"github.com/alexedwards/argon2id"
@@ -5321,25 +5322,7 @@ func securityHeadersMiddleware() gin.HandlerFunc {
 }
 
 func trustedProxiesFromEnv() []string {
-	raw := strings.TrimSpace(os.Getenv(trustedProxiesEnv))
-	if raw == "" || strings.EqualFold(raw, "none") {
-		return nil
-	}
-	parts := strings.Split(raw, ",")
-	seen := make(map[string]struct{}, len(parts))
-	proxies := make([]string, 0, len(parts))
-	for _, part := range parts {
-		proxy := strings.TrimSpace(part)
-		if proxy == "" {
-			continue
-		}
-		if _, ok := seen[proxy]; ok {
-			continue
-		}
-		seen[proxy] = struct{}{}
-		proxies = append(proxies, proxy)
-	}
-	return proxies
+	return appshell.ParseTrustedProxies(os.Getenv(trustedProxiesEnv))
 }
 
 func setupRouter() (*gin.Engine, error) {
@@ -5348,30 +5331,19 @@ func setupRouter() (*gin.Engine, error) {
 
 func setupRouterWithDeps(deps AppDeps) (*gin.Engine, error) {
 	deps = deps.withDefaults()
-	r := gin.Default()
-	if err := r.SetTrustedProxies(deps.TrustedProxies()); err != nil {
-		return nil, fmt.Errorf("failed to configure trusted proxies: %w", err)
-	}
-	r.Use(securityHeadersMiddleware())
-	r.Use(backupRestoreBarrierMiddleware())
-	if err := deps.InitializeMaintenanceState(); err != nil {
-		return nil, fmt.Errorf("failed to initialize maintenance state: %w", err)
-	}
-	if err := deps.initializeJobManager(); err != nil {
-		return nil, fmt.Errorf("failed to initialize job manager: %w", err)
-	}
-	if err := deps.initializeSessionManager(); err != nil {
-		return nil, fmt.Errorf("failed to initialize session manager: %w", err)
-	}
-
-	r.LoadHTMLGlob("templates/*")
-	r.Static("/static", "./static")
-
-	if err := registerRoutes(r, deps); err != nil {
-		return nil, err
-	}
-
-	return r, nil
+	return appshell.NewRouter(appshell.RouterConfig{
+		TrustedProxies:        deps.TrustedProxies,
+		GlobalMiddleware:      []gin.HandlerFunc{securityHeadersMiddleware(), backupRestoreBarrierMiddleware()},
+		InitializeMaintenance: deps.InitializeMaintenanceState,
+		InitializeJobs:        deps.initializeJobManager,
+		InitializeSessions:    deps.initializeSessionManager,
+		TemplatesGlob:         "templates/*",
+		StaticPath:            "/static",
+		StaticRoot:            "./static",
+		RegisterRoutes: func(r *gin.Engine) error {
+			return registerRoutes(r, deps)
+		},
+	})
 }
 
 func registerRoutes(r *gin.Engine, deps AppDeps) error {

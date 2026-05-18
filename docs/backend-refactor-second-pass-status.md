@@ -7,7 +7,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 0 - Baseline And Extraction Harness: complete on `codex/backend-second-pass-harness`
 - [x] Phase 1 - Events Package: complete on `codex/events-package`
 - [x] Phase 2 - Audit Package: complete on `codex/audit-package`
-- [ ] Phase 3 - App Shell And Config Package
+- [x] Phase 3 - App Shell And Config Package: complete on `codex/app-shell-config`
 - [ ] Phase 4 - Auth Package
 - [ ] Phase 5 - Backup Package
 - [ ] Phase 6 - Server Inventory Package
@@ -75,6 +75,25 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 2 because this phase only moves audit persistence, listing, pruning, and Markdown rendering behind `internal/audit`.
 
+## Phase 3 Validation
+
+Required:
+
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 3 because this phase only moves router/app-shell composition behind `internal/app`.
+
 ## Compatibility Wrappers To Remove Later
 
 These wrappers are intentionally retained after the first pass and are marked with `//lint:ignore U1000`. They should disappear by Phase 11 after package APIs replace all transitional call sites.
@@ -118,6 +137,8 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### App, DB, And Encryption State
 
+- `internal/app`: owns Gin router composition, trusted proxy parsing, global middleware ordering, initialization ordering, template loading, static mounting, and route registration callback execution.
+- `app_deps.go`: `AppDeps` remains a temporary main-package compatibility boundary for main-owned services until later package extractions.
 - `webserver.go`: `db`, `dbOnce`
 - `webserver.go`: `keyOnce`, `encryptionKey`
 - `webserver.go`: `runtimeStateMu`
@@ -134,7 +155,7 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Audit State
 
-- `audit_service.go`: `auditService` is now only the temporary main-owned default singleton for `internal/audit.Service`; app-shell ownership is deferred to Phase 3 and final global removal.
+- `audit_service.go`: `auditService` is now only the temporary main-owned default singleton for `internal/audit.Service`; final ownership cleanup is deferred to Phase 11.
 - `webserver.go`: `auditPruneTickerOnce`
 
 ### Server Inventory And Runtime State
@@ -165,7 +186,7 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Dashboard, Observability, And Metrics State
 
-- `webserver.go`: `dashboardEventBroker` is now only the temporary main-owned default singleton for `internal/events.Broker`; app-shell ownership is deferred to Phase 3 and final global removal.
+- `webserver.go`: `dashboardEventBroker` is now only the temporary main-owned default singleton for `internal/events.Broker`; final ownership cleanup is deferred to Phase 11.
 - `webserver.go`: `observabilityCache`, `observabilityCacheMu`
 - `webserver.go`: `metricsBearerTokenHash`, `metricsBearerTokenHashMu`, `metricsBearerTokenHashLoaded`, `metricsBearerTokenHashDBPath`
 
