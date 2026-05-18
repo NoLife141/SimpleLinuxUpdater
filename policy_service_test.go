@@ -342,3 +342,62 @@ func TestPolicyServiceProcessDueRemembersAndReplaysMissedTicks(t *testing.T) {
 		t.Fatalf("created replay runs = %+v, want one maintenance skip", created)
 	}
 }
+
+func TestPolicyServicePartialBackupRestoreLockOverridesAreNonLocking(t *testing.T) {
+	slot := time.Date(2026, 1, 5, 3, 0, 0, 0, time.UTC)
+	baseDeps := testPolicyServiceDeps()
+	baseDeps.ListPolicies = func() ([]UpdatePolicy, error) {
+		return []UpdatePolicy{{
+			ID:            8,
+			Name:          "nightly",
+			Enabled:       true,
+			TargetServers: []string{"srv"},
+			PackageScope:  updatePolicyPackageScopeSecurity,
+			ExecutionMode: updatePolicyExecutionScanOnly,
+			CadenceKind:   updatePolicyCadenceDaily,
+			TimeLocal:     "03:00",
+		}}, nil
+	}
+	baseDeps.SnapshotServers = func() []Server {
+		return []Server{{Name: "srv"}}
+	}
+	baseDeps.CurrentStatusSnapshot = func(string) *ServerStatus {
+		return &ServerStatus{Name: "srv", Status: "idle"}
+	}
+
+	t.Run("try only", func(t *testing.T) {
+		deps := baseDeps
+		deps.TryBackupRestoreReadLock = func() bool { return true }
+		deps.UnlockBackupRestoreRead = nil
+		executed := 0
+		deps.ExecuteRun = func(UpdatePolicyRun, UpdatePolicy, Server) {
+			executed++
+		}
+
+		if err := NewPolicyService(deps).ProcessDue(slot); err != nil {
+			t.Fatalf("ProcessDue() unexpected error: %v", err)
+		}
+		if executed != 1 {
+			t.Fatalf("executed = %d, want 1", executed)
+		}
+	})
+
+	t.Run("unlock only", func(t *testing.T) {
+		deps := baseDeps
+		deps.TryBackupRestoreReadLock = nil
+		deps.UnlockBackupRestoreRead = func() {
+			t.Fatalf("unlock-only override should not be called")
+		}
+		executed := 0
+		deps.ExecuteRun = func(UpdatePolicyRun, UpdatePolicy, Server) {
+			executed++
+		}
+
+		if err := NewPolicyService(deps).ProcessDue(slot); err != nil {
+			t.Fatalf("ProcessDue() unexpected error: %v", err)
+		}
+		if executed != 1 {
+			t.Fatalf("executed = %d, want 1", executed)
+		}
+	})
+}

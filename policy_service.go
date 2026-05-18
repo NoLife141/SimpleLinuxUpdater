@@ -96,11 +96,16 @@ func (d PolicyServiceDeps) withDefaults() PolicyServiceDeps {
 	if d.MarkInterruptedRuns == nil {
 		d.MarkInterruptedRuns = markInterruptedUpdatePolicyRuns
 	}
-	if d.TryBackupRestoreReadLock == nil {
+	switch {
+	case d.TryBackupRestoreReadLock == nil && d.UnlockBackupRestoreRead == nil:
 		d.TryBackupRestoreReadLock = backupRestoreMu.TryRLock
-	}
-	if d.UnlockBackupRestoreRead == nil {
 		d.UnlockBackupRestoreRead = backupRestoreMu.RUnlock
+	case d.TryBackupRestoreReadLock != nil && d.UnlockBackupRestoreRead != nil:
+	case d.TryBackupRestoreReadLock != nil:
+		d.UnlockBackupRestoreRead = func() {}
+	default:
+		d.TryBackupRestoreReadLock = func() bool { return true }
+		d.UnlockBackupRestoreRead = func() {}
 	}
 	if d.Now == nil {
 		d.Now = time.Now
