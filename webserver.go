@@ -30,8 +30,11 @@ import (
 	"time"
 
 	appshell "debian-updater/internal/app"
+	auditpkg "debian-updater/internal/audit"
+	authpkg "debian-updater/internal/auth"
 	"debian-updater/internal/events"
 	observabilitypkg "debian-updater/internal/observability"
+	serverpkg "debian-updater/internal/servers"
 	updatespkg "debian-updater/internal/updates"
 
 	"github.com/gin-gonic/gin"
@@ -273,21 +276,6 @@ func getDB() *sql.DB {
 		if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
 			log.Fatalf("Failed to set sqlite synchronous mode: %v", err)
 		}
-		_, err = db.Exec(`
-			CREATE TABLE IF NOT EXISTS servers (
-				name TEXT PRIMARY KEY,
-				host TEXT NOT NULL,
-				port INTEGER NOT NULL DEFAULT 22,
-				user TEXT NOT NULL,
-				pass_enc TEXT NOT NULL,
-				key_enc TEXT NOT NULL DEFAULT '',
-				key_path TEXT NOT NULL DEFAULT '',
-				tags TEXT NOT NULL DEFAULT ''
-			)
-		`)
-		if err != nil {
-			log.Fatalf("Failed to initialize db schema: %v", err)
-		}
 		if err := ensureSchema(db); err != nil {
 			log.Fatalf("Failed to migrate db schema: %v", err)
 		}
@@ -375,191 +363,32 @@ func getEncryptionKey() []byte {
 }
 
 func ensureSchema(db *sql.DB) error {
-	rows, err := db.Query("PRAGMA table_info(servers)")
-	if err != nil {
+	if err := serverpkg.EnsureSchema(db); err != nil {
 		return err
 	}
-	defer rows.Close()
-	hasKeyPath := false
-	hasKeyEnc := false
-	hasTags := false
-	hasPort := false
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		if name == "key_path" {
-			hasKeyPath = true
-		}
-		if name == "key_enc" {
-			hasKeyEnc = true
-		}
-		if name == "tags" {
-			hasTags = true
-		}
-		if name == "port" {
-			hasPort = true
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := ensureSettingsSchema(db); err != nil {
 		return err
 	}
-	if !hasKeyPath {
-		if _, err := db.Exec("ALTER TABLE servers ADD COLUMN key_path TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !hasKeyEnc {
-		if _, err := db.Exec("ALTER TABLE servers ADD COLUMN key_enc TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !hasTags {
-		if _, err := db.Exec("ALTER TABLE servers ADD COLUMN tags TEXT NOT NULL DEFAULT ''"); err != nil {
-			return err
-		}
-	}
-	if !hasPort {
-		if _, err := db.Exec("ALTER TABLE servers ADD COLUMN port INTEGER NOT NULL DEFAULT 22"); err != nil {
-			return err
-		}
-	}
-	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+	if err := authpkg.EnsureSchema(db); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS auth_users (
-			id INTEGER PRIMARY KEY CHECK (id = 1),
-			username TEXT NOT NULL,
-			password_hash TEXT NOT NULL,
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		)
-	`); err != nil {
+	if err := auditpkg.EnsureSchema(db); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS sessions (
-			token TEXT PRIMARY KEY,
-			data BLOB NOT NULL,
-			expiry REAL NOT NULL
-		)
-	`); err != nil {
-		return err
-	}
-	sessionRows, err := db.Query("PRAGMA table_info(sessions)")
-	if err != nil {
-		return err
-	}
-	defer sessionRows.Close()
-	hasSessionToken := false
-	hasSessionData := false
-	hasSessionExpiry := false
-	hasSessionExpires := false
-	for sessionRows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull, pk int
-		var dflt sql.NullString
-		if err := sessionRows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return err
-		}
-		switch name {
-		case "token":
-			hasSessionToken = true
-		case "data":
-			hasSessionData = true
-		case "expiry":
-			hasSessionExpiry = true
-		case "expires":
-			hasSessionExpires = true
-		}
-	}
-	if err := sessionRows.Err(); err != nil {
-		return err
-	}
-	// Session rows are ephemeral: if legacy schema is incompatible, recreate table.
-	if !hasSessionToken || !hasSessionData {
-		if _, err := db.Exec("DROP TABLE IF EXISTS sessions"); err != nil {
-			return err
-		}
-		if _, err := db.Exec(`
-			CREATE TABLE sessions (
-				token TEXT PRIMARY KEY,
-				data BLOB NOT NULL,
-				expiry REAL NOT NULL
-			)
-		`); err != nil {
-			return err
-		}
-		hasSessionExpiry = true
-	} else if !hasSessionExpiry {
-		if _, err := db.Exec("ALTER TABLE sessions ADD COLUMN expiry REAL NOT NULL DEFAULT 0"); err != nil {
-			return err
-		}
-		if hasSessionExpires {
-			if _, err := db.Exec("UPDATE sessions SET expiry = CAST(expires AS REAL) WHERE expiry = 0"); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expiry)"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS audit_events (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			created_at TEXT NOT NULL,
-			actor TEXT NOT NULL,
-			action TEXT NOT NULL,
-			target_type TEXT NOT NULL,
-			target_name TEXT NOT NULL,
-			status TEXT NOT NULL,
-			message TEXT NOT NULL,
-			meta_json TEXT NOT NULL DEFAULT '{}',
-			request_id TEXT NOT NULL DEFAULT '',
-			client_ip TEXT NOT NULL DEFAULT ''
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_created_at ON audit_events (created_at DESC)"); err != nil {
-		return err
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_events (target_type, target_name, created_at DESC)"); err != nil {
-		return err
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events (action, created_at DESC)"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS server_facts (
-			server_name TEXT PRIMARY KEY,
-			collected_at TEXT NOT NULL,
-			os_pretty_name TEXT NOT NULL DEFAULT '',
-			uptime_seconds INTEGER NOT NULL DEFAULT 0,
-			disk_status TEXT NOT NULL DEFAULT 'unknown',
-			disk_free_kb INTEGER NOT NULL DEFAULT 0,
-			disk_details TEXT NOT NULL DEFAULT '',
-			apt_status TEXT NOT NULL DEFAULT 'unknown',
-			apt_details TEXT NOT NULL DEFAULT '',
-			reboot_required INTEGER,
-			raw_json TEXT NOT NULL DEFAULT '{}'
-		)
-	`); err != nil {
-		return err
-	}
-	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_server_facts_collected_at ON server_facts (collected_at DESC)"); err != nil {
+	if err := updatespkg.EnsureServerFactsSchema(db); err != nil {
 		return err
 	}
 	if err := ensureJobSchema(db); err != nil {
 		return err
 	}
 	return ensureUpdatePolicySchema(db)
+}
+
+func ensureSettingsSchema(db *sql.DB) error {
+	if _, err := db.Exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func truncateString(s string, maxLen int) string {
@@ -1517,88 +1346,15 @@ func saveServerFacts(record serverFactsRecord) error {
 	if strings.TrimSpace(record.RawJSON) == "" {
 		record.RawJSON = "{}"
 	}
-	var rebootValue any
-	if record.RebootRequired != nil {
-		rebootValue = boolToInt(*record.RebootRequired)
-	}
-	_, err := getDB().Exec(`
-		INSERT INTO server_facts (
-			server_name, collected_at, os_pretty_name, uptime_seconds,
-			disk_status, disk_free_kb, disk_details, apt_status, apt_details,
-			reboot_required, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(server_name) DO UPDATE SET
-			collected_at = excluded.collected_at,
-			os_pretty_name = excluded.os_pretty_name,
-			uptime_seconds = excluded.uptime_seconds,
-			disk_status = excluded.disk_status,
-			disk_free_kb = excluded.disk_free_kb,
-			disk_details = excluded.disk_details,
-			apt_status = excluded.apt_status,
-			apt_details = excluded.apt_details,
-			reboot_required = excluded.reboot_required,
-			raw_json = excluded.raw_json
-	`,
-		record.ServerName,
-		record.CollectedAt,
-		record.OSPrettyName,
-		record.UptimeSeconds,
-		record.DiskStatus,
-		record.DiskFreeKB,
-		record.DiskDetails,
-		record.AptStatus,
-		record.AptDetails,
-		rebootValue,
-		record.RawJSON,
-	)
-	return err
+	return defaultServerFactsRepository().Save(record)
 }
 
 func loadServerFacts() (map[string]serverFactsRecord, error) {
-	rows, err := getDB().Query(`
-		SELECT server_name, collected_at, os_pretty_name, uptime_seconds,
-		       disk_status, disk_free_kb, disk_details, apt_status, apt_details,
-		       reboot_required, raw_json
-		  FROM server_facts
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	records := map[string]serverFactsRecord{}
-	for rows.Next() {
-		var record serverFactsRecord
-		var reboot sql.NullInt64
-		if err := rows.Scan(
-			&record.ServerName,
-			&record.CollectedAt,
-			&record.OSPrettyName,
-			&record.UptimeSeconds,
-			&record.DiskStatus,
-			&record.DiskFreeKB,
-			&record.DiskDetails,
-			&record.AptStatus,
-			&record.AptDetails,
-			&reboot,
-			&record.RawJSON,
-		); err != nil {
-			return nil, err
-		}
-		if reboot.Valid {
-			required := reboot.Int64 != 0
-			record.RebootRequired = &required
-		}
-		records[record.ServerName] = record
-	}
-	return records, rows.Err()
+	return defaultServerFactsRepository().LoadAll()
 }
 
 func renameServerFactsTx(tx *sql.Tx, oldName, newName string) error {
-	if strings.TrimSpace(oldName) == "" || strings.TrimSpace(newName) == "" || oldName == newName {
-		return nil
-	}
-	_, err := tx.Exec("UPDATE server_facts SET server_name = ? WHERE server_name = ?", newName, oldName)
-	return err
+	return defaultServerFactsRepository().RenameServerTx(tx, oldName, newName)
 }
 
 func diskFreeKBFromOutput(output string) (int64, bool) {

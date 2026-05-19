@@ -28,6 +28,10 @@ func defaultUpdateService() *UpdateService {
 	return NewUpdateService(UpdateServiceDeps{})
 }
 
+func defaultServerFactsRepository() updatespkg.SQLiteServerFactsRepository {
+	return updatespkg.SQLiteServerFactsRepository{DB: getDB}
+}
+
 func updateServiceDepsWithDefaults(d UpdateServiceDeps) UpdateServiceDeps {
 	if d.ServerState == nil {
 		d.ServerState = serverState

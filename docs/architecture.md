@@ -2,7 +2,7 @@
 
 # Architecture
 
-SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered pages, JSON APIs, SQLite persistence, and SSH runners for Debian/Ubuntu maintenance. The current backend is intentionally transitional: most services live in `package main`, while the persisted job manager has already moved to `internal/jobs`.
+SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered pages, JSON APIs, SQLite persistence, and SSH runners for Debian/Ubuntu maintenance. The backend now uses internal packages for the main service boundaries, while `package main` remains the composition layer for process startup, DB opening, route adapters, and temporary compatibility wrappers.
 
 ## Table of contents
 
@@ -20,8 +20,8 @@ SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered 
 - Web server: Go + Gin, HTML templates under `templates/`, static assets under `static/`.
 - Route registry: `setupRouterWithDeps(AppDeps)` builds the engine, middleware, sessions, jobs, templates, static files, and then calls `registerRoutes`.
 - Dependency boundary: `AppDeps` provides injectable DB, service, job-manager, session, timezone, dashboard-event, and initialization dependencies.
-- Services: audit, server inventory, update runner, and policy scheduling services are still in `package main` for low-churn transition.
-- Jobs: persisted job records and repository behavior live in `internal/jobs`, with aliases and wrappers in `package main`.
+- Services: audit, auth, backup, events, jobs, observability, policy scheduling, server inventory, and update runner behavior live behind `internal/...` package boundaries.
+- Schema ownership: each domain package owns its SQLite table creation/migration; `package main` calls those installers in a deterministic startup order.
 - UI: Status, Manage, Observability, and Admin pages are backed by JSON APIs and live dashboard events.
 
 ## Request flow
@@ -35,23 +35,27 @@ SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered 
 
 ## Services and state
 
-- `AuditService` writes audit rows, lists audit events, prunes old rows, and renders Markdown reports.
-- `ServerInventoryService` owns server CRUD, tag normalization, secret persistence, rollback behavior, and per-server known-host operations.
-- `UpdateService` owns update, autoremove, sudoers, approval, scheduled-scan, SSH, retry, precheck/postcheck, CVE, job, and audit runner behavior.
-- `PolicyService` owns scheduled-policy validation, matching, blackout handling, due-slot processing, missed-tick replay, scheduler ticks, and interrupted-run recovery.
+- `internal/audit.Service` writes audit rows, lists audit events, prunes old rows, and renders Markdown reports.
+- `internal/servers.Service` owns server CRUD, tag normalization, secret persistence, rollback behavior, and per-server known-host operations.
+- `internal/updates.Service` owns update, autoremove, sudoers, approval, scheduled-scan, SSH, retry, precheck/postcheck, CVE, job, and audit runner behavior.
+- `internal/policies.Service` owns scheduled-policy validation, matching, blackout handling, due-slot processing, missed-tick replay, scheduler ticks, and interrupted-run recovery.
+- `internal/observability.Service` owns dashboard/observability summaries, metrics rendering, metrics token persistence, and metrics cache behavior.
 - `internal/jobs.Manager` owns persisted job creation, update, recovery, runtime-status sync callbacks, and dashboard notifications after successful writes.
 - Shared runtime maps such as server inventory snapshots and live `statusMap` remain guarded by existing mutexes until a later package-boundary cleanup.
 
 ## Data storage
 
-SQLite stores:
+SQLite table ownership:
 
-- Server inventory and encrypted credentials.
-- Audit events (`audit_events`).
-- Local auth user (`auth_users`).
-- Server-side sessions (`sessions`).
-- Persisted jobs (`jobs`).
-- Scheduled policies, policy runs, policy overrides, app settings, server facts, metrics token state, backup/restore metadata, and related operational state.
+- `internal/servers`: `servers`.
+- `internal/auth`: `auth_users`, `sessions`, and `sessions_expiry_idx`.
+- `internal/audit`: `audit_events` and audit indexes.
+- `internal/updates`: `server_facts` and `idx_server_facts_collected_at`.
+- `internal/jobs`: `jobs` and job indexes.
+- `internal/policies`: `update_policies`, `update_policy_overrides`, `update_policy_runs`, and policy-run indexes.
+- Shared main/app schema: `settings`, used by maintenance state, global SSH key storage, policy settings, app timezone/blackout settings, and metrics token state.
+
+SQLite stores server inventory, encrypted credentials, audit events, auth/session state, persisted jobs, scheduled policy state, server facts, metrics token state, backup/restore metadata, and related operational state.
 
 An encryption key is stored in `config.json` alongside the DB, typically under `/data`.
 

@@ -14,7 +14,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 7 - Policy Package: complete on `codex/policies-package`
 - [x] Phase 8 - Update Package: complete on `codex/updates-package`
 - [x] Phase 9 - Observability And Dashboard Package: complete on `codex/observability-dashboard-package`
-- [ ] Phase 10 - Repository And Schema Ownership
+- [x] Phase 10 - Repository And Schema Ownership: complete on `codex/repository-schema-ownership`
 - [ ] Phase 11 - Final Global And Wrapper Removal
 - [ ] Phase 12 - Documentation And Live Smoke
 
@@ -212,6 +212,26 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 9 because this phase only moves observability summaries, dashboard summaries, metrics rendering, metrics token storage, and metrics summary cache ownership behind `internal/observability`.
 
+## Phase 10 Validation
+
+Required:
+
+- [x] `go test -count=1 -run 'TestSchema|TestRepository|TestServerFacts|TestBackup|TestBackendContract|TestRouteInventory|TestAppDeps' ./...`
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 10 because this phase only moves SQLite schema creation/migration and server-facts repository ownership behind domain packages.
+
 ## Compatibility Wrappers To Remove Later
 
 These wrappers are intentionally retained after the first pass and are marked with `//lint:ignore U1000`. They should disappear by Phase 11 after package APIs replace all transitional call sites.
@@ -263,6 +283,7 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 ### App, DB, And Encryption State
 
 - `internal/app`: owns Gin router composition, trusted proxy parsing, global middleware ordering, initialization ordering, template loading, static mounting, and route registration callback execution.
+- Domain packages now own SQLite schema creation for their tables; `package main` remains the temporary deterministic schema orchestrator and owns the shared `settings` table until Phase 11.
 - `app_deps.go`: `AppDeps` remains a temporary main-package compatibility boundary for main-owned services until later package extractions.
 - `webserver.go`: `db`, `dbOnce`
 - `webserver.go`: `keyOnce`, `encryptionKey`

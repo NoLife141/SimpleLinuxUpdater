@@ -61,10 +61,7 @@ func newServerInventoryService() *ServerInventoryService {
 		RenamePolicyOverridesServer:    renameUpdatePolicyOverridesServerTx,
 		RenamePolicyTargetServers:      renameUpdatePolicyTargetServersTx,
 		RenameServerFacts:              renameServerFactsTx,
-		DeleteServerFacts: func(tx *sql.Tx, name string) error {
-			_, err := tx.Exec("DELETE FROM server_facts WHERE server_name = ?", name)
-			return err
-		},
+		DeleteServerFacts:              defaultServerFactsRepository().DeleteServerTx,
 	})
 }
 

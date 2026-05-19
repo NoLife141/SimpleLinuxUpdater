@@ -224,10 +224,6 @@ func markInterruptedUpdatePolicyRuns() error {
 	return defaultPolicyRepository().MarkInterruptedRuns()
 }
 
-func boolToInt(v bool) int {
-	return policypkg.BoolToInt(v)
-}
-
 func snapshotServers() []Server {
 	mu.Lock()
 	defer mu.Unlock()
