@@ -3,149 +3,102 @@ package main
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
+
+	policypkg "debian-updater/internal/policies"
 )
 
-type PolicyServiceDeps struct {
-	ListPolicies             func() ([]UpdatePolicy, error)
-	LoadOverrides            func() (map[int64]map[string]bool, error)
-	LoadGlobalBlackouts      func() ([]UpdatePolicyBlackoutWindow, error)
-	SnapshotServers          func() []Server
-	CurrentStatusSnapshot    func(string) *ServerStatus
-	CreateRun                func(UpdatePolicyRun) (UpdatePolicyRun, bool, error)
-	ExecuteRun               func(UpdatePolicyRun, UpdatePolicy, Server)
-	AuditWithActor           func(actor, clientIP, action, targetType, targetName, status, message string, meta map[string]any)
-	CurrentLocation          func() *time.Location
-	CurrentMaintenanceActive func() bool
-	JobTimestampNow          func() string
-	MarkInterruptedRuns      func() error
-	TryBackupRestoreReadLock func() bool
-	UnlockBackupRestoreRead  func()
-	Now                      func() time.Time
-	Logf                     func(string, ...any)
-}
+type PolicyServiceDeps = policypkg.ServiceDeps
+type PolicyScheduleRequest = policypkg.ScheduleRequest
+type PolicyMatchContext = policypkg.MatchContext
+type PolicySchedulerOptions = policypkg.SchedulerOptions
+type PolicyService = policypkg.Service
 
-type PolicyScheduleRequest struct {
-	Now               time.Time
-	MaintenanceActive bool
-}
-
-type PolicyMatchContext struct {
-	Overrides map[int64]map[string]bool
-}
-
-type PolicySchedulerOptions struct {
-	TickInterval time.Duration
-}
-
-type PolicyService struct {
-	deps PolicyServiceDeps
-}
+var (
+	defaultPolicyServiceOnce sync.Once
+	defaultPolicyServiceInst *PolicyService
+)
 
 func NewPolicyService(deps PolicyServiceDeps) *PolicyService {
-	return &PolicyService{deps: deps.withDefaults()}
+	return policypkg.NewService(policyServiceDepsWithDefaults(deps))
 }
 
 func defaultPolicyService() *PolicyService {
-	return NewPolicyService(PolicyServiceDeps{})
+	defaultPolicyServiceOnce.Do(func() {
+		defaultPolicyServiceInst = NewPolicyService(PolicyServiceDeps{})
+	})
+	return defaultPolicyServiceInst
 }
 
-func (s *PolicyService) ensureDeps() PolicyServiceDeps {
-	if s == nil {
-		return PolicyServiceDeps{}.withDefaults()
+func policyServiceDepsWithDefaults(deps PolicyServiceDeps) PolicyServiceDeps {
+	if deps.ListPolicies == nil {
+		deps.ListPolicies = listUpdatePolicies
 	}
-	return s.deps.withDefaults()
-}
-
-func (d PolicyServiceDeps) withDefaults() PolicyServiceDeps {
-	if d.ListPolicies == nil {
-		d.ListPolicies = listUpdatePolicies
+	if deps.LoadOverrides == nil {
+		deps.LoadOverrides = loadAllUpdatePolicyOverrides
 	}
-	if d.LoadOverrides == nil {
-		d.LoadOverrides = loadAllUpdatePolicyOverrides
+	if deps.LoadGlobalBlackouts == nil {
+		deps.LoadGlobalBlackouts = loadGlobalUpdatePolicyBlackouts
 	}
-	if d.LoadGlobalBlackouts == nil {
-		d.LoadGlobalBlackouts = loadGlobalUpdatePolicyBlackouts
+	if deps.SnapshotServers == nil {
+		deps.SnapshotServers = snapshotServers
 	}
-	if d.SnapshotServers == nil {
-		d.SnapshotServers = snapshotServers
+	if deps.CurrentStatusSnapshot == nil {
+		deps.CurrentStatusSnapshot = currentStatusSnapshot
 	}
-	if d.CurrentStatusSnapshot == nil {
-		d.CurrentStatusSnapshot = currentStatusSnapshot
+	if deps.CreateRun == nil {
+		deps.CreateRun = createUpdatePolicyRun
 	}
-	if d.CreateRun == nil {
-		d.CreateRun = createUpdatePolicyRun
+	if deps.ExecuteRun == nil {
+		deps.ExecuteRun = executeScheduledPolicyRun
 	}
-	if d.ExecuteRun == nil {
-		d.ExecuteRun = executeScheduledPolicyRun
+	if deps.AuditWithActor == nil {
+		deps.AuditWithActor = auditWithActor
 	}
-	if d.AuditWithActor == nil {
-		d.AuditWithActor = auditWithActor
+	if deps.CurrentLocation == nil {
+		deps.CurrentLocation = currentAppLocation
 	}
-	if d.CurrentLocation == nil {
-		d.CurrentLocation = currentAppLocation
-	}
-	if d.CurrentMaintenanceActive == nil {
-		d.CurrentMaintenanceActive = func() bool {
+	if deps.CurrentMaintenanceActive == nil {
+		deps.CurrentMaintenanceActive = func() bool {
 			return currentMaintenanceState().Active
 		}
 	}
-	if d.JobTimestampNow == nil {
-		d.JobTimestampNow = jobTimestampNow
+	if deps.JobTimestampNow == nil {
+		deps.JobTimestampNow = jobTimestampNow
 	}
-	if d.MarkInterruptedRuns == nil {
-		d.MarkInterruptedRuns = markInterruptedUpdatePolicyRuns
+	if deps.MarkInterruptedRuns == nil {
+		deps.MarkInterruptedRuns = markInterruptedUpdatePolicyRuns
 	}
 	switch {
-	case d.TryBackupRestoreReadLock == nil && d.UnlockBackupRestoreRead == nil:
-		d.TryBackupRestoreReadLock = backupRestoreMu.TryRLock
-		d.UnlockBackupRestoreRead = backupRestoreMu.RUnlock
-	case d.TryBackupRestoreReadLock != nil && d.UnlockBackupRestoreRead != nil:
-	case d.TryBackupRestoreReadLock != nil:
-		d.UnlockBackupRestoreRead = func() {}
+	case deps.TryBackupRestoreReadLock == nil && deps.UnlockBackupRestoreRead == nil:
+		deps.TryBackupRestoreReadLock = backupRestoreMu.TryRLock
+		deps.UnlockBackupRestoreRead = backupRestoreMu.RUnlock
+	case deps.TryBackupRestoreReadLock != nil && deps.UnlockBackupRestoreRead != nil:
+	case deps.TryBackupRestoreReadLock != nil:
+		deps.UnlockBackupRestoreRead = func() {}
 	default:
-		d.TryBackupRestoreReadLock = func() bool { return true }
-		d.UnlockBackupRestoreRead = func() {}
+		deps.TryBackupRestoreReadLock = func() bool { return true }
+		deps.UnlockBackupRestoreRead = func() {}
 	}
-	if d.Now == nil {
-		d.Now = time.Now
+	if deps.Now == nil {
+		deps.Now = time.Now
 	}
-	if d.Logf == nil {
-		d.Logf = log.Printf
+	if deps.Logf == nil {
+		deps.Logf = log.Printf
 	}
-	return d
+	if deps.StatusInProgress == nil {
+		deps.StatusInProgress = statusInProgress
+	}
+	if deps.TimestampLayout == "" {
+		deps.TimestampLayout = jobTimestampLayout
+	}
+	return deps
 }
 
-func (o PolicySchedulerOptions) withDefaults() PolicySchedulerOptions {
-	if o.TickInterval <= 0 {
-		o.TickInterval = updatePolicyTickInterval
+func startPolicyScheduler(service *PolicyService, ctx context.Context, options PolicySchedulerOptions) {
+	if service == nil {
+		service = defaultPolicyService()
 	}
-	return o
-}
-
-func (s *PolicyService) StartScheduler(ctx context.Context, options PolicySchedulerOptions) {
-	deps := s.ensureDeps()
-	options = options.withDefaults()
-	updatePolicySchedulerOnce.Do(func() {
-		if err := deps.MarkInterruptedRuns(); err != nil {
-			deps.Logf("failed to mark interrupted policy runs: %v", err)
-		}
-		if err := s.ProcessDue(deps.Now()); err != nil {
-			deps.Logf("scheduled policy tick failed: %v", err)
-		}
-		go func() {
-			ticker := time.NewTicker(options.TickInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case tick := <-ticker.C:
-					if err := s.ProcessDue(tick); err != nil {
-						deps.Logf("scheduled policy tick failed: %v", err)
-					}
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	})
+	service.StartScheduler(ctx, options)
 }

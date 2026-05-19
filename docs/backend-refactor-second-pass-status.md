@@ -11,7 +11,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 4 - Auth Package: complete on `codex/auth-package`
 - [x] Phase 5 - Backup Package: complete on `codex/backup-package`
 - [x] Phase 6 - Server Inventory Package: complete on `codex/servers-package`
-- [ ] Phase 7 - Policy Package
+- [x] Phase 7 - Policy Package: complete on `codex/policies-package`
 - [ ] Phase 8 - Update Package
 - [ ] Phase 9 - Observability And Dashboard Package
 - [ ] Phase 10 - Repository And Schema Ownership
@@ -152,11 +152,33 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 6 because this phase only moves server inventory state, persistence, known_hosts, and SSH auth helper behavior behind `internal/servers`.
 
+## Phase 7 Validation
+
+Required:
+
+- [x] `go test -count=1 -run 'TestPolicy|TestUpdatePolicy|TestScheduled.*Policy|TestDashboard|TestBackendContract|TestRouteInventory' ./...`
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `go build -o webserver .`
+- [x] `npm run test:e2e`
+
+Broader gates:
+
+- [x] `go test -race -count=1 ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `npm audit --audit-level=moderate`
+
+Live disposable-host smoke is not required for Phase 7 because this phase only moves scheduled policy persistence, matching, blackout handling, run records, missed-tick replay, and scheduler ownership behind `internal/policies`.
+
 ## Compatibility Wrappers To Remove Later
 
 These wrappers are intentionally retained after the first pass and are marked with `//lint:ignore U1000`. They should disappear by Phase 11 after package APIs replace all transitional call sites.
 
 ### Policy Wrappers And Handlers
+
+Policy ownership now lives in `internal/policies`; these main-package wrappers remain temporary adapters for routes, dashboard projections, update-runner integration, and direct transitional tests until Phase 11.
 
 - `update_policies.go`: `normalizeUpdatePolicy`
 - `update_policies.go`: `updateUpdatePolicy`
@@ -236,10 +258,8 @@ This inventory is grouped by likely owning phase. Some package-level values are 
 
 ### Policy Scheduler State
 
-- `update_policies.go`: `updatePolicySchedulerOnce`
-- `update_policies.go`: `updatePolicyTickMu`
-- `update_policies.go`: `updatePolicyMissedTickMu`
-- `update_policies.go`: `updatePolicyMissedTicks`
+- `internal/policies`: owns scheduler once/tick locking, missed-tick replay state, policy validation, matching, blackout checks, due-slot detection, run creation orchestration, and SQLite policy/run/settings repositories.
+- `policy_service.go`: temporary main-owned default service composition and callback defaults remain until final app-scoped ownership cleanup.
 
 ### Backup And Maintenance State
 
