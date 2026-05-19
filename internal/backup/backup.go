@@ -749,6 +749,19 @@ func RemoveSQLiteSidecars(path string) error {
 	return nil
 }
 
+func requireRestoredDatabaseTables(ctx context.Context, db *sql.DB, names ...string) error {
+	for _, name := range names {
+		var count int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(1) FROM sqlite_master WHERE type = 'table' AND name = ?", name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect restored database table %s: %w", name, err)
+		}
+		if count == 0 {
+			return fmt.Errorf("restored database is missing required table %s", name)
+		}
+	}
+	return nil
+}
+
 func (s *Service) ValidateConfigData(data []byte) ([]byte, error) {
 	var cfg map[string]string
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -785,6 +798,9 @@ func (s *Service) ValidateDatabaseData(ctx context.Context, data []byte, encrypt
 	db.SetMaxIdleConns(1)
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
 		return fmt.Errorf("set restored database busy_timeout: %w", err)
+	}
+	if err := requireRestoredDatabaseTables(ctx, db, "servers"); err != nil {
+		return err
 	}
 	if err := s.deps.EnsureSchema(db); err != nil {
 		return fmt.Errorf("validate restored database schema: %w", err)
@@ -855,6 +871,9 @@ func (s *Service) ReencryptDatabaseData(ctx context.Context, data []byte, fromKe
 	db.SetMaxIdleConns(1)
 	if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
 		return nil, fmt.Errorf("set restored database rewrap busy_timeout: %w", err)
+	}
+	if err := requireRestoredDatabaseTables(ctx, db, "servers"); err != nil {
+		return nil, err
 	}
 	if err := s.deps.EnsureSchema(db); err != nil {
 		return nil, fmt.Errorf("prepare restored database rewrap schema: %w", err)

@@ -5,10 +5,15 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 const testPassphrase = "very-strong-passphrase"
@@ -147,6 +152,56 @@ func TestRestoreArchiveBeforeApplyRunsAfterArchiveExtraction(t *testing.T) {
 	}
 	if !applyStarted {
 		t.Fatalf("BeforeApply was not called before applying files")
+	}
+}
+
+func TestValidateDatabaseDataRejectsMissingServersTableBeforeMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "missing-servers.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	if _, err := db.Exec("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		_ = db.Close()
+		t.Fatalf("create settings table: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatalf("read database: %v", err)
+	}
+
+	schemaCalled := false
+	service := NewService(ServiceDeps{
+		EnsureSchema: func(db *sql.DB) error {
+			schemaCalled = true
+			_, err := db.Exec(`
+				CREATE TABLE IF NOT EXISTS servers (
+					name TEXT PRIMARY KEY,
+					host TEXT NOT NULL,
+					port INTEGER NOT NULL DEFAULT 22,
+					user TEXT NOT NULL,
+					pass_enc TEXT NOT NULL,
+					key_enc TEXT NOT NULL DEFAULT '',
+					key_path TEXT NOT NULL DEFAULT '',
+					tags TEXT NOT NULL DEFAULT ''
+				)
+			`)
+			return err
+		},
+		DecryptSecretWithKey: func(string, []byte) (string, error) {
+			return "", nil
+		},
+		Logf: func(string, ...any) {},
+	})
+	err = service.ValidateDatabaseData(context.Background(), data, []byte("test-key"))
+	if err == nil || !strings.Contains(err.Error(), "missing required table servers") {
+		t.Fatalf("ValidateDatabaseData() error = %v, want missing servers table", err)
+	}
+	if schemaCalled {
+		t.Fatalf("ValidateDatabaseData() called EnsureSchema before rejecting missing servers table")
 	}
 }
 
