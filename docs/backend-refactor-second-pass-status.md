@@ -16,7 +16,7 @@ This checklist tracks the second backend refactor pass described in [backend-ref
 - [x] Phase 9 - Observability And Dashboard Package: complete on `codex/observability-dashboard-package`
 - [x] Phase 10 - Repository And Schema Ownership: complete on `codex/repository-schema-ownership`
 - [x] Phase 11 - Final Global And Wrapper Removal: complete on `codex/final-global-wrapper-removal`
-- [ ] Phase 12 - Documentation And Live Smoke
+- [x] Phase 12 - Documentation And Live Smoke: complete on `codex/phase12-docs-smoke`
 
 ## Phase 0 Validation
 
@@ -252,11 +252,53 @@ Broader gates:
 
 Live disposable-host smoke is not required for Phase 11 because this phase only removes compatibility wrappers and app-scopes default runtime dependencies.
 
-## Compatibility Cleanup
+## Phase 12 Validation
+
+Required:
+
+- [x] `go test -count=1 ./...`
+- [x] `go vet ./...`
+- [x] `staticcheck ./...`
+- [x] `govulncheck ./...`
+- [x] `actionlint`
+- [x] `go test -race -count=1 ./...`
+- [x] `go build -o webserver .`
+- [x] `npm audit --audit-level=moderate`
+- [x] `npm run test:e2e`
+
+Live smoke:
+
+- [x] disposable-host reachability and safety check completed
+- [x] temp app DB and temp `known_hosts` used
+- [x] setup/login completed
+- [x] disposable host added, scanned, and trusted
+- [x] update flow reached a terminal result
+- [x] scheduled policy scan/run record verified
+- [x] audit report, job report, dashboard/observability, and backup export verified
+- [x] timeout regression guard verified
+
+Smoke result:
+
+- Runtime code under test: `a5e9c17`
+- Phase 12 docs/status commit: pending until this branch is committed.
+- Disposable app DB path: `/tmp/slu-phase12-smoke.kw7zeX/servers.db`
+- Disposable known-hosts path: `/tmp/slu-phase12-smoke.kw7zeX/known_hosts`
+- Disposable target name: `release-smoke-target`
+- Target OS: Ubuntu 25.04 on Linux `6.14.0-37-generic`
+- Target reachability/safety check: SSH login succeeded; `/etc/os-release`, `uname -a`, and `apt-get -s upgrade` completed; simulated upgrade reported `0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded`.
+- Update action result: `/api/update/release-smoke-target` created job `a2b32429276cd0d0e207666f9efab9b3` and finished `done` with `No packages to upgrade`.
+- Scheduled policy result: scan-only policy run `1` created job `3c8a5b5d2aa6321a6532d981723fad0e` and finished `succeeded` with `Scheduled scan completed: no pending updates`.
+- Audit/report result: audit report `/api/reports/audit/10`, update job report, scheduled scan job report, dashboard summary, and observability `24h` summary loaded successfully.
+- Backup export result: `/api/backup/export` returned `simplelinuxupdater-backup-20260520T022918Z.slubkp`, 10142 bytes, with job `6c519e51c25fe3c5d11ddfdf22296acd`.
+- Timeout regression guard: restart with `DEBIAN_UPDATER_SSH_COMMAND_TIMEOUT_SECONDS=1` and `DEBIAN_UPDATER_RETRY_MAX_ATTEMPTS=1`; update job `d5b0a3837e6e430d1ac9711a3181479b` finished `error` with `command timed out after 1s`.
+- Skipped steps and exact reasons: pending approval approve/cancel was not exercised because both the read-only precheck and live update found no pending packages, so the update completed directly without entering `pending_approval`.
+
+## Final Runtime State
 
 - No `//lint:ignore U1000` compatibility wrappers remain.
 - Default router dependencies now create fresh app-scoped service, broker, barrier, rate-limiter, server-state, metrics-token, policy, update, backup, audit, and observability instances instead of reusing mutable service singletons.
-- Remaining package-level values are process startup state, constants, pure helper functions, compiled regexes, or low-level test hooks that require process-wide replacement until the final command-layout/documentation phase.
+- `package main` remains the process startup and route-adapter layer. It owns DB path/opening, encryption-key file loading, environment-driven process config, route registration, and command startup.
+- Remaining package-level values are process startup state, constants, pure helper functions, compiled regexes, and low-level test hooks that require process-wide replacement.
 
 ## Phase 0 Contract Coverage
 

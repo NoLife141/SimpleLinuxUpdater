@@ -2,7 +2,7 @@
 
 # Architecture
 
-SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered pages, JSON APIs, SQLite persistence, and SSH runners for Debian/Ubuntu maintenance. The backend now uses internal packages for the main service boundaries, while `package main` remains the composition layer for process startup, DB opening, route adapters, and temporary compatibility wrappers.
+SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered pages, JSON APIs, SQLite persistence, and SSH runners for Debian/Ubuntu maintenance. The backend now uses internal packages for domain ownership and an app-scoped runtime composed through `AppDeps`; `package main` remains responsible for process startup, DB opening, route adapters, and command-level wiring.
 
 ## Table of contents
 
@@ -13,14 +13,15 @@ SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered 
 - [Update runner lifecycle](#update-runner-lifecycle)
 - [Scheduled policies](#scheduled-policies)
 - [Audit, reports, and observability](#audit-reports-and-observability)
-- [Compatibility wrappers](#compatibility-wrappers)
+- [Development shape](#development-shape)
 
 ## Runtime shape
 
 - Web server: Go + Gin, HTML templates under `templates/`, static assets under `static/`.
 - Route registry: `setupRouterWithDeps(AppDeps)` builds the engine, middleware, sessions, jobs, templates, static files, and then calls `registerRoutes`.
-- Dependency boundary: `AppDeps` provides injectable DB, service, job-manager, session, timezone, dashboard-event, and initialization dependencies.
+- Dependency boundary: `AppDeps` provides injectable DB, service, job-manager, session, timezone, dashboard-event, backup-barrier, server-state, and initialization dependencies.
 - Services: audit, auth, backup, events, jobs, observability, policy scheduling, server inventory, and update runner behavior live behind `internal/...` package boundaries.
+- Runtime state: default router setup creates fresh app-scoped services, broker, barrier, rate limiters, job manager, server state, session manager, metrics-token service, policy service, update service, backup service, audit service, and observability service.
 - Schema ownership: each domain package owns its SQLite table creation/migration; `package main` calls those installers in a deterministic startup order.
 - UI: Status, Manage, Observability, and Admin pages are backed by JSON APIs and live dashboard events.
 
@@ -30,8 +31,8 @@ SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered 
 2. Router setup configures trusted proxies, security headers, backup/restore barriers, maintenance state, job recovery, sessions, templates, and static files.
 3. `registerRoutes(router, deps)` registers public setup/login/status routes first.
 4. Protected routes are installed after `authGateMiddleware()` and `sameOriginWriteMiddleware()`.
-5. Route groups pass `AppDeps` into low-risk seams, including server/action routes, policy/audit/report routes, dashboard summaries, and dashboard events.
-6. Handlers preserve existing HTTP paths, JSON shapes, middleware behavior, and status codes while delegating business behavior into services where that seam exists.
+5. Route groups pass `AppDeps` into server/action routes, policy/audit/report routes, dashboard summaries, metrics, backup, auth/session, and dashboard events.
+6. Handlers preserve HTTP paths, JSON shapes, middleware behavior, and status codes while delegating business behavior into package-owned services.
 
 ## Services and state
 
@@ -41,7 +42,9 @@ SimpleLinuxUpdater is a single Go binary with a Gin web server, server-rendered 
 - `internal/policies.Service` owns scheduled-policy validation, matching, blackout handling, due-slot processing, missed-tick replay, scheduler ticks, and interrupted-run recovery.
 - `internal/observability.Service` owns dashboard/observability summaries, metrics rendering, metrics token persistence, and metrics cache behavior.
 - `internal/jobs.Manager` owns persisted job creation, update, recovery, runtime-status sync callbacks, and dashboard notifications after successful writes.
-- Shared runtime maps such as server inventory snapshots and live `statusMap` remain guarded by existing mutexes until a later package-boundary cleanup.
+- `internal/backup.Barrier` owns the backup/export/restore coordination lock used by middleware and scheduler access checks.
+- `internal/events.Broker` owns dashboard event fan-out for SSE clients.
+- `internal/servers.State` owns the server inventory snapshot and live status map for each app instance. Process-wide globals remain only for process startup, constants, pure helpers, and low-level test seams that must be replaced at process scope.
 
 ## Data storage
 
@@ -84,7 +87,7 @@ Autoremove, sudoers enable/disable, CVE enrichment, and scheduled scans use the 
 
 Scheduled update policies support legacy `target_tag`, `include_tags`, `exclude_tags`, explicit `target_servers`, per-server overrides, global blackouts, and per-policy blackout windows. `PolicyService` evaluates matching, due slots in the app timezone, skip reasons, missed scheduler ticks during backup restore, and run creation before handing execution to the update service.
 
-Policy APIs still live in `package main` and keep the existing wire format. Service extraction is a behavior seam, not a public API change.
+Policy route adapters still live in `package main` and keep the existing wire format. Matching, validation, persistence, skipped-run recording, scheduler ticks, and missed-tick replay live in `internal/policies`.
 
 ## Audit, reports, and observability
 
@@ -102,8 +105,11 @@ The observability dashboard and `/metrics` endpoint derive summaries from `updat
 - failure-cause aggregation;
 - policy/run/job summaries used by dashboard panels.
 
-Dashboard event streaming uses the shared client event broker. The UI can fall back to polling when live events are unavailable.
+Dashboard event streaming uses the app-scoped client event broker. The UI can fall back to polling when live events are unavailable.
 
-## Compatibility wrappers
+## Development shape
 
-The refactor keeps wrappers such as `setupRouter`, `audit`, `auditWithActor`, `writeAuditEvent`, `normalizeUpdatePolicy`, `processDueUpdatePolicies`, `startUpdateRunner`, and job aliases in place. New code should prefer the service or `AppDeps` seam when it keeps behavior identical, but existing wrappers remain supported until a later global-removal phase.
+- `setupRouter()` remains the production entrypoint and delegates to `setupRouterWithDeps(NewDefaultAppDeps())`.
+- `setupRouterWithDeps` is the test and composition seam for injecting services, state, DB providers, session managers, job managers, event brokers, rate limiters, and time providers.
+- `newIsolatedTestApp(t)` creates a temp DB, temp `known_hosts`, fresh app-scoped runtime dependencies, and authenticated-session helpers for HTTP contract tests.
+- New domain behavior should go into the owning internal package first, with route adapters limited to request parsing, auth/CSRF placement, response shape preservation, audit calls, and dependency wiring.

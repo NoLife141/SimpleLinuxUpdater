@@ -50,8 +50,16 @@ If you want to implement a fix or feature:
 - `setupRouter()` is the production entrypoint and delegates to `setupRouterWithDeps(NewDefaultAppDeps())`.
 - `setupRouterWithDeps(AppDeps)` owns Gin engine creation, trusted proxies, middleware, maintenance/job/session initialization, templates, static files, and route registration.
 - `registerRoutes(router, deps)` is the route wiring entrypoint. Public routes must stay before `authGateMiddleware`; protected write routes must stay behind `sameOriginWriteMiddleware`.
-- Use existing services when adding behavior: `AuditService`, `ServerInventoryService`, `UpdateService`, `PolicyService`, and `internal/jobs.Manager`.
-- Keep compatibility wrappers when existing tests or call sites rely on them. Prefer small seams through `AppDeps` over broad rewrites.
+- Use the owning internal package when adding domain behavior:
+  - `internal/audit` for audit persistence, listing, pruning, and Markdown reports.
+  - `internal/auth` for users, sessions, same-origin helpers, and rate limiters.
+  - `internal/backup` for backup archive/export/restore behavior and restore barriers.
+  - `internal/servers` for inventory state, persistence, credentials, known_hosts, and SSH auth helpers.
+  - `internal/policies` for scheduled policy validation, matching, run records, scheduler ticks, and missed-run replay.
+  - `internal/updates` for update/autoremove/sudoers execution, approval/cancel, CVE enrichment, SSH retries, and scheduled scans.
+  - `internal/observability` for dashboard summaries, observability summaries, Prometheus rendering, and metrics tokens.
+  - `internal/events` and `internal/jobs` for dashboard SSE fan-out and persisted job management.
+- Use `AppDeps` to inject DB providers, services, runtime state, job managers, session managers, event brokers, rate limiters, and time providers. Do not add mutable package-level service singletons.
 - Do not put new business logic directly in route registration. Route handlers should parse requests, preserve response behavior, and delegate.
 
 ## Testing pattern
@@ -63,6 +71,13 @@ Preferred app fixtures:
 - `newIsolatedTestApp(t)` for a fully isolated router with temp DB, temp `known_hosts`, fresh session state, fresh job manager, reset rate limiters, reset metrics token state, and empty in-memory server/status state.
 - `newTestAppWithDeps(t, dbFile, deps)` when a route must use injected services or callbacks.
 - `app.authenticate(t)` to create the admin account and return an authenticated session cookie.
+
+Fixture rules:
+
+- Prefer `newIsolatedTestApp(t)` for HTTP contract coverage so tests do not share DB rows, sessions, jobs, auth rate limits, server state, backup barriers, dashboard brokers, metrics-token caches, SSH/known_hosts hooks, or maintenance state.
+- Prefer package-level service/repository tests for validation, matching, persistence, parsing, retry, and report rendering logic that does not require Gin middleware.
+- Use `newTestAppWithDeps` only when the behavior under test needs an injected service, fake callback, fixed time provider, custom job manager, or custom DB provider.
+- Keep route tests focused on auth, same-origin behavior, status codes, JSON keys, headers, downloads, and route inventory.
 
 Example route test shape:
 
@@ -98,12 +113,13 @@ app := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "app.db"), AppDeps{
 1. Add the route in the smallest matching route group in `registerRoutes`.
 2. If the handler needs a dependency, pass `AppDeps` into the group and call a `handle...WithDeps` helper.
 3. Keep the existing middleware order: public routes first, then `authGateMiddleware`, then `sameOriginWriteMiddleware`.
-4. Add the critical method/path pair to the route inventory test when the endpoint is user-facing or relied on by the UI.
-5. Add an HTTP test with `newIsolatedTestApp` or `newTestAppWithDeps` for auth, status code, and JSON shape.
+4. Put behavior in the owning internal service or repository unless the route only composes existing behavior.
+5. Add the critical method/path pair to the route inventory test when the endpoint is user-facing or relied on by the UI.
+6. Add an HTTP test with `newIsolatedTestApp` or `newTestAppWithDeps` for auth, status code, and JSON shape.
 
 ### Add a new audit event
 
-1. Reuse `audit(c, ...)` in Gin handlers or `auditWithActor(...)`/`AuditService.Record(...)` outside Gin.
+1. Use the app's injected audit service from route dependencies, or the `internal/audit.Service` directly in package-level tests.
 2. Use stable action names such as `feature.action` and keep metadata JSON small, sanitized, and free of secrets.
 3. Record failures and successes close to the operation that actually succeeded or failed.
 4. Do not change `AuditEvent` JSON fields, report routes, or existing report formatting unless the change includes compatibility tests.
@@ -111,7 +127,7 @@ app := newTestAppWithDeps(t, filepath.Join(t.TempDir(), "app.db"), AppDeps{
 
 ### Add a scheduled-policy rule
 
-1. Add matching or validation behavior in `PolicyService`, not directly in route handlers.
+1. Add matching or validation behavior in `internal/policies.Service`, not directly in route handlers.
 2. Preserve existing targeting inputs: `target_tag`, `include_tags`, `exclude_tags`, `target_servers`, and per-server overrides.
 3. Preserve run-record behavior: skipped, superseded, blackout, maintenance, missing-server, no-match, and busy reasons should remain explicit.
 4. Keep due-slot calculations in the app timezone.

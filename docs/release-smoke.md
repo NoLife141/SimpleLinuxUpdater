@@ -2,7 +2,7 @@
 
 [README](../README.md) | [Installation](installation.md) | [Configuration](configuration.md) | [Usage](usage.md) | [Deployment](deployment.md) | [Security](security.md) | [Troubleshooting](troubleshooting.md) | [Architecture](architecture.md) | [Contributing](contributing.md)
 
-Run this checklist before creating a release tag. The smoke must use a disposable app database, disposable `known_hosts`, and a disposable Debian/Ubuntu SSH target. Do not use existing saved inventory entries unless the release owner explicitly confirms they are safe to mutate.
+Run this checklist before creating a release tag. This is the authoritative disposable-host smoke path: use a disposable app database, disposable `known_hosts`, and a disposable Debian/Ubuntu SSH target. Do not use existing saved inventory entries unless the release owner explicitly confirms they are safe to mutate, and never commit target credentials or smoke artifacts.
 
 ## Preconditions
 
@@ -16,6 +16,7 @@ Run this checklist before creating a release tag. The smoke must use a disposabl
   - sudo behavior, including whether a sudo password is required;
   - confirmation that approving updates is safe.
 - Browser access to the app from the tester machine.
+- Non-destructive target reachability check completed before the app is pointed at the host, for example an SSH login that only runs `uname -a`, `lsb_release -a` or `/etc/os-release`, and `apt-get -s upgrade`.
 
 Suggested local app command:
 
@@ -28,6 +29,8 @@ DEBIAN_UPDATER_DB_PATH=.tmp-smoke/servers.db \
 DEBIAN_UPDATER_KNOWN_HOSTS=.tmp-smoke/known_hosts \
 ./webserver
 ```
+
+Keep any password, private key, or sudo information outside shell history and outside tracked files. If the target cannot be reached or is no longer confirmed disposable, stop the live smoke and record the exact blocked reason in the smoke result.
 
 ## 1) Setup and Login
 
@@ -135,17 +138,14 @@ Required:
 
 - `go test -count=1 ./...` passes.
 - `go vet ./...` passes.
-- `go test -race -count=1 ./...` passes.
-- `go build -o webserver .` passes.
-- `npm run test:e2e` passes.
-- CI (`unit`, `race`, `cover`, `ui-e2e`) is green on the release commit.
-
-Optional hardening checks when tools are available:
-
 - `staticcheck ./...` passes.
 - `govulncheck ./...` passes.
 - `actionlint` passes.
-- `npm audit --audit-level=moderate` passes.
+- `go test -race -count=1 ./...` passes.
+- `go build -o webserver .` passes.
+- `npm audit --audit-level=moderate` passes or reports only accepted advisories documented in the release notes.
+- `npm run test:e2e` passes.
+- CI (`unit`, `race`, `cover`, `ui-e2e`) is green on the release commit.
 
 ## Smoke Result
 
@@ -156,8 +156,10 @@ Record the result in the release notes or pull request:
 - Disposable known-hosts path:
 - Disposable target name:
 - Target OS:
+- Target reachability/safety check:
 - Update action result:
 - Scheduled policy result:
 - Audit/report result:
 - Backup export result:
+- Automated gate result:
 - Skipped steps and exact reasons:
