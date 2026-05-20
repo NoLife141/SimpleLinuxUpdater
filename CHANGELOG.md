@@ -6,8 +6,23 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.4] - 2026-05-20
+
+### Added
+
+- Add the completed second-pass backend refactor documentation, release smoke notes, and post-refactor stabilization checklist.
+
+### Changed
+
+- Move backend runtime ownership to app-scoped dependencies and internal domain packages for audit, auth, backup, events, jobs, observability, policies, servers, updates, and schema ownership.
+- Replace Admin timezone free-text entry with a picker containing the supported IANA and fixed-offset timezone choices.
+- Improve dashboard host details with clearer disk free/total capacity reporting and stronger selected-host visibility.
+
 ### Fixed
 
+- Keep dashboard live-sync and tag displays stable as text changes.
+- Preserve persisted disk-total facts across dashboard summaries.
+- Clarify disabled explicit-server policy copy when no matching count is shown.
 - Update pre-check documentation to match the stricter v0.2.3 apt lock and APT/DPKG health behavior.
 
 ## [v0.2.3] - 2026-05-16
