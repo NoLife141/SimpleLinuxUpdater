@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	internalbackup "debian-updater/internal/backup"
+
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
 	_ "modernc.org/sqlite"
@@ -390,6 +392,24 @@ func TestSetupRouterWithDepsDefaultsGlobalKeyToInjectedDB(t *testing.T) {
 	}
 }
 
+func TestAppGlobalKeyHasKeyReturnsDBErrors(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "global-key-error.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	_, _, _, hasKey := newAppGlobalKeyStore(func() *sql.DB { return db })
+	ok, err := hasKey()
+	if err == nil {
+		t.Fatalf("HasGlobalKey() error = nil, want closed DB error")
+	}
+	if ok {
+		t.Fatalf("HasGlobalKey() ok = true, want false on DB error")
+	}
+}
+
 func TestSetupRouterWithDepsInitializesStatusesForPersistedServers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	preserveDBState(t)
@@ -738,8 +758,22 @@ func TestAppDepsDefaultsCreateFreshRuntimeState(t *testing.T) {
 		t.Fatalf("ensure job schema: %v", err)
 	}
 
-	one := AppDeps{DB: dbProvider}.withDefaults()
-	two := AppDeps{DB: dbProvider}.withDefaults()
+	one := AppDeps{
+		DB:                        dbProvider,
+		BackupBarrier:             internalbackup.NewBarrier(),
+		LoginRateLimiter:          NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts),
+		PasswordChangeRateLimiter: NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts),
+		SetupRateLimiter:          NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts),
+		MetricsRateLimiter:        NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts),
+	}.withDefaults()
+	two := AppDeps{
+		DB:                        dbProvider,
+		BackupBarrier:             internalbackup.NewBarrier(),
+		LoginRateLimiter:          NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts),
+		PasswordChangeRateLimiter: NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts),
+		SetupRateLimiter:          NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts),
+		MetricsRateLimiter:        NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts),
+	}.withDefaults()
 	t.Cleanup(one.LoginRateLimiter.Stop)
 	t.Cleanup(one.PasswordChangeRateLimiter.Stop)
 	t.Cleanup(one.SetupRateLimiter.Stop)
@@ -773,6 +807,19 @@ func TestAppDepsDefaultsCreateFreshRuntimeState(t *testing.T) {
 		one.MetricsRateLimiter == two.MetricsRateLimiter ||
 		one.CurrentJobManager() == two.CurrentJobManager() {
 		t.Fatalf("AppDeps defaults reused mutable runtime state")
+	}
+}
+
+func TestAppDepsProductionDefaultsReuseLifecycleOwnedBarrierAndLimiters(t *testing.T) {
+	deps := AppDeps{}.withDefaults()
+	if deps.BackupBarrier != backupRestoreMu {
+		t.Fatalf("default backup barrier = %p, want global lifecycle barrier %p", deps.BackupBarrier, backupRestoreMu)
+	}
+	if deps.LoginRateLimiter != loginRateLimiter ||
+		deps.PasswordChangeRateLimiter != passwordChangeRateLimiter ||
+		deps.SetupRateLimiter != setupRateLimiter ||
+		deps.MetricsRateLimiter != metricsRateLimiter {
+		t.Fatalf("default rate limiters should reuse lifecycle-owned package limiters")
 	}
 }
 

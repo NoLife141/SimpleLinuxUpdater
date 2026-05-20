@@ -106,7 +106,7 @@ func (deps AppDeps) withDefaults() AppDeps {
 		deps.AuditService = NewAuditService(deps.DB, deps.NotifyDashboardEvent, deps.CurrentAppTimezone)
 	}
 	if deps.BackupBarrier == nil {
-		deps.BackupBarrier = internalbackup.NewBarrier()
+		deps.BackupBarrier = backupRestoreMu
 	}
 	if deps.MetricsTokenService == nil {
 		deps.MetricsTokenService = NewMetricsTokenService(MetricsTokenDeps{
@@ -288,16 +288,16 @@ func (deps AppDeps) withDefaults() AppDeps {
 		deps.SetSessionManager = setGlobalSessionManager
 	}
 	if deps.LoginRateLimiter == nil {
-		deps.LoginRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+		deps.LoginRateLimiter = loginRateLimiter
 	}
 	if deps.PasswordChangeRateLimiter == nil {
-		deps.PasswordChangeRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
+		deps.PasswordChangeRateLimiter = passwordChangeRateLimiter
 	}
 	if deps.SetupRateLimiter == nil {
-		deps.SetupRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+		deps.SetupRateLimiter = setupRateLimiter
 	}
 	if deps.MetricsRateLimiter == nil {
-		deps.MetricsRateLimiter = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
+		deps.MetricsRateLimiter = metricsRateLimiter
 	}
 	if deps.TrustedProxies == nil {
 		deps.TrustedProxies = trustedProxiesFromEnv
@@ -436,11 +436,14 @@ func newAppGlobalKeyStore(dbProvider func() *sql.DB) (func() string, func(string
 	hasKey := func() (bool, error) {
 		var enc string
 		err := dbProvider().QueryRow("SELECT value FROM settings WHERE key = ?", globalKeySetting).Scan(&enc)
-		if err == sql.ErrNoRows || strings.TrimSpace(enc) == "" {
+		if err == sql.ErrNoRows {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
+		}
+		if strings.TrimSpace(enc) == "" {
+			return false, nil
 		}
 		return true, nil
 	}

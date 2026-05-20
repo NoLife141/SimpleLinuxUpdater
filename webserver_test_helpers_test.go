@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 
+	internalbackup "debian-updater/internal/backup"
+
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/ssh"
 )
@@ -102,6 +104,25 @@ func newTestApp(t *testing.T, opts testAppOptions) *testApp {
 		opts.Deps.DB = func() *sql.DB {
 			return appDB
 		}
+	}
+	if opts.Deps.BackupBarrier == nil {
+		opts.Deps.BackupBarrier = internalbackup.NewBarrier()
+	}
+	if opts.Deps.LoginRateLimiter == nil {
+		opts.Deps.LoginRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authLoginRateLimitMaxAttempts)
+		t.Cleanup(opts.Deps.LoginRateLimiter.Stop)
+	}
+	if opts.Deps.PasswordChangeRateLimiter == nil {
+		opts.Deps.PasswordChangeRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authPasswordChangeMaxAttempts)
+		t.Cleanup(opts.Deps.PasswordChangeRateLimiter.Stop)
+	}
+	if opts.Deps.SetupRateLimiter == nil {
+		opts.Deps.SetupRateLimiter = NewAuthRateLimiter(authRateLimitWindow, authSetupRateLimitMaxAttempts)
+		t.Cleanup(opts.Deps.SetupRateLimiter.Stop)
+	}
+	if opts.Deps.MetricsRateLimiter == nil {
+		opts.Deps.MetricsRateLimiter = NewAuthRateLimiter(metricsRateLimitWindow, metricsRateLimitMaxAttempts)
+		t.Cleanup(opts.Deps.MetricsRateLimiter.Stop)
 	}
 
 	knownHostsPath := strings.TrimSpace(os.Getenv("DEBIAN_UPDATER_KNOWN_HOSTS"))

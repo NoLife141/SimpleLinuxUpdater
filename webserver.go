@@ -1728,10 +1728,6 @@ func decryptSecretWithKey(encoded string, key []byte) (string, error) {
 	return string(plain), nil
 }
 
-func loadLegacyServers() bool {
-	return loadLegacyServersIntoService(newServerInventoryServiceWithState(globalServerState()), globalServerState())
-}
-
 func loadLegacyServersIntoService(service *ServerInventoryService, state *serverpkg.State) bool {
 	if service == nil || state == nil {
 		return false

@@ -60,8 +60,7 @@ func newServerInventoryServiceWithStateDBPath(state *serverpkg.State, dbProvider
 	if dbPathProvider == nil {
 		dbPathProvider = dbPath
 	}
-	var service *ServerInventoryService
-	service = serverpkg.NewService(serverpkg.ServiceDeps{
+	var service *ServerInventoryService = serverpkg.NewService(serverpkg.ServiceDeps{
 		State: state,
 		Repository: serverpkg.SQLiteRepository{
 			DB:      dbProvider,
