@@ -91,9 +91,13 @@ Add a backup verification mode that checks an uploaded backup without restoring 
 
 ## P3 - Technical Health
 
-### Backend Module Split
+### Internal Package Follow-Ups
 
-Follow `docs/backend-refactor-plan.md` to split the current backend into route, service, repository, job, audit, update, policy, and event modules.
+Build on the completed backend package split with small cleanup work only when it directly improves product delivery or test clarity.
+
+- Keep `package main` focused on process startup and route adapters.
+- Prefer package-level service or repository tests for new backend behavior.
+- Use fixture-backed HTTP tests for route contracts and cross-service flows.
 
 ### Test Fixture Cleanup
 
