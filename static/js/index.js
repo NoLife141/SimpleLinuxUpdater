@@ -1627,7 +1627,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
             await runBulkAction('update', 'update');
         });
         document.getElementById('bulk-approve').addEventListener('click', async () => {
-            if (!window.confirmTypedAction('Bulk approve all pending updates for the visible selected hosts?', 'APPROVE ALL')) {
+            if (!window.confirm('Bulk approve all pending updates for the visible selected hosts?')) {
                 return;
             }
             await runBulkAction('approve', 'approve');
@@ -1897,9 +1897,6 @@ const LOG_BOTTOM_THRESHOLD = 20;
         });
 
         async function approveAllUpdates(name) {
-            if (!window.confirmTypedAction(`Approve all pending updates for ${name}?`, name)) {
-                return;
-            }
             if (await postServerAction(`/api/approve/${encodeURIComponent(name)}`, 'Failed to approve updates.')) {
                 fetchServers(true);
             }
