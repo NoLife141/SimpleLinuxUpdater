@@ -23,19 +23,18 @@ body {
     padding: 30px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: linear-gradient(180deg, rgba(17, 24, 36, 0.94), rgba(11, 16, 24, 0.96));
+    background: linear-gradient(180deg, rgba(var(--panel-rgb), 0.94), rgba(30, 30, 30, 0.96));
     box-shadow: var(--shadow);
 }
 
 .auth-hero::after {
     content: "";
     position: absolute;
-    top: -10rem;
-    right: -8rem;
-    width: 24rem;
-    height: 24rem;
-    border-radius: 50%;
-    background: radial-gradient(circle at center, rgba(92, 200, 255, 0.14), transparent 68%);
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, var(--accent), rgba(var(--accent-rgb), 0.12));
 }
 
 .auth-hero > * {

@@ -153,7 +153,7 @@ func maintenancePageHTML() string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Maintenance Mode</title>
-  <link rel="stylesheet" href="/static/css/maintenance.css">
+  <link rel="stylesheet" href="/static/css/maintenance.css?v=vscode-dark-20260521a">
 </head>
 <body>
   <main>

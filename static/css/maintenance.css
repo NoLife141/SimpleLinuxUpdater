@@ -1,12 +1,16 @@
 :root {
-    --bg: #0b1220;
-    --card: #131c31;
-    --card-alt: #1a2540;
-    --text: #eef3ff;
-    --subtle: #a7b4d0;
-    --accent: #5ec2a8;
-    --border: rgba(167, 180, 208, 0.22);
-    --shadow: 0 24px 60px rgba(3, 8, 20, 0.45);
+    --bg: #1e1e1e;
+    --card: #252526;
+    --card-alt: #2d2d30;
+    --text: #d4d4d4;
+    --subtle: #9d9d9d;
+    --accent: #007acc;
+    --accent-text: #4daafc;
+    --success: #89d185;
+    --accent-rgb: 0, 122, 204;
+    --success-rgb: 137, 209, 133;
+    --border: rgba(60, 60, 60, 0.9);
+    --shadow: 0 20px 54px rgba(0, 0, 0, 0.34);
 }
 
 * {
@@ -16,10 +20,8 @@
 body {
     margin: 0;
     min-height: 100vh;
-    font-family: "Segoe UI", Helvetica, Arial, sans-serif;
-    background:
-        radial-gradient(circle at top, rgba(94, 194, 168, 0.18), transparent 42%),
-        linear-gradient(180deg, #0b1220 0%, #10182b 100%);
+    font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    background: linear-gradient(180deg, #1f1f1f 0%, #181818 100%);
     color: var(--text);
     display: grid;
     place-items: center;
@@ -30,7 +32,7 @@ main {
     width: min(560px, 100%);
     background: linear-gradient(180deg, var(--card), var(--card-alt));
     border: 1px solid var(--border);
-    border-radius: 24px;
+    border-radius: 14px;
     box-shadow: var(--shadow);
     padding: 32px;
 }
@@ -70,29 +72,29 @@ p {
     width: 12px;
     height: 12px;
     border-radius: 999px;
-    background: var(--accent);
-    box-shadow: 0 0 0 rgba(94, 194, 168, 0.5);
+    background: var(--success);
+    box-shadow: 0 0 0 rgba(var(--success-rgb), 0.5);
     animation: pulse 1.8s infinite;
     margin-bottom: 18px;
 }
 
 @keyframes pulse {
     0% {
-        box-shadow: 0 0 0 0 rgba(94, 194, 168, 0.45);
+        box-shadow: 0 0 0 0 rgba(var(--success-rgb), 0.45);
     }
 
     70% {
-        box-shadow: 0 0 0 18px rgba(94, 194, 168, 0);
+        box-shadow: 0 0 0 18px rgba(var(--success-rgb), 0);
     }
 
     100% {
-        box-shadow: 0 0 0 0 rgba(94, 194, 168, 0);
+        box-shadow: 0 0 0 0 rgba(var(--success-rgb), 0);
     }
 }
 
 @media (prefers-reduced-motion: reduce) {
     .pulse {
         animation: none;
-        box-shadow: 0 0 0 0 rgba(94, 194, 168, 0);
+        box-shadow: 0 0 0 0 rgba(var(--success-rgb), 0);
     }
 }

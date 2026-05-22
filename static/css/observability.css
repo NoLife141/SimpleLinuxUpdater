@@ -19,7 +19,7 @@
 
 .kpi-value.accent,
 .ok {
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .bad {
