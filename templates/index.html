@@ -167,13 +167,17 @@
                                     <tr>
                                         <th class="select-col"></th>
                                         <th class="sortable name-col resizable" data-sort-key="name" data-sort-dir="asc" aria-sort="ascending">
-                                            <span class="col-title">Server</span>
-                                            <span class="sort-indicator" aria-hidden="true">▲</span>
+                                            <button type="button" class="sort-header-btn" data-sort-trigger="name" aria-label="Sort by Server">
+                                                <span class="col-title">Server</span>
+                                                <span class="sort-indicator" aria-hidden="true">▲</span>
+                                            </button>
                                             <span class="col-resize-handle" data-col-key="name" aria-hidden="true"></span>
                                         </th>
                                         <th class="sortable status-col" data-sort-key="status" aria-sort="none">
-                                            <span class="col-title">Status</span>
-                                            <span class="sort-indicator" aria-hidden="true"></span>
+                                            <button type="button" class="sort-header-btn" data-sort-trigger="status" aria-label="Sort by Status">
+                                                <span class="col-title">Status</span>
+                                                <span class="sort-indicator" aria-hidden="true"></span>
+                                            </button>
                                         </th>
                                         <th class="risk-col">
                                             <span class="col-title">Risk</span>
@@ -294,7 +298,7 @@
     </div>
 
     <div class="drawer-backdrop" id="status-drawer-backdrop"></div>
-    <aside class="side-drawer" id="status-drawer" aria-hidden="true">
+    <aside class="side-drawer" id="status-drawer" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="status-drawer-title" tabindex="-1">
         <div class="drawer-header">
             <div>
                 <h3 class="drawer-title" id="status-drawer-title">Server details</h3>

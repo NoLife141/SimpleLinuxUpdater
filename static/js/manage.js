@@ -546,16 +546,28 @@ function resetFileInputLabel(input) {
             }
         });
 
-        document.querySelectorAll('#manage-servers-table th.sortable').forEach(th => {
+        const applyManageSortFromHeader = (th) => {
+            if (!th) return;
+            const key = th.dataset.sortKey;
+            if (sortKey === key) {
+                sortDir = sortDir === "asc" ? "desc" : "asc";
+            } else {
+                sortKey = key;
+                sortDir = "asc";
+            }
+            renderTable();
+        };
+
+        document.querySelectorAll('#manage-servers-table th.sortable').forEach((th) => {
+            const trigger = th.querySelector('.sort-header-btn');
+            if (trigger) {
+                trigger.addEventListener('click', () => {
+                    applyManageSortFromHeader(th);
+                });
+                return;
+            }
             th.addEventListener('click', () => {
-                const key = th.dataset.sortKey;
-                if (sortKey === key) {
-                    sortDir = sortDir === "asc" ? "desc" : "asc";
-                } else {
-                    sortKey = key;
-                    sortDir = "asc";
-                }
-                renderTable();
+                applyManageSortFromHeader(th);
             });
         });
 
@@ -1199,22 +1211,25 @@ function resetFileInputLabel(input) {
                 closeHostKeyModal(false);
             }
 	        });
-	        document.addEventListener('keydown', (e) => {
-	            if (e.key === 'Tab' && trapActiveModalFocus(e)) {
-	                return;
-	            }
-	            if (e.key === 'Escape') {
-	                const hostKeyModal = document.getElementById('hostkey-modal');
-	                if (hostKeyModal && hostKeyModal.classList.contains('active')) {
-	                    closeHostKeyModal(false);
-	                    return;
-	                }
-	                const editModal = document.getElementById('edit-modal');
-	                if (editModal && editModal.classList.contains('active')) {
-	                    closeEditModal();
-	                }
-	            }
-	        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab' && trapActiveModalFocus(e)) {
+                return;
+            }
+            if (e.key === 'Escape') {
+                const hostKeyModal = document.getElementById('hostkey-modal');
+                if (hostKeyModal && hostKeyModal.classList.contains('active')) {
+                    closeHostKeyModal(false);
+                    return;
+                }
+                const editModal = document.getElementById('edit-modal');
+                if (editModal && editModal.classList.contains('active')) {
+                    if (editSaveInProgress) {
+                        return;
+                    }
+                    closeEditModal();
+                }
+            }
+        });
 
         async function uploadGlobalKey() {
             const input = document.getElementById('global-key-file');

@@ -27,6 +27,7 @@ const LOG_BOTTOM_THRESHOLD = 20;
         let passwordResolve = null;
         let passwordReject = null;
         let passwordModalPreviousFocus = null;
+        let drawerPreviousFocus = null;
         let suppressSortClickUntil = 0;
         let actionInteractionDepth = 0;
         let actionInteractionReleaseTimer = null;
@@ -1207,11 +1208,23 @@ const LOG_BOTTOM_THRESHOLD = 20;
                 drawerLogScrollTop = 0;
                 drawerPendingScrollTop = 0;
             }
+            if (!drawerOpen) {
+                drawerPreviousFocus = document.activeElement;
+            }
             drawerOpen = true;
             drawerServerName = name;
             drawerTab = nextTab;
             document.body.classList.add('drawer-open');
             renderDrawer();
+            window.setTimeout(() => {
+                const drawer = document.getElementById('status-drawer');
+                if (!drawerOpen || !drawer) return;
+                const focusable = drawerFocusableElements(drawer);
+                const target = focusable[0] || drawer;
+                if (target && typeof target.focus === 'function') {
+                    target.focus({ preventScroll: true });
+                }
+            }, 0);
         }
 
         function closeDrawer() {
@@ -1222,6 +1235,11 @@ const LOG_BOTTOM_THRESHOLD = 20;
             backdrop.classList.remove('open');
             drawer.setAttribute('aria-hidden', 'true');
             document.body.classList.remove('drawer-open');
+            const previous = drawerPreviousFocus;
+            drawerPreviousFocus = null;
+            if (previous && document.contains(previous) && typeof previous.focus === 'function') {
+                window.setTimeout(() => previous.focus({ preventScroll: true }), 0);
+            }
         }
 
         function setDrawerTab(tab) {
@@ -1532,20 +1550,32 @@ const LOG_BOTTOM_THRESHOLD = 20;
             applyHoverClass();
         });
 
-        document.querySelectorAll('#servers-table th.sortable').forEach(th => {
+        const applySortFromHeader = (th) => {
+            if (!th) return;
+            if (Date.now() < suppressSortClickUntil) {
+                return;
+            }
+            const key = th.dataset.sortKey;
+            if (sortKey === key) {
+                sortDir = sortDir === "asc" ? "desc" : "asc";
+            } else {
+                sortKey = key;
+                sortDir = "asc";
+            }
+            updateSortIndicators();
+            renderTable();
+        };
+
+        document.querySelectorAll('#servers-table th.sortable').forEach((th) => {
+            const trigger = th.querySelector('.sort-header-btn');
+            if (trigger) {
+                trigger.addEventListener('click', () => {
+                    applySortFromHeader(th);
+                });
+                return;
+            }
             th.addEventListener('click', () => {
-                if (Date.now() < suppressSortClickUntil) {
-                    return;
-                }
-                const key = th.dataset.sortKey;
-                if (sortKey === key) {
-                    sortDir = sortDir === "asc" ? "desc" : "asc";
-                } else {
-                    sortKey = key;
-                    sortDir = "asc";
-                }
-                updateSortIndicators();
-                renderTable();
+                applySortFromHeader(th);
             });
         });
 
@@ -1739,6 +1769,50 @@ const LOG_BOTTOM_THRESHOLD = 20;
             return false;
         }
 
+        function drawerFocusableElements(drawer) {
+            if (!drawer) return [];
+            return Array.from(drawer.querySelectorAll([
+                'button:not([disabled])',
+                'input:not([disabled]):not([type="hidden"])',
+                'select:not([disabled])',
+                'textarea:not([disabled])',
+                'a[href]',
+                '[tabindex]:not([tabindex="-1"])'
+            ].join(','))).filter((el) => {
+                return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            });
+        }
+
+        function trapDrawerFocus(event) {
+            if (!drawerOpen) return false;
+            const drawer = document.getElementById('status-drawer');
+            if (!drawer || drawer.getAttribute('aria-hidden') === 'true') return false;
+            const focusable = drawerFocusableElements(drawer);
+            if (!focusable.length) {
+                event.preventDefault();
+                drawer.focus({ preventScroll: true });
+                return true;
+            }
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (!drawer.contains(document.activeElement)) {
+                event.preventDefault();
+                first.focus({ preventScroll: true });
+                return true;
+            }
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus({ preventScroll: true });
+                return true;
+            }
+            if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus({ preventScroll: true });
+                return true;
+            }
+            return false;
+        }
+
         function promptPassword(message) {
             const backdrop = document.getElementById('password-modal');
             const input = document.getElementById('password-modal-input');
@@ -1814,15 +1888,27 @@ const LOG_BOTTOM_THRESHOLD = 20;
 
         window.addEventListener('keydown', (e) => {
             const backdrop = document.getElementById('password-modal');
-            if (!backdrop || !backdrop.classList.contains('active')) return;
-            if (e.key === 'Tab' && trapPasswordModalFocus(e)) {
+            if (backdrop && backdrop.classList.contains('active')) {
+                if (e.key === 'Tab') {
+                    if (trapPasswordModalFocus(e)) {
+                        e.stopImmediatePropagation();
+                    }
+                    return;
+                }
+                if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopImmediatePropagation();
+                    document.getElementById('password-modal-cancel').click();
+                    return;
+                }
+            }
+            if (e.key === 'Tab' && trapDrawerFocus(e)) {
                 e.stopImmediatePropagation();
                 return;
             }
-            if (e.key === 'Escape') {
+            if (e.key === 'Escape' && drawerOpen) {
                 e.preventDefault();
-                e.stopImmediatePropagation();
-                document.getElementById('password-modal-cancel').click();
+                closeDrawer();
             }
         });
 
@@ -1886,13 +1972,6 @@ const LOG_BOTTOM_THRESHOLD = 20;
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 resetActionInteraction();
-            }
-        });
-
-        window.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && drawerOpen) {
-                e.preventDefault();
-                closeDrawer();
             }
         });
 
