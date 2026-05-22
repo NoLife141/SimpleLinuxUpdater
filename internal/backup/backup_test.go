@@ -27,6 +27,45 @@ func TestValidatePassphrase(t *testing.T) {
 	}
 }
 
+func TestCreateDBSnapshotSupportsApostropheInTempPath(t *testing.T) {
+	root := t.TempDir()
+	quotedTempRoot := filepath.Join(root, "tmp-with-'quote")
+	if err := os.MkdirAll(quotedTempRoot, 0700); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", quotedTempRoot, err)
+	}
+	t.Setenv("TMPDIR", quotedTempRoot)
+
+	dbPath := filepath.Join(root, "servers.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	if _, err := db.Exec("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"); err != nil {
+		t.Fatalf("create sample table: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO sample(value) VALUES (?)", "ok"); err != nil {
+		t.Fatalf("seed sample row: %v", err)
+	}
+
+	service := NewService(ServiceDeps{
+		DB:   func() *sql.DB { return db },
+		Logf: func(string, ...any) {},
+	})
+	snapshot, err := service.CreateDBSnapshot()
+	if err != nil {
+		t.Fatalf("CreateDBSnapshot() error = %v", err)
+	}
+	if len(snapshot) == 0 {
+		t.Fatalf("CreateDBSnapshot() returned empty snapshot")
+	}
+	if !bytes.HasPrefix(snapshot, []byte("SQLite format 3\x00")) {
+		t.Fatalf("CreateDBSnapshot() missing sqlite header")
+	}
+}
+
 func TestPayloadRoundTrip(t *testing.T) {
 	files := map[string][]byte{
 		"servers.db":  []byte("sqlite-bytes"),

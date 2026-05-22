@@ -258,6 +258,10 @@ func (deps ServiceDeps) withDefaults() ServiceDeps {
 	return deps
 }
 
+func sqliteStringLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
 func (s *Service) Status() StatusResponse {
 	khPath, khExists := KnownHostsBackupPath(s.deps.KnownHostsWritePath, s.deps.DBPath)
 	return StatusResponse{
@@ -283,7 +287,7 @@ func (s *Service) CreateDBSnapshot() ([]byte, error) {
 		return nil, err
 	}
 
-	vacuumSQL := "VACUUM INTO '" + tmpPath + "'"
+	vacuumSQL := "VACUUM INTO " + sqliteStringLiteral(tmpPath)
 	if _, err := s.deps.DB().Exec(vacuumSQL); err != nil {
 		return nil, fmt.Errorf("snapshot database: %w", err)
 	}
@@ -390,7 +394,7 @@ func ValidateSnapshotPath(path string) error {
 	if cleanPath == "" || !filepath.IsAbs(cleanPath) {
 		return errors.New("invalid backup snapshot path")
 	}
-	if strings.ContainsRune(cleanPath, '\'') || strings.ContainsAny(cleanPath, "\r\n") {
+	if strings.ContainsAny(cleanPath, "\r\n") {
 		return errors.New("invalid backup snapshot path")
 	}
 	tempRoot := filepath.Clean(os.TempDir())
