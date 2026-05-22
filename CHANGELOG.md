@@ -6,6 +6,20 @@ The format is inspired by Keep a Changelog, and this project uses Semantic Versi
 
 ## [Unreleased]
 
+## [v0.2.6] - 2026-05-22
+
+### Changed
+
+- Refresh the dashboard, auth, admin, observability, setup, and maintenance screens with a VS Code-inspired dark theme.
+- Simplify the update approval confirmation flow so the UI no longer requires redundant confirmation handling.
+
+### Fixed
+
+- Parse apt simulation summary blocks when structured `Inst` lines are unavailable, so pending updates are still discovered reliably.
+- Enrich summary-only update discovery with `apt list --upgradable` metadata for source, version, and security classification.
+- Preserve architecture-qualified package selectors during update discovery and security-only approval.
+- Run the simulated apt listing command without wrapping `LC_ALL` through `sudo`, avoiding `sudo SETENV` failures on non-root SSH sessions.
+
 ## [v0.2.5] - 2026-05-21
 
 ### Fixed
