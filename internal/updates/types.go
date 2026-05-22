@@ -15,7 +15,8 @@ var (
 	AptUpdateCmd         = RootOrSudoCommand("apt-get update")
 	AptUpgradeCmd        = RootOrSudoCommand("apt-get -y upgrade")
 	AptAutoremoveCmd     = RootOrSudoCommand("apt-get -y autoremove")
-	AptListUpgradableCmd = RootOrSudoCommand("apt-get -s upgrade")
+	AptListUpgradableCmd = "LC_ALL=C apt-get -s upgrade"
+	AptListMetadataCmd   = "LC_ALL=C apt list --upgradable 2>/dev/null"
 )
 
 const (

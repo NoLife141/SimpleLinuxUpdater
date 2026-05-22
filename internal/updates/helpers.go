@@ -18,7 +18,7 @@ import (
 
 var (
 	cveRegex                = regexp.MustCompile(`CVE-[0-9]{4}-[0-9]+`)
-	securitySuiteTokenRegex = regexp.MustCompile(`(?:^|[\s/:])[a-z0-9][a-z0-9+.-]*-security(?:$|[\s/\],:\)])`)
+	securitySuiteTokenRegex = regexp.MustCompile(`(?:^|[\s/,:])[a-z0-9][a-z0-9+.-]*-security(?:$|[\s/\],:\)])`)
 )
 
 func UpdateCompletionOutcome(finalStatus string) string {
@@ -183,7 +183,278 @@ func ParseUpgradableEntries(stdout string) ([]servers.PendingUpdate, []string, e
 		upgradable = append(upgradable, entry)
 		pendingUpdates = append(pendingUpdates, ParsePendingUpdateEntry(entry))
 	}
+	if len(upgradable) > 0 {
+		return pendingUpdates, upgradable, nil
+	}
+	for _, pkg := range parseAptUpgradeSummaryPackages(lines) {
+		upgradable = append(upgradable, pkg)
+		pendingUpdates = append(pendingUpdates, ParsePendingUpdateEntry(pkg))
+	}
 	return pendingUpdates, upgradable, nil
+}
+
+func NeedsAptListMetadata(pendingUpdates []servers.PendingUpdate) bool {
+	if len(pendingUpdates) == 0 {
+		return false
+	}
+	for _, update := range pendingUpdates {
+		if strings.TrimSpace(update.Source) != "" || strings.TrimSpace(update.CandidateVersion) != "" || strings.TrimSpace(update.CurrentVersion) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func ParseAptListMetadataEntries(stdout string, packageNames []string) ([]servers.PendingUpdate, []string) {
+	requested := packageSelectorsFromEntries(packageNames)
+	allowedExact := make(map[string]struct{}, len(requested))
+	allowedBase := make(map[string]struct{}, len(requested))
+	for _, selector := range requested {
+		if selector.arch == "" {
+			allowedBase[selector.base] = struct{}{}
+			continue
+		}
+		allowedExact[selector.selector] = struct{}{}
+	}
+	parsedBySelector := make(map[string]servers.PendingUpdate)
+	rawBySelector := make(map[string]string)
+	fallbackOrder := make([]packageSelector, 0)
+	for _, line := range strings.Split(stdout, "\n") {
+		update, ok := ParseAptListMetadataEntry(line)
+		if !ok {
+			continue
+		}
+		selector := aptListMetadataSelector(update)
+		if selector.base == "" {
+			continue
+		}
+		key := selector.base
+		if len(requested) > 0 {
+			if _, exists := allowedExact[selector.selector]; exists {
+				key = selector.selector
+				update.Package = selector.selector
+			} else if _, exists := allowedBase[selector.base]; exists {
+				key = selector.base
+			} else {
+				continue
+			}
+		}
+		if _, exists := parsedBySelector[key]; exists {
+			continue
+		}
+		fallbackOrder = append(fallbackOrder, packageSelector{selector: key, base: selector.base, arch: selector.arch})
+		parsedBySelector[key] = update
+		rawBySelector[key] = update.Raw
+	}
+	order := requested
+	if len(order) == 0 {
+		order = fallbackOrder
+	}
+	pendingUpdates := make([]servers.PendingUpdate, 0, len(order))
+	upgradable := make([]string, 0, len(order))
+	for _, selector := range order {
+		key := selector.selector
+		update, exists := parsedBySelector[key]
+		if !exists {
+			continue
+		}
+		pendingUpdates = append(pendingUpdates, update)
+		upgradable = append(upgradable, rawBySelector[key])
+	}
+	return pendingUpdates, upgradable
+}
+
+func MergePendingUpdatesWithMetadata(summaryPending []servers.PendingUpdate, metadataPending []servers.PendingUpdate) ([]servers.PendingUpdate, []string) {
+	if len(summaryPending) == 0 {
+		return nil, nil
+	}
+	metadataBySelector := make(map[string]servers.PendingUpdate, len(metadataPending))
+	metadataByBase := make(map[string]servers.PendingUpdate, len(metadataPending))
+	for _, update := range metadataPending {
+		selector := packageSelectorFromPackage(update.Package)
+		if selector.base == "" {
+			continue
+		}
+		metadataBySelector[selector.selector] = update
+		if _, exists := metadataByBase[selector.base]; !exists {
+			metadataByBase[selector.base] = update
+		}
+	}
+	mergedPending := make([]servers.PendingUpdate, 0, len(summaryPending))
+	mergedUpgradable := make([]string, 0, len(summaryPending))
+	for _, update := range summaryPending {
+		selector := packageSelectorFromPackage(update.Package)
+		metadata, ok := metadataBySelector[selector.selector]
+		if !ok && selector.arch == "" {
+			metadata, ok = metadataByBase[selector.base]
+		}
+		if ok {
+			metadata.Package = update.Package
+			mergedPending = append(mergedPending, metadata)
+			mergedUpgradable = append(mergedUpgradable, metadata.Raw)
+			continue
+		}
+		if strings.TrimSpace(update.Raw) == "" {
+			update.Raw = selector.selector
+		}
+		mergedPending = append(mergedPending, update)
+		mergedUpgradable = append(mergedUpgradable, update.Raw)
+	}
+	return mergedPending, mergedUpgradable
+}
+
+func ParseAptListMetadataEntry(line string) (servers.PendingUpdate, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.EqualFold(trimmed, "Listing...") {
+		return servers.PendingUpdate{}, false
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) < 3 {
+		return servers.PendingUpdate{}, false
+	}
+	nameAndSource := fields[0]
+	slash := strings.Index(nameAndSource, "/")
+	if slash <= 0 {
+		return servers.PendingUpdate{}, false
+	}
+	pkg := strings.TrimSpace(nameAndSource[:slash])
+	pkg = normalizePackageName(pkg)
+	source := strings.TrimSpace(nameAndSource[slash+1:])
+	if pkg == "" {
+		return servers.PendingUpdate{}, false
+	}
+	currentVersion := ""
+	if open := strings.Index(trimmed, "[upgradable from:"); open >= 0 {
+		start := open + len("[upgradable from:")
+		if close := strings.Index(trimmed[start:], "]"); close >= 0 {
+			currentVersion = strings.TrimSpace(trimmed[start : start+close])
+		}
+	}
+	update := servers.PendingUpdate{
+		Package:          pkg,
+		CurrentVersion:   currentVersion,
+		CandidateVersion: fields[1],
+		Source:           source,
+		Raw:              trimmed,
+		CVEs:             []string{},
+	}
+	update.Security = IsSecurityUpdate(update.Raw, update.Source)
+	return update, true
+}
+
+type packageSelector struct {
+	selector string
+	base     string
+	arch     string
+}
+
+func packageSelectorsFromEntries(entries []string) []packageSelector {
+	seen := make(map[string]struct{}, len(entries))
+	selectors := make([]packageSelector, 0, len(entries))
+	for _, entry := range entries {
+		selector := packageSelectorFromPackage(entry)
+		if selector.base == "" {
+			continue
+		}
+		if _, exists := seen[selector.selector]; exists {
+			continue
+		}
+		seen[selector.selector] = struct{}{}
+		selectors = append(selectors, selector)
+	}
+	return selectors
+}
+
+func aptListMetadataSelector(update servers.PendingUpdate) packageSelector {
+	selector := packageSelectorFromPackage(update.Package)
+	if selector.base == "" || selector.arch != "" {
+		return selector
+	}
+	arch := aptListMetadataArch(update.Raw)
+	if arch == "" {
+		return selector
+	}
+	selector.arch = arch
+	selector.selector = selector.base + ":" + arch
+	return selector
+}
+
+func aptListMetadataArch(raw string) string {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) < 3 {
+		return ""
+	}
+	arch := strings.TrimSpace(fields[2])
+	if arch == "" || strings.ContainsAny(arch, "/[]") {
+		return ""
+	}
+	return arch
+}
+
+func packageSelectorFromPackage(entry string) packageSelector {
+	fields := strings.Fields(strings.TrimSpace(entry))
+	if len(fields) == 0 {
+		return packageSelector{}
+	}
+	pkg := fields[0]
+	if slash := strings.Index(pkg, "/"); slash > 0 {
+		pkg = pkg[:slash]
+	}
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return packageSelector{}
+	}
+	selector := packageSelector{selector: pkg, base: pkg}
+	if colon := strings.Index(pkg, ":"); colon > 0 {
+		selector.base = strings.TrimSpace(pkg[:colon])
+		selector.arch = strings.TrimSpace(pkg[colon+1:])
+		if selector.base == "" || selector.arch == "" {
+			return packageSelector{}
+		}
+		selector.selector = selector.base + ":" + selector.arch
+	}
+	return selector
+}
+
+func normalizePackageName(pkg string) string {
+	trimmed := strings.TrimSpace(pkg)
+	if trimmed == "" {
+		return ""
+	}
+	if colon := strings.Index(trimmed, ":"); colon > 0 {
+		return strings.TrimSpace(trimmed[:colon])
+	}
+	return trimmed
+}
+
+func parseAptUpgradeSummaryPackages(lines []string) []string {
+	packages := make([]string, 0)
+	inUpgradeBlock := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if lower == "the following packages will be upgraded:" {
+			inUpgradeBlock = true
+			continue
+		}
+		if !inUpgradeBlock {
+			continue
+		}
+		if trimmed == "" {
+			if len(packages) > 0 {
+				break
+			}
+			continue
+		}
+		if len(packages) > 0 && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			break
+		}
+		if strings.HasPrefix(lower, "the following ") || strings.Contains(lower, " upgraded,") || strings.HasPrefix(lower, "need to get ") || strings.HasPrefix(lower, "after this operation") {
+			break
+		}
+		packages = append(packages, strings.Fields(trimmed)...)
+	}
+	return packages
 }
 
 func ParsePendingUpdateEntry(entry string) servers.PendingUpdate {

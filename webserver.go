@@ -90,6 +90,7 @@ var aptUpdateCmd = updatespkg.AptUpdateCmd
 var aptUpgradeCmd = updatespkg.AptUpgradeCmd
 var aptAutoremoveCmd = updatespkg.AptAutoremoveCmd
 var aptListUpgradableCmd = updatespkg.AptListUpgradableCmd
+var aptListMetadataCmd = updatespkg.AptListMetadataCmd
 
 const defaultSSHCommandTimeout = 5 * time.Minute
 const minSSHCommandTimeout = 1 * time.Second
@@ -2154,7 +2155,20 @@ func getUpgradable(client sshConnection, timeout time.Duration) ([]PendingUpdate
 	if err != nil {
 		return nil, nil, markRetryableFromOutput(err, stdout+"\n"+stderr)
 	}
-	return parseUpgradableEntries(stdout)
+	pending, upgradable, err := parseUpgradableEntries(stdout)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !updatespkg.NeedsAptListMetadata(pending) {
+		return pending, upgradable, nil
+	}
+	metadataStdout, _, metadataErr := runSSHCommandWithTimeout(client, aptListMetadataCmd, nil, timeout)
+	if metadataErr != nil {
+		return pending, upgradable, nil
+	}
+	metadataPending, _ := updatespkg.ParseAptListMetadataEntries(metadataStdout, upgradable)
+	mergedPending, mergedUpgradable := updatespkg.MergePendingUpdatesWithMetadata(pending, metadataPending)
+	return mergedPending, mergedUpgradable, nil
 }
 
 func parseUpgradableEntries(stdout string) ([]PendingUpdate, []string, error) {

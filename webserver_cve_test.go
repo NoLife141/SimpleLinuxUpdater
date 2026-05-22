@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -59,6 +60,179 @@ func TestParseUpgradableEntriesStructured(t *testing.T) {
 	}
 	if pending[1].Package != "bash" || pending[1].Security {
 		t.Fatalf("unexpected second parsed package: %+v", pending[1])
+	}
+}
+
+func TestGetUpgradableEnrichesSummaryFallbackWithAptListMetadata(t *testing.T) {
+	summaryStdout := strings.Join([]string{
+		"Reading package lists... Done",
+		"Building dependency tree... Done",
+		"The following packages will be upgraded:",
+		"  openssl bash",
+		"2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+	}, "\n")
+	metadataStdout := strings.Join([]string{
+		"Listing...",
+		"bash/stable 5.2.15-2+b8 amd64 [upgradable from: 5.2.15-2+b7]",
+		"openssl/stable-security 3.0.17-1~deb12u2 amd64 [upgradable from: 3.0.16-1~deb12u1]",
+	}, "\n")
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			aptListUpgradableCmd: {stdout: summaryStdout},
+			aptListMetadataCmd:   {stdout: metadataStdout},
+		},
+	}
+
+	pending, upgradable, err := getUpgradable(conn, time.Second)
+	if err != nil {
+		t.Fatalf("getUpgradable() error = %v", err)
+	}
+	if len(pending) != 2 || len(upgradable) != 2 {
+		t.Fatalf("len(pending)=%d len(upgradable)=%d, want 2/2", len(pending), len(upgradable))
+	}
+	if pending[0].Package != "openssl" || pending[0].Source != "stable-security" || !pending[0].Security {
+		t.Fatalf("first pending update = %+v, want security metadata for openssl", pending[0])
+	}
+	if got := updatespkg.SecurityPackagesFromPendingUpdates(pending); !reflect.DeepEqual(got, []string{"openssl"}) {
+		t.Fatalf("SecurityPackagesFromPendingUpdates() = %#v, want openssl", got)
+	}
+	if !reflect.DeepEqual(conn.commands, []string{aptListUpgradableCmd, aptListMetadataCmd}) {
+		t.Fatalf("commands = %#v, want apt simulation then apt-list metadata", conn.commands)
+	}
+}
+
+func TestGetUpgradablePreservesArchQualifiedSummaryPackageWhenEnriched(t *testing.T) {
+	summaryStdout := strings.Join([]string{
+		"Reading package lists... Done",
+		"The following packages will be upgraded:",
+		"  openssl:i386 bash",
+		"2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+	}, "\n")
+	metadataStdout := strings.Join([]string{
+		"Listing...",
+		"bash/stable 5.2.15-2+b8 amd64 [upgradable from: 5.2.15-2+b7]",
+		"openssl/stable 3.0.17-1~deb12u2 amd64 [upgradable from: 3.0.16-1~deb12u1]",
+		"openssl/stable-security 3.0.18-1~deb12u2 i386 [upgradable from: 3.0.16-1~deb12u1]",
+	}, "\n")
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			aptListUpgradableCmd: {stdout: summaryStdout},
+			aptListMetadataCmd:   {stdout: metadataStdout},
+		},
+	}
+
+	pending, _, err := getUpgradable(conn, time.Second)
+	if err != nil {
+		t.Fatalf("getUpgradable() error = %v", err)
+	}
+	if pending[0].Package != "openssl:i386" || pending[0].CandidateVersion != "3.0.18-1~deb12u2" || pending[0].Source != "stable-security" || !pending[0].Security {
+		t.Fatalf("first pending update = %+v, want security metadata with original arch-qualified package", pending[0])
+	}
+	if got := updatespkg.SecurityPackagesFromPendingUpdates(pending); !reflect.DeepEqual(got, []string{"openssl:i386"}) {
+		t.Fatalf("SecurityPackagesFromPendingUpdates() = %#v, want arch-qualified package selector", got)
+	}
+}
+
+func TestGetUpgradableKeepsSummaryFallbackWhenAptMetadataIsPartial(t *testing.T) {
+	summaryStdout := strings.Join([]string{
+		"Reading package lists... Done",
+		"Building dependency tree... Done",
+		"The following packages will be upgraded:",
+		"  openssl bash",
+		"2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+	}, "\n")
+	metadataStdout := strings.Join([]string{
+		"Listing...",
+		"openssl/stable-security 3.0.17-1~deb12u2 amd64 [upgradable from: 3.0.16-1~deb12u1]",
+	}, "\n")
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			aptListUpgradableCmd: {stdout: summaryStdout},
+			aptListMetadataCmd:   {stdout: metadataStdout},
+		},
+	}
+
+	pending, upgradable, err := getUpgradable(conn, time.Second)
+	if err != nil {
+		t.Fatalf("getUpgradable() error = %v", err)
+	}
+	if len(pending) != 2 || len(upgradable) != 2 {
+		t.Fatalf("len(pending)=%d len(upgradable)=%d, want 2/2", len(pending), len(upgradable))
+	}
+	if pending[0].Package != "openssl" || pending[0].Source != "stable-security" || !pending[0].Security {
+		t.Fatalf("pending[0] = %+v, want enriched openssl metadata", pending[0])
+	}
+	if pending[1].Package != "bash" || pending[1].Source != "" || pending[1].Security {
+		t.Fatalf("pending[1] = %+v, want summary fallback bash", pending[1])
+	}
+	if !strings.Contains(upgradable[0], "openssl/stable-security") || upgradable[1] != "bash" {
+		t.Fatalf("upgradable = %#v, want metadata openssl and fallback bash", upgradable)
+	}
+	if !reflect.DeepEqual(conn.commands, []string{aptListUpgradableCmd, aptListMetadataCmd}) {
+		t.Fatalf("commands = %#v, want apt simulation then apt-list metadata", conn.commands)
+	}
+}
+
+func TestGetUpgradableFallsBackWhenAptMetadataCommandFails(t *testing.T) {
+	summaryStdout := strings.Join([]string{
+		"Reading package lists... Done",
+		"The following packages will be upgraded:",
+		"  openssl bash",
+		"2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+	}, "\n")
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			aptListUpgradableCmd: {stdout: summaryStdout},
+			aptListMetadataCmd:   {err: fakeExitStatusError{code: 127, msg: "apt list failed"}},
+		},
+	}
+
+	pending, upgradable, err := getUpgradable(conn, time.Second)
+	if err != nil {
+		t.Fatalf("getUpgradable() error = %v", err)
+	}
+	if got := updatespkg.PackageNamesFromPendingUpdates(pending); !reflect.DeepEqual(got, []string{"bash", "openssl"}) {
+		t.Fatalf("PackageNamesFromPendingUpdates() = %#v, want summary fallback packages", got)
+	}
+	if !reflect.DeepEqual(upgradable, []string{"openssl", "bash"}) {
+		t.Fatalf("upgradable = %#v, want summary fallback list", upgradable)
+	}
+	if !reflect.DeepEqual(conn.commands, []string{aptListUpgradableCmd, aptListMetadataCmd}) {
+		t.Fatalf("commands = %#v, want apt simulation then apt-list metadata", conn.commands)
+	}
+}
+
+func TestGetUpgradableRequestsMetadataEvenWhenSummaryPackageLooksSecurityTagged(t *testing.T) {
+	summaryStdout := strings.Join([]string{
+		"Reading package lists... Done",
+		"The following packages will be upgraded:",
+		"  jammy-security bash",
+		"2 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.",
+	}, "\n")
+	metadataStdout := strings.Join([]string{
+		"Listing...",
+		"jammy-security/stable 1.2 amd64 [upgradable from: 1.1]",
+		"bash/stable 5.2.15-2+b8 amd64 [upgradable from: 5.2.15-2+b7]",
+	}, "\n")
+	conn := &scriptedSSHConnection{
+		responses: map[string]scriptedResponse{
+			aptListUpgradableCmd: {stdout: summaryStdout},
+			aptListMetadataCmd:   {stdout: metadataStdout},
+		},
+	}
+
+	pending, _, err := getUpgradable(conn, time.Second)
+	if err != nil {
+		t.Fatalf("getUpgradable() error = %v", err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("len(pending)=%d, want 2", len(pending))
+	}
+	if pending[0].Package != "jammy-security" || pending[0].Source != "stable" || pending[0].CandidateVersion != "1.2" {
+		t.Fatalf("pending[0] = %+v, want metadata-enriched jammy-security package", pending[0])
+	}
+	if !reflect.DeepEqual(conn.commands, []string{aptListUpgradableCmd, aptListMetadataCmd}) {
+		t.Fatalf("commands = %#v, want apt simulation then apt-list metadata", conn.commands)
 	}
 }
 
